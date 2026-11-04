@@ -416,15 +416,38 @@ The JSON result includes `inode`, `version`, `backend`, `source_backend` and
 `status`: `repaired`, or `already_healthy` with a null source for a verified no-op.
 `repaired` can include another concurrent repair winning the installation race.
 
-Missing mappings/stores, undeclared destinations, corrupt existing objects and
-absence of a healthy source fail the command. Existing corrupt objects are not
-deleted or replaced. The command does not initialize directories or add replica
+Missing mappings/stores, undeclared destinations and absence of a healthy source
+fail the command. Corrupt existing objects are rejected by default. The command
+does not initialize directories or add replica
 locations. A failure after installation may leave a valid object; retrying is
 safe. Concurrent publication/deletion can make the pinned version historical,
 but repair never republishes it or recreates namespace entries. Retry after
 checking the reported version if the current file changed. Backend mount identity
-is still trusted configuration; automatic repair, corrupt-object replacement and
-coordination with future garbage collection remain pending.
+is still trusted configuration; automatic repair and coordination with future
+garbage collection remain pending.
+
+To explicitly restore a checksum-invalid object on the selected backend:
+
+```sh
+zig-out/bin/nas-fs repair-file "$ENDPOINTS" backends.json 2 1 --replace-corrupt
+zig-out/bin/nas-fs check-file "$ENDPOINTS" backends.json 2
+```
+
+`--replace-corrupt` enables atomic replacement after the source and staged copy
+have passed full size/SHA-256 verification, file sync and readback. The target is
+rechecked after staging: an already healthy object is kept; only a checksum
+mismatch permits replacing the object name. Other errors fail without replacing
+it. The installed and staging directories are synced before success. The flag
+also retains normal missing-object repair behavior. Uploads and SMB writes never
+enable replacement.
+
+Concurrent repairs install equivalent bytes for the same immutable version.
+Replacement does not rewrite the old inode: existing readers retain their old
+descriptor, including its corruption/errors, while new opens use the repaired
+copy. Reopen a failed read after repair. Metadata, version IDs and namespace
+entries do not change. No bad-object archive is retained. Installed objects may
+remain after an uncertain failure; retry and check their health. This does not
+provide physical NAS power-loss guarantees or coordinate with out-of-band writers.
 
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object

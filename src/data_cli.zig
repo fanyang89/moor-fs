@@ -125,6 +125,7 @@ const ReplicaCheck = struct {
 };
 
 pub fn repair(ctx: zli.CommandContext) !void {
+    const replace_corrupt = ctx.flag("replace-corrupt", bool);
     const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
     const backend = try std.fmt.parseUnsigned(u64, ctx.getArg("backend").?, 10);
     const config = try mappings(ctx);
@@ -136,6 +137,7 @@ pub fn repair(ctx: zli.CommandContext) !void {
     defer target.close();
     const existing: ?std.Io.File = target.openVerified(version) catch |err| switch (err) {
         error.FileNotFound => null,
+        error.ChecksumMismatch => if (replace_corrupt) null else return err,
         else => return err,
     };
     if (existing) |file| {
@@ -150,9 +152,9 @@ pub fn repair(ctx: zli.CommandContext) !void {
         defer store.close();
         const source = store.openVerified(version) catch continue;
         defer source.close(ctx.io);
-        // put rechecks copied bytes, syncs/readbacks staging and installs without replacement.
+        // Both paths verify staging before installation; replacement is explicit.
         // A concurrent publication or unlink cannot change this version's object name.
-        try target.put(source, version);
+        if (replace_corrupt) try target.repairCorrupt(source, version) else try target.put(source, version);
         try repairResult(ctx, version, backend, source_backend);
         return;
     }

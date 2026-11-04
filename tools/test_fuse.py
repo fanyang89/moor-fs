@@ -148,7 +148,13 @@ def test_mounts(executable, directory, endpoints, run, leader, stop, start, smb=
         with open(first / "readable", "rb", buffering=0) as pinned:
             copies[0].write_bytes(b"")
             expect_error(lambda: os.pread(pinned.fileno(), 30, 0), errno.EIO)
-        copies[0].write_bytes(replacement)
+            result = run(
+                "repair-file", endpoints, config, inode, 1, "--replace-corrupt"
+            )
+            assert result["status"] == "repaired", result
+            assert (second / "readable").read_bytes() == replacement
+            # Replacement fixes new opens, never silently swaps an existing descriptor.
+            expect_error(lambda: os.pread(pinned.fileno(), 30, 0), errno.EIO)
 
         with open(first / "readable", "rb", buffering=0) as pinned:
             old = leader()

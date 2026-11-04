@@ -84,8 +84,9 @@ def test_data(
             assert (item["reason"] is None) == (item["status"] == "healthy"), result
         return result
 
-    def repair(backend, **kwargs):
-        return run("repair-file", endpoints, config, inode, backend, **kwargs)
+    def repair(backend, replace=False, **kwargs):
+        flags = ["--replace-corrupt"] if replace else []
+        return run("repair-file", endpoints, config, inode, backend, *flags, **kwargs)
 
     failure = run("check-file", endpoints, config, inode, success=False)
     assert "NoPublishedVersion" in failure.stdout + failure.stderr
@@ -180,11 +181,25 @@ def test_data(
     failure = repair(1, success=False)
     assert "ChecksumMismatch" in failure.stdout + failure.stderr
     assert first.read_bytes() == b"x" * len(content)
+    with first.open("rb", buffering=0) as old_object:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: repair(1, replace=True), range(2)))
+        assert all(
+            item["status"] in ("repaired", "already_healthy") for item in results
+        ), results
+        assert old_object.read() == b"x" * len(content)
+    assert first.read_bytes() == content
+    assert repair(1, replace=True)["status"] == "already_healthy"
+    check(200, ["healthy", "healthy"])
+    assert run("file-version", endpoints, 200) == version
+    assert run("get", endpoints, inode)["current_version"] == 200
     first.write_bytes(b"corrupt")
     download("fallback.bin", content, 2)
     second = object_path(roots[1], 200, content)
     second.write_bytes(b"corrupt")
     check(200, ["corrupt", "corrupt"])
+    failure = repair(1, replace=True, success=False)
+    assert "NoHealthyReplica" in failure.stdout + failure.stderr
     assert first.read_bytes() == second.read_bytes() == b"corrupt"
     assert run("file-version", endpoints, 200) == version
     missing = directory / "unreadable.bin"
@@ -202,6 +217,8 @@ def test_data(
     run("get-file", endpoints, config, inode, missing, success=False)
     repair(1, success=False)
     assert symlink.is_symlink()
+    repair(1, replace=True, success=False)
+    assert symlink.is_symlink()
     symlink.unlink()
     first.write_bytes(content)
     second.write_bytes(content)
@@ -214,6 +231,9 @@ def test_data(
     object_path(roots[1], 201, b"").unlink()
     result = repair(2)
     assert result["status"] == "repaired" and result["source_backend"] == 1, result
+    check(201, ["healthy", "healthy"])
+    object_path(roots[1], 201, b"").write_bytes(b"not empty")
+    assert repair(2, replace=True)["status"] == "repaired"
     check(201, ["healthy", "healthy"])
     assert run("file-version", endpoints, 200) == version
     assert first.read_bytes() == content
@@ -292,6 +312,6 @@ def test_data(
     assert run("file-version", endpoints, 200) == version
     assert all(not list((root / "staging").iterdir()) for root in roots)
     print(
-        "PASS: object copy/readback, replica health and concurrent missing-replica repair, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
+        "PASS: object copy/readback, replica health and concurrent missing/corrupt repair, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
         flush=True,
     )

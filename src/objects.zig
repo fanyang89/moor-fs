@@ -102,6 +102,15 @@ pub const Store = struct {
     }
 
     pub fn put(self: Store, source: File, version: m.Version) !void {
+        return self.install(source, version, false);
+    }
+
+    /// Restore only this immutable version's bytes, never mutate an open object in place.
+    pub fn repairCorrupt(self: Store, source: File, version: m.Version) !void {
+        return self.install(source, version, true);
+    }
+
+    fn install(self: Store, source: File, version: m.Version, replace_corrupt: bool) !void {
         var random: [16]u8 = undefined;
         self.io.random(&random);
         const temporary = std.fmt.bytesToHex(random, .lower);
@@ -115,9 +124,19 @@ pub const Store = struct {
         var buffer: [96]u8 = undefined;
         self.staging.renamePreserve(&temporary, self.objects, try name(&buffer, version), self.io) catch |err| switch (err) {
             error.PathAlreadyExists => {
-                const existing = try self.openVerified(version);
-                defer existing.close(self.io);
-                try existing.sync(self.io);
+                // Recheck after staging: another repair may already have fixed the target.
+                const existing: ?File = self.openVerified(version) catch |verify_error| switch (verify_error) {
+                    error.ChecksumMismatch => if (replace_corrupt) null else return verify_error,
+                    else => return verify_error,
+                };
+                if (existing) |healthy| {
+                    defer healthy.close(self.io);
+                    try healthy.sync(self.io);
+                } else {
+                    // All installers for this name must supply the same size/digest.
+                    // A concurrent healthy replacement is therefore byte-equivalent.
+                    try self.staging.rename(&temporary, self.objects, try name(&buffer, version), self.io);
+                }
             },
             else => return err,
         };
