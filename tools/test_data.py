@@ -69,6 +69,24 @@ def test_data(
         assert target.read_bytes() == expected
         return target
 
+    def check(version, statuses, mapping=config):
+        result = run("check-file", endpoints, mapping, inode)
+        assert result["inode"] == inode and result["version"] == version, result
+        assert [item["status"] for item in result["replicas"]] == statuses, result
+        assert [item["backend"] for item in result["replicas"]] == list(
+            range(1, len(statuses) + 1)
+        ), result
+        assert result["healthy_replicas"] == statuses.count("healthy"), result
+        assert result["all_healthy"] == all(
+            status == "healthy" for status in statuses
+        ), result
+        for item in result["replicas"]:
+            assert (item["reason"] is None) == (item["status"] == "healthy"), result
+        return result
+
+    failure = run("check-file", endpoints, config, inode, success=False)
+    assert "NoPublishedVersion" in failure.stdout + failure.stderr
+
     # A failed second replica must not publish or overwrite its corrupt object.
     for child in ("objects", "staging"):
         (roots[1] / child).mkdir()
@@ -90,6 +108,10 @@ def test_data(
     version = run("file-version", endpoints, 200)
     assert version["size"] == len(content)
     assert version["sha256"] == list(hashlib.sha256(content).digest())
+    assert check(200, ["healthy", "healthy"])["size"] == len(content)
+    partial = directory / "partial-backends.json"
+    partial.write_text(json.dumps([{"id": 1, "root": str(roots[0])}]))
+    check(200, ["healthy", "unconfigured"], partial)
     for root in roots:
         assert object_path(root, 200, content).read_bytes() == content
     if smb_ports:
@@ -127,14 +149,24 @@ def test_data(
     roots[0].rename(offline)
     try:
         download("unavailable-fallback.bin", content, 2)
+        check(200, ["unavailable", "healthy"])
+        assert not roots[0].exists()
     finally:
         offline.rename(roots[0])
 
     first = object_path(roots[0], 200, content)
+    first.unlink()
+    check(200, ["missing", "healthy"])
+    assert not first.exists()
+    first.write_bytes(b"x" * len(content))
+    check(200, ["corrupt", "healthy"])
     first.write_bytes(b"corrupt")
     download("fallback.bin", content, 2)
     second = object_path(roots[1], 200, content)
     second.write_bytes(b"corrupt")
+    check(200, ["corrupt", "corrupt"])
+    assert first.read_bytes() == second.read_bytes() == b"corrupt"
+    assert run("file-version", endpoints, 200) == version
     missing = directory / "unreadable.bin"
     run("get-file", endpoints, config, inode, missing, success=False)
     assert not missing.exists()
@@ -151,6 +183,7 @@ def test_data(
     empty.write_bytes(b"")
     assert upload(2002, 201, 200, empty)["status"] == "ok"
     download("empty-read.bin", b"", 1)
+    assert check(201, ["healthy", "healthy"])["size"] == 0
     assert run("file-version", endpoints, 200) == version
     assert first.read_bytes() == content
     # Preflight rejects stale CAS and mismatched replica policy before copying.
@@ -215,15 +248,17 @@ def test_data(
     assert upload(2021, 220, winner, empty, backends=(1, 0))["status"] == "ok"
     assert not object_path(roots[1], 220, b"").exists()
     download("single.bin", b"", 1)
+    check(220, ["healthy"])
     for i in range(3):
         stop(i)
     for i in range(3):
         start(i)
     leader()
     download("after-restart.bin", b"", 1)
+    check(220, ["healthy"])
     assert run("file-version", endpoints, 200) == version
     assert all(not list((root / "staging").iterdir()) for root in roots)
     print(
-        "PASS: object copy/readback, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
+        "PASS: object copy/readback, replica health checks, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
         flush=True,
     )

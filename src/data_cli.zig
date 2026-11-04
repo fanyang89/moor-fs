@@ -80,10 +80,7 @@ pub fn put(ctx: zli.CommandContext) !void {
     try publish(ctx, request);
 }
 
-pub fn get(ctx: zli.CommandContext) !void {
-    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
-    const config = try mappings(ctx);
-    defer config.deinit();
+fn currentVersion(ctx: zli.CommandContext, id: u64) !m.Version {
     const node = try query(ctx, ?m.Node, "Get", .{ .id = id });
     defer node.deinit();
     const file = node.value orelse return error.NotFound;
@@ -93,6 +90,14 @@ pub fn get(ctx: zli.CommandContext) !void {
     defer record.deinit();
     const version = record.value orelse return error.VersionNotFound;
     if (version.inode != id) return error.InvalidVersion;
+    return version;
+}
+
+pub fn get(ctx: zli.CommandContext) !void {
+    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    const config = try mappings(ctx);
+    defer config.deinit();
+    const version = try currentVersion(ctx, id);
     for (version.backends) |backend| {
         if (backend == 0) continue;
         const root = rootFor(config.value, backend) catch continue;
@@ -111,4 +116,54 @@ pub fn get(ctx: zli.CommandContext) !void {
         return;
     }
     return error.NoHealthyReplica;
+}
+
+const ReplicaCheck = struct {
+    backend: u64,
+    status: enum { healthy, missing, corrupt, unavailable, unconfigured },
+    reason: ?[]const u8 = null,
+};
+
+fn checkReplica(io: std.Io, config: []const objects.Mapping, backend: u64, version: m.Version) ReplicaCheck {
+    const root = rootFor(config, backend) catch |err| return .{ .backend = backend, .status = .unconfigured, .reason = @errorName(err) };
+    const store = objects.Store.open(io, root, false) catch |err| return .{ .backend = backend, .status = .unavailable, .reason = @errorName(err) };
+    defer store.close();
+    const file = store.openVerified(version) catch |err| return .{
+        .backend = backend,
+        .status = switch (err) {
+            error.FileNotFound => .missing,
+            error.ChecksumMismatch => .corrupt,
+            else => .unavailable,
+        },
+        .reason = @errorName(err),
+    };
+    file.close(io);
+    return .{ .backend = backend, .status = .healthy };
+}
+
+pub fn check(ctx: zli.CommandContext) !void {
+    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    const config = try mappings(ctx);
+    defer config.deinit();
+    // Pin one metadata version for the entire scan, even if publication races it.
+    const version = try currentVersion(ctx, id);
+    var replicas: [2]ReplicaCheck = undefined;
+    var count: usize = 0;
+    var healthy: usize = 0;
+    for (version.backends) |backend| {
+        if (backend == 0) continue;
+        replicas[count] = checkReplica(ctx.io, config.value, backend, version);
+        if (replicas[count].status == .healthy) healthy += 1;
+        count += 1;
+    }
+    const json = try std.json.Stringify.valueAlloc(ctx.allocator, .{
+        .inode = id,
+        .version = version.id,
+        .size = version.size,
+        .healthy_replicas = healthy,
+        .all_healthy = healthy == count,
+        .replicas = replicas[0..count],
+    }, .{});
+    defer ctx.allocator.free(json);
+    try ctx.writer.print("{s}\n", .{json});
 }

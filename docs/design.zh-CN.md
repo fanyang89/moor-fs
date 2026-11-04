@@ -533,3 +533,13 @@ FUSE open 设置 direct_io，不复用 inode 级内核页缓存，避免同一 i
 `zig build test-smb -Dfuse=true`（可附加 `-Doptimize=safe`）在私有 mount namespace 中串联完整链路：两个独立 Samba 接入节点 → 各自 FUSE 挂载 → 两份 CIFS 后端 → 两个后端 Samba 服务。验证目录和文件大小、精确下载、只读拒绝、同大小内容替换、改名/删除可见性、空文件、损坏副本回退、全部损坏报错和元数据 leader 切换；最后仍执行后端重启/重新挂载哈希检查。
 
 集群测试同时按既有客户端契约处理选举窗口：leader 退出后的第一次重放若明确返回 ClusterUnavailable，等待新 leader 后原样重放并检查去重结果。其他错误仍失败，没有扩展运行时重试次数或无限重试。测试退出信号触发 Python 清理路径，先关闭接入 Samba，再卸载 FUSE 和后端 CIFS。
+
+## 25. 当前版本副本健康检查
+
+新增 `nas-fs check-file ENDPOINTS backends.json INODE`。通过线性一致 inode 查询固定当前版本，再逐一打开其声明的副本，完整校验大小与 SHA-256。与下载只选择一份健康副本不同，检查会遍历所有声明位置。输出 JSON 包含 inode、version、size、healthy_replicas、all_healthy 及逐后端 replicas，单副本版本只产生一项。
+
+副本状态为 healthy、missing（成功打开对象库后找不到对象）、corrupt（大小或哈希不符）、unavailable（对象库不可访问、读取失败、对象不稳定或类型不合法）、unconfigured（本机缺少该后端映射）。失败项的 reason 保留底层错误名，健康项为 null。完整检查即使发现所有副本损坏也正常退出，调用方应读取 JSON；配置错误、元数据查询失败、目录或未发布文件则返回命令错误。
+
+检查不修改元数据或对象内容，不初始化后端目录，也不自动修复。all_healthy 仅描述该版本声明的副本，不表示满足之后改变的期望副本策略。各副本按顺序检查，并非同一时刻的健康快照；扫描期间可能发布新版本，报告里的版本 ID 用于明确观察对象。整文件校验同步执行，尚无 NAS I/O 超时或后台扫描调度。
+
+现有对象集群测试与真实 Samba/CIFS E2E 增加健康双副本、缺少映射、后端路径不可用、对象缺失、同大小内容损坏、两份均损坏、空文件、单副本和整集群重启后的检查，并核对检查未创建缺失路径或改写损坏对象及版本记录。

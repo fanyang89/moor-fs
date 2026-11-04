@@ -375,6 +375,29 @@ destination directory, checks the hash again, syncs and renames without replacin
 an existing destination. Source failure during the export itself fails the command;
 rerun to select a replica again. Partial exports are cleaned up on normal errors.
 
+Check every declared replica of a file's current version:
+
+```sh
+zig-out/bin/nas-fs check-file "$ENDPOINTS" backends.json 2
+```
+
+The JSON report contains `inode`, pinned `version`, `size`, `healthy_replicas`,
+`all_healthy`, and `replicas` with each backend's `status` and nullable `reason`.
+Statuses are `healthy` (full size/SHA-256 verification), `missing` (object absent
+in an opened store), `corrupt` (size/hash mismatch), `unavailable` (store/read
+failure or an unstable/invalid object), and `unconfigured` (no local mapping).
+`reason` is the underlying error name. Every declared replica is checked, even
+after finding a healthy one. Single-replica versions produce one result.
+
+A completed scan exits successfully even when replicas are unhealthy; automation
+must inspect the JSON. Invalid configuration, metadata failures, directories and
+unpublished files fail the command. `all_healthy` covers the version's declared
+replicas, not compliance with a subsequently changed desired replica policy.
+The scan does not modify metadata or object contents, initialize roots, or repair
+replicas. Results describe sequential observations of one pinned version, not an
+atomic health snapshot; concurrent publication can make that version historical.
+Full-file hashing is synchronous and has no NAS I/O deadline.
+
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical
@@ -396,7 +419,7 @@ Operational boundaries:
   client retry bounds can expire during prolonged/split elections; retry afterward.
 
 `zig build test-cluster` now also verifies real local-directory copies, failed
-second-replica publication, retries, corruption/unavailable-replica fallback,
+second-replica publication, retries, per-replica health reports, corruption/unavailable-replica fallback,
 non-overwriting exports, empty/single-replica files, concurrent publishers and
 whole-cluster restart. These tests do not emulate NAS hardware durability.
 
