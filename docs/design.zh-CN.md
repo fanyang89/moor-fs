@@ -579,3 +579,11 @@ Samba 关闭 DOS archive 位映射和 DOS xattr 存储，保留 strict sync。�
 替换不修改旧 inode，已有描述符继续引用原对象，包括损坏内容或截断错误；只有重新打开才获取修复副本。FUSE 不在旧句柄内切换对象。恢复不写元数据，不改变版本 ID、当前版本或命名空间；并发发布/删除不会被修复重新发布或复活。当前不保留坏对象归档；崩溃可能留下 staging 或已安装对象，正常错误清理 staging，安装后结果不确定可重试检查。
 
 32 项单测包括源内容变更时拒绝安装并保留坏目标、默认 put 不替换、修复后重复执行和旧描述符保留。真实 Samba/CIFS + FUSE Safe E2E 覆盖并发损坏修复、全损坏时拒绝、符号链接保留、空文件恢复、元数据不变，以及旧 FUSE 句柄仍报 EIO、新打开读取正确数据；后端重启/重新挂载后检查全部对象哈希。精确崩溃时点注入、与未来 GC 的协调及物理 NAS 断电验收仍待补充。
+
+## 29. 修复进程崩溃与命名空间竞态验收
+
+新增显式构建选项 `-Dfault-injection=true`，仅测试构建读取 NAS_FS_REPAIR_STOP 并在 before_replace、after_replace、after_sync 检查点发出 SIGSTOP。普通构建编译掉检查点，不读取该变量。测试通过 waitpid(WUNTRACED) 确认到达位置后 SIGKILL 或恢复执行，避免依赖拷贝速度猜测崩溃时机。入口为 `zig build test-cluster -Dfault-injection=true` 和 `zig build test-e2e -Dfault-injection=true -Doptimize=safe`；参数贯穿私有挂载 namespace 与集群测试进程。
+
+真实 Samba/CIFS 故障验收覆盖替换前、替换后、目录同步后杀进程。替换前仍保留坏对象和一份已校验 staging；替换后可观察到健康对象，三个场景重试后均恢复双副本健康且元数据不变。测试只清理自身识别的 staging 孤儿，生产修复不增加自动 GC。重试遇到 already_healthy 时现在仍同步对象文件和 objects/staging 目录，补齐上次可能尚未完成的目录同步，而不简单以哈希正确代替同步完成。
+
+另外在替换前暂停修复，分别发布新版本、删除旧 inode 并复用同名新文件、由另一进程先修复目标。恢复执行后只修复已固定版本的对象：不回滚当前版本，不复活旧 inode，也不改变同名新文件；并发健康替换保持字节等价，原健康描述符继续可读。上述验证补齐第 28 节的精确进程崩溃与竞态场景，不等价于 NAS 掉电耐久性、后台自动修复或未来 GC 协调。

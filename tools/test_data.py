@@ -17,6 +17,7 @@ def test_data(
     roots=None,
     server_roots=None,
     smb_ports=None,
+    repair_faults=False,
 ):
     roots = roots or [directory / "nas-a", directory / "nas-b"]
     for root in roots:
@@ -315,3 +316,7 @@ def test_data(
         "PASS: object copy/readback, replica health and concurrent missing/corrupt repair, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
         flush=True,
     )
+    if repair_faults:
+        from test_repair_faults import test_repair_faults
+
+        test_repair_faults(executable, directory, endpoints, config, roots, run)

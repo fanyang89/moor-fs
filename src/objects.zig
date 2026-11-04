@@ -135,13 +135,16 @@ pub const Store = struct {
                 } else {
                     // All installers for this name must supply the same size/digest.
                     // A concurrent healthy replacement is therefore byte-equivalent.
+                    @import("repair_fault.zig").checkpoint(.before_replace);
                     try self.staging.rename(&temporary, self.objects, try name(&buffer, version), self.io);
+                    @import("repair_fault.zig").checkpoint(.after_replace);
                 }
             },
             else => return err,
         };
         try syncDir(self.io, self.objects);
         try syncDir(self.io, self.staging);
+        if (replace_corrupt) @import("repair_fault.zig").checkpoint(.after_sync);
     }
 };
 

@@ -141,7 +141,11 @@ pub fn repair(ctx: zli.CommandContext) !void {
         else => return err,
     };
     if (existing) |file| {
-        file.close(ctx.io);
+        defer file.close(ctx.io);
+        // A previous attempt may have installed bytes but died before directory sync.
+        try file.sync(ctx.io);
+        try objects.syncDir(ctx.io, target.objects);
+        try objects.syncDir(ctx.io, target.staging);
         try repairResult(ctx, version, backend, null);
         return;
     }

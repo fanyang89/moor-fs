@@ -23,6 +23,7 @@ def main():
     parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
     parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--smb", action="store_true")
+    parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--backend-roots", nargs=2, type=Path)
     parser.add_argument("--backend-server-roots", nargs=2, type=Path)
     parser.add_argument("--smb-ports", nargs=2, type=int)
@@ -391,6 +392,7 @@ def main():
                 roots=options.backend_roots,
                 server_roots=options.backend_server_roots,
                 smb_ports=options.smb_ports,
+                repair_faults=options.repair_faults,
             )
             if options.fuse or options.smb:
                 from test_fuse import test_mounts

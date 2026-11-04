@@ -413,7 +413,9 @@ a fully verified other replica, copies through staging, checks and reads back th
 bytes, syncs, then atomically installs without replacing an existing object.
 Concurrent repairs converge on a verified object. No metadata update is needed.
 The JSON result includes `inode`, `version`, `backend`, `source_backend` and
-`status`: `repaired`, or `already_healthy` with a null source for a verified no-op.
+`status`: `repaired`, or `already_healthy` with a null source when no copy is needed.
+The already-healthy path still syncs the object and both directories, completing
+durability work that an interrupted earlier repair may not have finished.
 `repaired` can include another concurrent repair winning the installation race.
 
 Missing mappings/stores, undeclared destinations and absence of a healthy source
@@ -448,6 +450,22 @@ copy. Reopen a failed read after repair. Metadata, version IDs and namespace
 entries do not change. No bad-object archive is retained. Installed objects may
 remain after an uncertain failure; retry and check their health. This does not
 provide physical NAS power-loss guarantees or coordinate with out-of-band writers.
+
+Repair fault tests use an explicitly instrumented build:
+
+```sh
+zig build test-cluster -Dfault-injection=true
+zig build test-e2e -Dfault-injection=true -Doptimize=safe
+```
+
+The harness pauses a repair at verified checkpoints, observes `SIGSTOP`, then
+kills it before replacement, after replacement, or after directory sync. It
+verifies retry, orphan staging behavior and unchanged metadata. It also pauses
+repair while publishing a newer version, deleting/reusing the inode's name, or
+installing a concurrent healthy replacement. Normal builds compile out these
+checkpoints and ignore `NAS_FS_REPAIR_STOP`. Only test builds interpret its values
+`before_replace`, `after_replace`, and `after_sync`; do not deploy an instrumented
+binary. The fault tests simulate process death, not NAS hardware power failure.
 
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object

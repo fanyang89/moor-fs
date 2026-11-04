@@ -4,8 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse = b.option(bool, "fuse", "Build the FUSE namespace and file adapter") orelse false;
+    const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair SIGSTOP checkpoints") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "fuse", fuse);
+    options.addOption(bool, "fault_injection", fault_injection);
     const raft = b.dependency("raftz", .{ .target = target, .optimize = optimize });
     const grpc = @import("raftz").grpcLiteDependency(raft, target, optimize);
     const zli = b.dependency("zli", .{ .target = target, .optimize = optimize });
@@ -32,6 +34,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "grpc_lite", .module = grpc.module("grpc_lite") },
         },
     });
+    const build_options = options.createModule();
+    mod.addImport("build_options", build_options);
     const exe = b.addExecutable(.{
         .name = "nas-fs",
         .root_module = b.createModule(.{
@@ -45,7 +49,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
-    exe.root_module.addOptions("build_options", options);
+    exe.root_module.addImport("build_options", build_options);
     if (fuse) {
         exe.root_module.addIncludePath(b.path("third_party/libfuse/include"));
         exe.root_module.addIncludePath(b.path(".deps-build/libfuse"));
@@ -63,18 +67,22 @@ pub fn build(b: *std.Build) void {
     b.step("deps-check", "Check pinned dependency sources").dependOn(&deps.step);
     const cluster_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
     cluster_test.addArtifactArg(exe);
+    if (fault_injection) cluster_test.addArg("--repair-faults");
     b.step("test-cluster", "Test three processes, failover, snapshots and recovery").dependOn(&cluster_test.step);
     const e2e_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
     e2e_test.addArtifactArg(exe);
+    if (fault_injection) e2e_test.addArg("--repair-faults");
     if (fuse) e2e_test.addArg("--fuse");
     b.step("test-e2e", "Test real Samba/CIFS backends in a private mount namespace (requires sudo)").dependOn(&e2e_test.step);
     if (fuse) {
         const fuse_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
         fuse_test.addArtifactArg(exe);
+        if (fault_injection) fuse_test.addArg("--repair-faults");
         fuse_test.addArg("--fuse");
         b.step("test-fuse", "Test two FUSE mounts against a three-node cluster").dependOn(&fuse_test.step);
         const smb_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
         smb_test.addArtifactArg(exe);
+        if (fault_injection) smb_test.addArg("--repair-faults");
         smb_test.addArg("--smb");
         b.step("test-smb", "Test SMB clients through FUSE and CIFS backends (requires sudo)").dependOn(&smb_test.step);
     }

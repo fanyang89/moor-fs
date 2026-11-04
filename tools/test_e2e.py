@@ -196,6 +196,8 @@ follow symlinks = no
             command.append("--fuse")
         if args.smb:
             command.append("--smb")
+        if args.repair_faults:
+            command.append("--repair-faults")
         environment = dict(os.environ, HOME=account.pw_dir, TMPDIR=str(directory))
         # Metadata processes and file operations run as the original ordinary user.
         cluster = subprocess.Popen(
@@ -255,6 +257,7 @@ def main():
     parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
     parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--smb", action="store_true")
+    parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
@@ -305,6 +308,8 @@ def main():
         command.append("--fuse")
     if args.smb:
         command.append("--smb")
+    if args.repair_faults:
+        command.append("--repair-faults")
     result = subprocess.run(command)
     if result.returncode:
         print(f"E2E failed; workspace: {directory}", file=sys.stderr)
