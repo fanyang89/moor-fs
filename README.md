@@ -55,7 +55,8 @@ is a cleartext prototype for trusted development networks.
 
 The CLI can copy, verify and publish whole files on configured mounted backend
 directories, and export a verified replica. Write leases, automatic placement,
-repairs and SMB exports remain pending. FUSE supports verified read-only file access.
+repairs and writable SMB exports remain pending. FUSE supports verified read-only
+file access, with a single-user Samba export helper.
 Metadata deletion is not a physical-object garbage collection protocol. Raw `apply` publication
 still validates metadata declarations only.
 
@@ -257,7 +258,7 @@ files return `ENODATA`, and no healthy replica returns `EIO`; a published empty 
 is readable. Mutations are rejected. Reads after open do not rehash each range or
 automatically switch replicas: backend read errors/premature EOF return `EIO`.
 Installed objects must remain immutable; same-size out-of-band changes after open
-are not detected. There is no client-facing SMB export yet.
+are not detected. A read-only SMB export is available through the helper below.
 
 Lookup and getattr use the remote linearizable metadata queries with zero entry
 and attribute cache timeouts. Each opendir gathers pages into an owned list and
@@ -428,6 +429,51 @@ Verified with Samba 4.24.7 and Linux CIFS. This covers the backend SMB transport
 not a client-facing unified SMB export or physical NAS power-loss durability.
 With `-Dfuse=true`, the suite also runs two real FUSE mounts over these CIFS-backed
 objects, including version-pinned reads; build libfuse and enable `/dev/fuse` first.
+
+### Read-only SMB access-node prototype
+
+Start the FUSE mount with `--backends` as above. As the same ordinary user, run:
+
+```sh
+python3 tools/serve_smb.py ./mountpoint ./smb-state --port 1445
+smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'ls'
+smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'get photo.jpg download.jpg'
+```
+
+`smb-state` must be a new directory; its parent must exist. The helper checks for
+a nas-fs FUSE mount owned by the invoking user, validates the generated config with
+`testparm`, and runs `smbd` in the foreground. SIGINT/SIGTERM stops its process group;
+configuration, state and logs remain in `smb-state`. Stop Samba before unmounting
+FUSE. No `allow_other` or system Samba changes are needed because Samba runs as the
+mount owner. The helper requires Linux, Python 3, `smbd` and `testparm`.
+
+The default listener is loopback. `--listen LOCAL_IPV4` explicitly binds another
+local address for LAN experiments. This prototype exports `[nas]` as an anonymous,
+single-user, read-only SMB3 share; all clients act as the mount owner. It does not
+implement account isolation or a production authentication policy. Use `-U guest`
+with the shown client commands. Clients must support the chosen port and guest
+access; Windows/macOS client compatibility has not yet been tested.
+
+SMB leases and oplocks are disabled because metadata publications bypass Samba's
+local lock state; sendfile is disabled to use the verified FUSE read path. New
+connections/opens read current metadata. Tests cover fresh SMB connections, not
+arbitrary client cache behavior or change notifications. FUSE retains its fixed
+version handles and full-file verification cost. There is no CTDB coordination,
+cross-node SMB locking, durable-handle failover, writable export or complete file
+timestamp/ACL model.
+
+```sh
+zig build test-smb -Dfuse=true
+zig build test-smb -Dfuse=true -Doptimize=safe
+```
+
+This extends the private-namespace E2E with two independent Samba access nodes:
+`smbclient → Samba → FUSE → CIFS → backend Samba`. It checks listing and file sizes,
+byte-exact downloads, rejected upload/delete/rename/mkdir, same-size version
+replacement, metadata rename/delete visibility, empty files, corrupt-replica
+fallback, all-replicas-corrupt errors and metadata leader failover. It also runs
+the existing backend restart/remount hash checks. No hardware power-loss durability
+or SMB session migration is implied.
 
 ### Persistence and recovery
 

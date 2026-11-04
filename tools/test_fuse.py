@@ -9,7 +9,7 @@ import subprocess
 import time
 
 
-def test_mounts(executable, directory, endpoints, run, leader, stop, start):
+def test_mounts(executable, directory, endpoints, run, leader, stop, start, smb=False):
     processes = []
     mounts = []
     logs = []
@@ -174,6 +174,12 @@ def test_mounts(executable, directory, endpoints, run, leader, stop, start):
         assert (second / "photos" / "renamed").stat().st_ino == node
         assert len(os.listdir(first / "photos")) == 40
         start(old)
+        if smb:
+            from test_smb import test_exports
+
+            test_exports(
+                directory, mounts, endpoints, config, roots, run, leader, stop, start
+            )
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0
         assert not os.path.ismount(first)

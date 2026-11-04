@@ -521,3 +521,15 @@ FUSE open 设置 direct_io，不复用 inode 级内核页缓存，避免同一 i
 目前校验发生在 open，而非每次范围读取。对象需保持不可变：打开后同大小原地篡改不会逐段检测；读错误不在原句柄内自动重选副本，调用方可重新打开。单线程 FUSE 循环、整文件打开校验和无截止时间的 NAS I/O 仍限制延迟与并发；尚不提供 mmap、写入、SMB share-mode、完整文件时间戳或跨节点权限语义。
 
 `zig build test-fuse -Dfuse=true` 覆盖双挂载读取、真实大小、多块与跨边界偏移、EOF、新旧句柄并存、损坏/路径不可用回退、已打开对象被截断时的错误、空文件、未发布文件、leader 切换及元数据删除后句柄继续读取。`zig build test-e2e -Dfuse=true -Doptimize=safe` 将同一套 FUSE 验证接到两个真实 Samba/CIFS 后端，再执行服务重启和重新挂载后的对象哈希检查。
+
+## 24. 只读 SMB 接入节点原型
+
+新增 `python3 tools/serve_smb.py MOUNTPOINT NEW_STATE_DIRECTORY --port 1445`，将已有 nas-fs FUSE 挂载导出为 `[nas]` SMB3 共享。脚本检查挂载类型、来源和所有者，以同一普通用户运行 Samba，无需 allow_other 或修改系统 Samba 服务。状态目录必须新建，隔离 private/state/cache/lock/pid/ncalrpc 与日志；启动前调用 testparm 校验配置。前台运行，SIGINT/SIGTERM 清理服务进程组，保留状态目录供诊断。
+
+默认只监听 127.0.0.1，可用 `--listen 本机IPv4` 显式绑定 LAN 地址。当前采用单用户 guest 只读共享，全部客户端映射为挂载用户，SMB 上传、删除、改名及建目录被拒绝。尚无生产认证、账号隔离和完整 ACL；Windows/macOS 客户端尚未验证，测试采用指定端口和 guest 用户的 smbclient。
+
+元数据通过 CLI/Raft 更新，Samba 本地锁数据库不会接收到跨节点发布通知。因此关闭 SMB2 leases、oplocks、level2/kernel oplocks，并关闭 sendfile，使用 FUSE 固定版本读取路径。测试只证明新连接/打开可见版本与命名空间更新，不承诺任意客户端缓存刷新或 change notify 事件。时间戳仍为零，打开仍需整文件哈希。CTDB、跨节点 SMB 锁、durable handle 迁移及写入协议尚未实现。
+
+`zig build test-smb -Dfuse=true`（可附加 `-Doptimize=safe`）在私有 mount namespace 中串联完整链路：两个独立 Samba 接入节点 → 各自 FUSE 挂载 → 两份 CIFS 后端 → 两个后端 Samba 服务。验证目录和文件大小、精确下载、只读拒绝、同大小内容替换、改名/删除可见性、空文件、损坏副本回退、全部损坏报错和元数据 leader 切换；最后仍执行后端重启/重新挂载哈希检查。
+
+集群测试同时按既有客户端契约处理选举窗口：leader 退出后的第一次重放若明确返回 ClusterUnavailable，等待新 leader 后原样重放并检查去重结果。其他错误仍失败，没有扩展运行时重试次数或无限重试。测试退出信号触发 Python 清理路径，先关闭接入 Samba，再卸载 FUSE 和后端 CIFS。

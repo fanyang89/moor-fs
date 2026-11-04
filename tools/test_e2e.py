@@ -117,7 +117,7 @@ def worker(args):
             base = mkdir(directory / f"samba-{i}")
             export = mkdir(base / "export")
             target = mkdir(base / "mount")
-            for name in ("private", "state", "cache", "lock", "run"):
+            for name in ("private", "state", "cache", "lock", "run", "ncalrpc"):
                 mkdir(base / name)
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
@@ -141,6 +141,7 @@ state directory = {base}/state
 cache directory = {base}/cache
 lock directory = {base}/lock
 pid directory = {base}/run
+ncalrpc dir = {base}/ncalrpc
 log file = {base}/samba.log
 load printers = no
 printing = bsd
@@ -193,6 +194,8 @@ follow symlinks = no
         ]
         if args.fuse:
             command.append("--fuse")
+        if args.smb:
+            command.append("--smb")
         environment = dict(os.environ, HOME=account.pw_dir, TMPDIR=str(directory))
         # Metadata processes and file operations run as the original ordinary user.
         cluster = subprocess.Popen(
@@ -203,7 +206,7 @@ follow symlinks = no
             start_new_session=True,
         )
         try:
-            if cluster.wait(timeout=240) != 0:
+            if cluster.wait(timeout=360 if args.smb else 240) != 0:
                 raise RuntimeError("cluster E2E failed")
         finally:
             stop_group(cluster)
@@ -251,6 +254,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
     parser.add_argument("--fuse", action="store_true")
+    parser.add_argument("--smb", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
@@ -269,6 +273,10 @@ def main():
     for name in ("smbd", "smbclient", "mount.cifs", "umount", "unshare", "sudo"):
         if shutil.which(name) is None:
             parser.error(f"required executable not found: {name}")
+    if args.smb:
+        for name in ("testparm", "fusermount3"):
+            if shutil.which(name) is None:
+                parser.error(f"required executable not found: {name}")
     executable = str(Path(args.executable).resolve(strict=True))
     run("sudo", "-n", "true")
     run("sudo", "-n", "unshare", "--mount", "--propagation", "private", "true")
@@ -295,6 +303,8 @@ def main():
     ]
     if args.fuse:
         command.append("--fuse")
+    if args.smb:
+        command.append("--smb")
     result = subprocess.run(command)
     if result.returncode:
         print(f"E2E failed; workspace: {directory}", file=sys.stderr)

@@ -73,5 +73,9 @@ pub fn build(b: *std.Build) void {
         fuse_test.addArtifactArg(exe);
         fuse_test.addArg("--fuse");
         b.step("test-fuse", "Test two FUSE mounts against a three-node cluster").dependOn(&fuse_test.step);
+        const smb_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+        smb_test.addArtifactArg(exe);
+        smb_test.addArg("--smb");
+        b.step("test-smb", "Test SMB clients through FUSE and CIFS backends (requires sudo)").dependOn(&smb_test.step);
     }
 }

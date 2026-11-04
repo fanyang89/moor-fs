@@ -6,6 +6,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -14,9 +15,14 @@ import time
 
 
 def main():
+    def interrupted(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
     parser.add_argument("--fuse", action="store_true")
+    parser.add_argument("--smb", action="store_true")
     parser.add_argument("--backend-roots", nargs=2, type=Path)
     parser.add_argument("--backend-server-roots", nargs=2, type=Path)
     parser.add_argument("--smb-ports", nargs=2, type=int)
@@ -215,9 +221,27 @@ def main():
             )
 
             stop(first)
-            assert run("apply", endpoints, json.dumps(request)) == result
+            # A split election may outlast the client's bounded retry window.
+            replay = subprocess.run(
+                [executable, "apply", endpoints, json.dumps(request)],
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            if replay.returncode:
+                assert replay.stdout.strip() == "error: ClusterUnavailable", (
+                    replay.stdout,
+                    replay.stderr,
+                )
+                print(
+                    "INFO: election exceeded retry window; replaying after leader recovery",
+                    flush=True,
+                )
+            else:
+                assert json.loads(replay.stdout) == result
             elected = leader()
             assert elected != first
+            assert run("apply", endpoints, json.dumps(request)) == result
             assert apply(elected, request) == result
             assert run("apply", endpoints, json.dumps(initial_publication)) == result
             competing = [publication(107, 11, 10), publication(108, 12, 10)]
@@ -368,10 +392,19 @@ def main():
                 server_roots=options.backend_server_roots,
                 smb_ports=options.smb_ports,
             )
-            if options.fuse:
+            if options.fuse or options.smb:
                 from test_fuse import test_mounts
 
-                test_mounts(executable, directory, endpoints, run, leader, stop, start)
+                test_mounts(
+                    executable,
+                    directory,
+                    endpoints,
+                    run,
+                    leader,
+                    stop,
+                    start,
+                    smb=options.smb,
+                )
             for i in list(processes):
                 stop(i, kill=False)
         except BaseException:
