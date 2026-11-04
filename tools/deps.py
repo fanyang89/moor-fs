@@ -15,7 +15,6 @@ SOURCES = {
     "cifs-utils": ("COPYING", "mount.cifs.c"),
     "grpc-lite": ("LICENSE", "build.zig.zon"),
     "raftz": ("LICENSE", "build.zig.zon"),
-    "zookeeper-zig": ("LICENSE", "build.zig.zon"),
 }
 
 

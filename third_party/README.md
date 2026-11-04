@@ -13,7 +13,6 @@ SMB exports, a FUSE filesystem, or distributed metadata.
 | cifs-utils | cifs-utils-7.9 | `mount.cifs` and backend mount tooling | Standalone tools; source submodule |
 | grpc-lite | db3c400bf70419742ebcb42fe316ba8b754b4975 | Internal RPC and Raft transport | Source submodule, aligned with raftz's dependency pin |
 | raftz | d5eba2b338cfd00f2306680cc2dcafb016add3a0 | Metadata consensus and state-machine runtime | Source submodule |
-| zookeeper-zig | 2b70adb3202676218030e874824051b8f0e34dff | Persistence/recovery reference and potential module reuse | Source submodule; no additional ZooKeeper deployment |
 
 Upstream repositories:
 
@@ -22,7 +21,6 @@ Upstream repositories:
 - cifs-utils: https://git.samba.org/cifs-utils.git
 - grpc-lite: https://github.com/fanyang89/grpc-lite
 - raftz: https://github.com/fanyang89/raftz
-- zookeeper-zig: https://github.com/fanyang89/zookeeper-zig
 
 The pins are development baselines, not claims that every component is the latest
 release or that the distributed combination has passed interoperability tests.
@@ -95,22 +93,19 @@ path dependencies pointing to these submodules, and preserve upstream transitive
 dependency hashes. Reuse raftz's grpc-lite dependency instance when both APIs are
 needed, rather than creating incompatible duplicate module instances.
 
-The selected zookeeper-zig already pins the selected raftz revision, which pins
-the selected grpc-lite revision. Its RocksDB binding is pinned in
-`zookeeper-zig/build.zig.zon`; introduce that existing binding when implementing
-the metadata store instead of independently vendoring another RocksDB tree now.
+The selected raftz revision pins the selected grpc-lite revision. Introduce a
+RocksDB binding directly when implementing the metadata store.
 Similarly, nghttp2, libxev, c-ares, and protobuf dependencies remain managed by
 grpc-lite's own build rather than duplicated here.
 
-Follow each project's build/fetch instructions when compiling it. In particular,
-zookeeper-zig documents normalization of dependency archives for Zig 0.17 with
-hash verification. Never bypass verification or patch shared package caches.
+Follow each project's build/fetch instructions when compiling it. Preserve
+dependency hash verification and never patch shared package caches.
 
 ## Updating and licenses
 
 Fetch and check out an explicit upstream tag or commit inside the relevant
 submodule, review the changes and compatibility, then stage its gitlink in the
-parent repository. Keep grpc-lite, raftz, and zookeeper-zig pins aligned when
+parent repository. Keep grpc-lite and raftz pins aligned when
 updating their shared runtime. Run the checks and libfuse probe before committing.
 
 Submodules retain upstream license files. Samba and cifs-utils include GPLv3

@@ -14,7 +14,7 @@
 - 文件完整存放在 NAS 上，首版不跨 NAS 分块。
 - 默认双副本，支持单副本；双副本必须位于不同物理 NAS。
 - 用户可以在 NAS 管理界面将已有文件或目录移动到导入区；系统发现并接管，路径冲突需要明确提示。
-- 实现语言采用 Zig，优先复用自有 grpc-lite、raftz 和 zookeeper-zig 的适合能力。
+- 实现语言采用 Zig，核心依赖自有 grpc-lite 和 raftz。
 
 首版范围之外：多元数据分片、透明 SMB 会话故障接管、重度随机写优化、自动跨地域复制。
 
@@ -61,7 +61,6 @@
 | grpc-lite | 内部 RPC 与 raftz 的传输能力 |
 | raftz | 元数据共识、日志复制与状态机编排 |
 | RocksDB | 本地已应用元数据状态 |
-| zookeeper-zig | 复用合适模块，参考其持久化、快照、恢复和节点运行模式 |
 | Samba | SMB 协议、认证与客户端会话 |
 | Linux CIFS | 优先作为 NAS SMB 访问方式 |
 | FUSE / Samba VFS | 通过原型决定具体组合 |
@@ -72,7 +71,7 @@
 
 `zookeeper-zig/src/server/quorum.zig` 的 `Quorum` 直接持有 `ZooKeeperStateMachine`，不是可直接替换状态机的通用宿主。raftz 已提供独立的 `StateMachine` 接口与 `Raftor` 编排层。
 
-因此，首版建议由 nas-fs 直接实现 raftz 状态机，不额外部署 ZooKeeper 协调集群，也不将每个文件强行映射成 znode。是否提取共享运行时，待确认实际复用收益后决定。
+因此，nas-fs 直接实现 raftz 状态机，不依赖或部署 zookeeper-zig，也不将文件映射成 znode。zookeeper-zig 仅作为设计时参考的已有实现，不加入项目依赖或 submodule。
 
 grpc-lite 不自动重放 RPC，nas-fs 必须实现请求标识、结果查询、去重与安全重试。
 
@@ -379,13 +378,13 @@ DISCOVERED → CLAIMED → STAGED → REPLICATING → PUBLISHED
 4. 自动导入稳定窗口、明确完成确认方式与不确定身份处理。
 5. 租约时序、失效节点的在途 I/O 和对象回收协议。
 6. 元数据备份、整体灾难恢复、恢复后的旧节点隔离与版本兼容策略。
-7. zookeeper-zig 中值得直接复用或提取的模块，以及依赖的精确版本。
+7. RocksDB 绑定的选择，以及核心依赖的精确版本。
 
 上述事项需要原型和故障测试验证，不应视为已有实现保证。
 
 ## 15. 开源依赖源码接入
 
-已通过固定提交的 Git submodule 接入 Samba、libfuse、cifs-utils、grpc-lite、raftz 和 zookeeper-zig，位于 `third_party/`。Samba 同时包含 CTDB 和 VFS 接口源码；NAS 后端采用 Linux 内核 CIFS，因此暂不增加 libsmb2 或 libsmbclient。
+已通过固定提交的 Git submodule 接入 Samba、libfuse、cifs-utils、grpc-lite 和 raftz，位于 `third_party/`。Samba 同时包含 CTDB 和 VFS 接口源码；NAS 后端采用 Linux 内核 CIFS，因此暂不增加 libsmb2 或 libsmbclient。
 
 当前完成源码固定与初始化工具，libfuse 提供本地编译及 C 接口链接探针。Zig 核心依赖尚未导入应用构建图，SMB 导出、FUSE 操作、跨节点锁及缓存协调也尚未实现。具体版本、职责和构建说明见 `third_party/README.md`。
 
