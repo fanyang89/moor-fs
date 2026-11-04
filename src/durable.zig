@@ -6,6 +6,18 @@ const protocol = @import("machine.zig");
 
 const Meta = struct { schema: u32 = 1, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
 
+pub const ListRequest = struct { parent: u64, after: ?[]const u8 = null, limit: u8 = 16 };
+pub const Page = struct {
+    entries: []m.Node,
+    next: ?[]const u8,
+
+    pub fn deinit(self: Page, allocator: std.mem.Allocator) void {
+        for (self.entries) |node| allocator.free(node.name);
+        allocator.free(self.entries);
+        if (self.next) |name| allocator.free(name);
+    }
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     env: lmdb.Environment,
@@ -101,6 +113,68 @@ pub const Store = struct {
         var txn = try self.env.begin(true);
         defer txn.abort();
         return self.find(&txn, parent, name);
+    }
+
+    fn requireDirectory(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, id: u64) !void {
+        const node = (try self.readNode(txn, allocator, id)) orelse return error.NotFound;
+        if (node.kind != .directory) return error.NotDirectory;
+    }
+
+    pub fn lookupNode(self: *Store, allocator: std.mem.Allocator, parent: u64, name: []const u8) !?m.Node {
+        if (!m.validName(name)) return error.InvalidRequest;
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        try self.requireDirectory(&txn, arena.allocator(), parent);
+        const id = (try self.find(&txn, parent, name)) orelse return null;
+        var node = (try self.readNode(&txn, arena.allocator(), id)) orelse return error.CorruptStore;
+        node.name = try allocator.dupe(u8, node.name);
+        return node;
+    }
+
+    pub fn list(self: *Store, allocator: std.mem.Allocator, request: ListRequest) !Page {
+        if (request.limit == 0 or request.limit > 16) return error.InvalidRequest;
+        if (request.after) |name| if (!m.validName(name)) return error.InvalidRequest;
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        try self.requireDirectory(&txn, arena.allocator(), request.parent);
+        var entries: std.ArrayList(m.Node) = .empty;
+        errdefer {
+            for (entries.items) |node| allocator.free(node.name);
+            entries.deinit(allocator);
+        }
+        var cursor: ?*lmdb.c.MDB_cursor = null;
+        try lmdb.check(lmdb.c.mdb_cursor_open(txn.handle, self.dirents_db, &cursor));
+        defer lmdb.c.mdb_cursor_close(cursor);
+        var buffer: [263]u8 = undefined;
+        const start = directoryKey(&buffer, request.parent, request.after orelse "");
+        var key = lmdb.value(start);
+        var value: lmdb.c.MDB_val = undefined;
+        var rc = lmdb.c.mdb_cursor_get(cursor, &key, &value, lmdb.c.MDB_SET_RANGE);
+        var next: ?[]const u8 = null;
+        errdefer if (next) |name| allocator.free(name);
+        while (rc != lmdb.c.MDB_NOTFOUND) : (rc = lmdb.c.mdb_cursor_get(cursor, &key, &value, lmdb.c.MDB_NEXT)) {
+            try lmdb.check(rc);
+            const bytes = lmdb.bytes(key);
+            if (!std.mem.startsWith(u8, bytes, start[0..8])) break;
+            if (request.after != null and std.mem.eql(u8, bytes, start)) continue;
+            if (entries.items.len == request.limit) {
+                next = try allocator.dupe(u8, entries.items[entries.items.len - 1].name);
+                break;
+            }
+            const data = lmdb.bytes(value);
+            if (data.len != 8) return error.CorruptStore;
+            var node = (try self.readNode(&txn, arena.allocator(), std.mem.readInt(u64, data[0..8], .big))) orelse return error.CorruptStore;
+            node.name = try allocator.dupe(u8, node.name);
+            entries.append(allocator, node) catch |err| {
+                allocator.free(node.name);
+                return err;
+            };
+        }
+        return .{ .entries = try entries.toOwnedSlice(allocator), .next = next };
     }
 
     pub fn applyEntry(self: *Store, entry: raft.Entry) !raft.ApplyResult {

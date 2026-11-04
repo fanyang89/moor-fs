@@ -2,7 +2,7 @@ const std = @import("std");
 
 // Metadata RPCs use the single bytes field declared in proto/metadata.proto.
 pub fn encode(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
-    if (json.len > 4096) return error.MessageTooLarge;
+    if (json.len > 32768) return error.MessageTooLarge;
     var header: [6]u8 = undefined;
     header[0] = 10;
     var count: usize = 1;
@@ -24,7 +24,7 @@ pub fn decode(data: []const u8) ![]const u8 {
         if (i >= 4) return error.InvalidEnvelope;
         size |= @as(usize, byte & 127) << @intCast(i * 7);
         if (byte & 128 == 0) {
-            if (size != data.len - i - 2 or size > 4096) return error.InvalidEnvelope;
+            if (size != data.len - i - 2 or size > 32768) return error.InvalidEnvelope;
             return data[i + 2 ..];
         }
     }
@@ -44,6 +44,6 @@ test "bounded protobuf envelope round trip and malformed lengths" {
     try t.expectEqualStrings("", try decode(""));
     try t.expectError(error.InvalidEnvelope, decode("\x0a\x05abc"));
     try t.expectError(error.InvalidEnvelope, decode("\x0a\x80\x80\x80\x80\x01"));
-    const oversized: [4097]u8 = @splat('a');
+    const oversized: [32769]u8 = @splat('a');
     try t.expectError(error.MessageTooLarge, encode(t.allocator, &oversized));
 }

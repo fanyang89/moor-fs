@@ -19,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "apply", "Propose a metadata request to the leader", &.{ "endpoint", "json" }, remoteApply);
     try register(root, options, "get", "Read an inode through the leader with ReadIndex", &.{ "endpoint", "id" }, remoteGet);
     try register(root, options, "status", "Inspect a node's local Raft status", &.{"endpoint"}, remoteStatus);
+    try register(root, options, "lookup", "Look up a child by name", &.{ "endpoint", "parent", "name" }, remoteLookup);
+    try register(root, options, "list", "List a directory page", &.{ "endpoint", "parent" }, remoteList);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
     try root.addCommand(serve);
     for ([_][]const u8{ "node-id", "cluster-id", "raft-listen", "api-listen", "data-dir", "peers" }) |name| {
@@ -35,6 +37,10 @@ fn register(root: *zli.Command, options: zli.InitOptions, name: []const u8, desc
     const command = try zli.Command.init(options, .{ .name = name, .description = description }, handler);
     try root.addCommand(command);
     for (args) |arg| try command.addPositionalArg(.{ .name = arg, .description = arg, .required = true });
+    if (std.mem.eql(u8, name, "list")) {
+        try command.addFlag(.{ .name = "after", .description = "Exclusive name cursor from previous page", .type = .String, .default_value = .{ .String = "" } });
+        try command.addFlag(.{ .name = "limit", .description = "Page size (1-16)", .type = .Int, .default_value = .{ .Int = 16 } });
+    }
 }
 
 fn help(ctx: zli.CommandContext) !void {
@@ -95,6 +101,19 @@ fn remoteGet(ctx: zli.CommandContext) !void {
 
 fn remoteStatus(ctx: zli.CommandContext) !void {
     try remote(ctx, "Status", "{}");
+}
+
+fn remoteLookup(ctx: zli.CommandContext) !void {
+    const data = try std.json.Stringify.valueAlloc(ctx.allocator, .{ .parent = try std.fmt.parseUnsigned(u64, ctx.getArg("parent").?, 10), .name = ctx.getArg("name").? }, .{});
+    defer ctx.allocator.free(data);
+    try remote(ctx, "Lookup", data);
+}
+
+fn remoteList(ctx: zli.CommandContext) !void {
+    const after = ctx.flag("after", []const u8);
+    const data = try std.json.Stringify.valueAlloc(ctx.allocator, .{ .parent = try std.fmt.parseUnsigned(u64, ctx.getArg("parent").?, 10), .after = if (after.len == 0) @as(?[]const u8, null) else after, .limit = ctx.flag("limit", i32) }, .{});
+    defer ctx.allocator.free(data);
+    try remote(ctx, "List", data);
 }
 
 fn serveNode(ctx: zli.CommandContext) !void {

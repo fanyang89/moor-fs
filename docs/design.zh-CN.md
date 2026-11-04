@@ -430,12 +430,24 @@ CLI 已改用 zli v6.0.0，固定源码版本 `52a3773e7b825e755c878b022cb4f9c58
 - 每个节点的 `DATA_DIR/raft/` 保存 WAL、成员关系和快照，`DATA_DIR/metadata/` 保存 LMDB。LMDB 持久绑定 cluster/node identity；身份不一致拒绝启动，进程独占锁阻止同目录并发运行。本地修改命令拒绝写入集群数据库。
 - raftz 使用 pre-vote、check-quorum，禁止 proposal forwarding；非 leader 拒绝写入与业务读取。`status` 仅为本地诊断，不能用于线性一致读取。
 - API 在写入 Raft 前拒绝损坏 JSON、超长请求、版本不支持及零 request ID。RPC 使用 `proto/metadata.proto` 中的 Envelope 携带原型 JSON；命名空间业务失败仍作为结果返回。
-- 写入成功代表多数派 WAL 提交且 leader 的 LMDB 已同步应用。请求超时不代表一定没提交；调用方需查询 leader 后使用同一 request ID 和内容重试，CLI 暂不自动发现 leader 或重试。
+- 写入成功代表多数派 WAL 提交且 leader 的 LMDB 已同步应用。请求超时不代表一定没提交；调用方需使用同一 request ID 和内容重试。多地址 CLI 探测与重试见第 18 节。
 - 重启核对 LMDB applied cursor 与 WAL 的 commit/term；必要时恢复快照并重放未应用的已提交日志。落后节点在日志已压缩时通过网络快照追赶。自动快照默认阈值为 1000，测试使用 8。
 - SIGINT/SIGTERM 停止接收 API 并清理运行线程；进程被 SIGKILL 后使用原目录和身份重启。LMDB 不能独立替代 Raft WAL 作为集群备份。
 
 `zig build test-cluster` 启动三个真实进程，验证选主、请求去重、非 leader 拒绝、ReadIndex、leader 退出后选主与写入、网络快照追赶、全体 SIGKILL 后恢复、保留 WAL/快照重建缺失 LMDB，以及少数派不可确认写入与读取。集成测试使用临时目录和动态 loopback 端口，不修改现有集群。依赖 Linux io_uring。
 
 当前仍为受信任开发网络上的明文原型。尚未实现动态成员管理、客户端身份域、TLS/认证、SMB/FUSE、NAS 物理副本、跨机器长时间负载及硬件断电测试。
+
+## 18. 目录查询与客户端故障切换
+
+新增 `lookup ENDPOINTS PARENT NAME` 和 `list ENDPOINTS PARENT --limit N --after NAME`，对应 Lookup/List RPC。二者先经过 ReadIndex，再在单个 LMDB 只读事务内校验父目录、查询目录索引及 inode，返回独立持有的名称。名称查找保持 ASCII 大小写不敏感；父目录不存在或不是目录返回明确错误。
+
+目录按大小写折叠后的 UTF-8 字节序分页，每页最多 16 项。`next` 为本页最后名称，仅在还有后续项时返回；下一页从严格大于该名称的位置开始。游标项被删除后仍可继续。空目录返回空数组及 null 游标。每页独立一致，不跨页持有快照；并发插入、删除、重命名可能遗漏或重复条目，不能把多页遍历当作同一时刻的快照。
+
+响应 Envelope 上限增至 32 KiB，覆盖 16 个最长名称的 JSON 转义及游标；请求和 Raft 命令仍限制为 4 KiB。测试覆盖大小写查询、分页顺序、已删除游标、结果所有权、空目录、非法参数及最大转义页面。
+
+apply/get/lookup/list 接受同一集群最多三个逗号分隔的 API 地址，多地址调用最多探测五轮，每轮间隔一秒，单次 RPC 截止时间八秒。连接建立还受传输层及操作系统超时影响，因此这是尝试次数限制，不是整体耗时保证。连接失败、不可用、超时、背压和 leader 变化触发重试，其他错误立即返回；写入始终复用完全相同的 JSON 和 request ID。单地址不重试，status 保持单节点诊断。重试耗尽仍可能存在未知提交结果。
+
+三进程集成测试新增 follower 优先的 leader 探测、leader 被杀后的自动写入重试、重启后完整分页遍历及错误分类验证。此层为后续 FUSE 提供目录查询能力，尚未定义 FUSE 的目录句柄及跨页缓存语义。
 
 原型暂限 4096 个存活 inode、8192 条请求记录及 8 MiB 快照；请求记录不自动淘汰，达到上限后新请求被拒绝，已有请求仍可查询原结果。名称暂采用 ASCII 大小写不敏感比较与 UTF-8 校验，尚不构成完整 SMB 名称兼容。后续需要持久化存储、去重保留协议和客户端身份域。

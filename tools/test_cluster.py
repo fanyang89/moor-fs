@@ -139,12 +139,27 @@ def main():
                 "metadata-show", directory / f"node-{first}" / "metadata", success=False
             )
             assert run("get", addresses[first + 3], "2")["name"] == "original"
+            endpoints = ",".join(
+                addresses[i + 3]
+                for i in [
+                    follower,
+                    first,
+                    next(i for i in processes if i not in (follower, first)),
+                ]
+            )
+            assert run("lookup", endpoints, "1", "ORIGINAL")["id"] == 2
+            assert run("lookup", endpoints, "1", "missing") is None
+            assert run("list", endpoints, "1")["entries"][0]["name"] == "original"
+            invalid = run("list", endpoints, "2", success=False)
+            assert "NotDirectory" in invalid.stderr or "NotDirectory" in invalid.stdout
+            run("list", endpoints, "1", "--limit", "0", success=False)
             print(
                 "PASS: election, proposal, deduplication, validation, leader-only ReadIndex, store lock",
                 flush=True,
             )
 
             stop(first)
+            assert run("apply", endpoints, json.dumps(request)) == result
             elected = leader()
             assert elected != first
             assert apply(elected, request) == result
@@ -202,6 +217,22 @@ def main():
                 start(i)
             elected = leader()
             assert apply(elected, request) == result
+            names = []
+            after = None
+            while True:
+                args = ["list", endpoints, "1", "--limit", "3"]
+                if after is not None:
+                    args += ["--after", after]
+                page = run(*args)
+                names.extend(entry["name"] for entry in page["entries"])
+                after = page["next"]
+                if after is None:
+                    break
+            assert names == sorted(["original"] + [f"file-{i}" for i in range(2, 30)])
+            print(
+                "PASS: leader discovery, automatic write retry, lookup and paginated directory reads",
+                flush=True,
+            )
             assert run("get", addresses[elected + 3], "2")["name"] == "original"
             print("PASS: whole-cluster SIGKILL and WAL/LMDB restart", flush=True)
 

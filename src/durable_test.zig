@@ -30,6 +30,61 @@ fn apply(store: *Store, index: u64, request: m.Request) !m.Result {
 
 const create: m.Request = .{ .request_id = 1, .command = .{ .create = .{ .parent = 1, .name = "photos", .kind = .directory } } };
 
+test "directory pages use exclusive case-folded cursors and own their data" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    for ([_][]const u8{ "Zulu", "alpha", "Bravo" }, 1..) |name, index| {
+        _ = try apply(&store, index, .{ .request_id = index, .command = .{ .create = .{ .parent = 1, .name = name, .kind = .file } } });
+    }
+    const node = (try store.lookupNode(t.allocator, 1, "BRAVO")).?;
+    defer t.allocator.free(node.name);
+    try t.expectEqualStrings("Bravo", node.name);
+    try t.expectEqual(@as(?m.Node, null), try store.lookupNode(t.allocator, 1, "missing"));
+    const first = try store.list(t.allocator, .{ .parent = 1, .limit = 2 });
+    defer first.deinit(t.allocator);
+    try t.expectEqualStrings("alpha", first.entries[0].name);
+    try t.expectEqualStrings("Bravo", first.next.?);
+    _ = try apply(&store, 4, .{ .request_id = 4, .command = .{ .remove = .{ .id = node.id } } });
+    const second = try store.list(t.allocator, .{ .parent = 1, .after = "BRAVO", .limit = 2 });
+    defer second.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 1), second.entries.len);
+    try t.expectEqualStrings("Zulu", second.entries[0].name);
+    try t.expect(second.next == null);
+    try t.expectEqualStrings("Bravo", first.entries[1].name);
+    try t.expectError(error.NotDirectory, store.list(t.allocator, .{ .parent = 2 }));
+    try t.expectError(error.NotFound, store.lookupNode(t.allocator, 99, "a"));
+    try t.expectError(error.InvalidRequest, store.list(t.allocator, .{ .parent = 1, .limit = 0 }));
+    try t.expectError(error.InvalidRequest, store.list(t.allocator, .{ .parent = 1, .after = ".." }));
+}
+
+test "maximum directory page fits the bounded RPC envelope with escaped names" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const empty = try store.list(t.allocator, .{ .parent = 1 });
+    defer empty.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 0), empty.entries.len);
+    try t.expect(empty.next == null);
+    for (0..17) |i| {
+        var name: [255]u8 = @splat(1);
+        name[0] = @intCast('a' + i);
+        const result = try apply(&store, i + 1, .{ .request_id = i + 1, .command = .{ .create = .{ .parent = 1, .name = &name, .kind = .file } } });
+        try t.expectEqual(m.Status.ok, result.status);
+    }
+    const page = try store.list(t.allocator, .{ .parent = 1 });
+    defer page.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 16), page.entries.len);
+    try t.expect(page.next != null);
+    const json = try std.json.Stringify.valueAlloc(t.allocator, page, .{});
+    defer t.allocator.free(json);
+    const encoded = try @import("wire.zig").encode(t.allocator, json);
+    defer t.allocator.free(encoded);
+    try t.expectEqualStrings(json, try @import("wire.zig").decode(encoded));
+}
+
 test "LMDB node binding survives restart and prevents identity reuse and local writes" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

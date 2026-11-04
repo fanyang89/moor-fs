@@ -48,7 +48,7 @@ The reference state machine remains in memory. The LMDB `Store` implements
 restore. A fixed three-voter Raft group now runs over grpc-lite with persistent
 WAL, automatic snapshots, leader-only proposals, and ReadIndex-protected reads.
 Real-process tests cover failover, catch-up, full restart and metadata rebuild.
-Membership changes, automatic client leader discovery, TLS/authentication, and
+Membership changes, TLS/authentication, and
 production load/partition testing remain pending. The current network service
 is a cleartext prototype for trusted development networks.
 
@@ -171,16 +171,49 @@ zig-out/bin/nas-fs get 127.0.0.1:8001 2
 
 `status` is a local diagnostic, not a linearizable read. `apply` returns a JSON
 business result; `get` returns a node or `null`. Followers reject these operations
-with `NotLeader`; the CLI does not automatically forward or retry. A transport or
+with `NotLeader`; a single-endpoint invocation does not retry. A transport or
 timeout error may have an unknown commit outcome: find the current leader and
 retry the **same request ID and command**. Without a majority, no successful write
 or ReadIndex response is issued. SIGINT/SIGTERM drain the API and stop Raft.
 
-The API is declared in `proto/metadata.proto`: unary `Apply`, `Get`, and `Status`
+The API is declared in `proto/metadata.proto`: unary `Apply`, `Get`, `Lookup`, `List`, and `Status`
 carry bounded version-1 JSON in an `Envelope.json` bytes field. Apply uses the
 request above; Get uses `{"id":2}`; Status uses `{}`. The prototype envelope codec
 accepts a single field (or an empty default envelope), not arbitrary extra fields.
 The internal ten-byte Raft response is converted to JSON for clients.
+
+### Directory reads and client failover
+
+```sh
+zig-out/bin/nas-fs lookup 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 photos
+zig-out/bin/nas-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8
+# Continue with the returned non-null `next` value:
+zig-out/bin/nas-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8 --after photos
+```
+
+`apply`, `get`, `lookup`, and `list` accept up to three comma-separated API
+endpoints belonging to the same cluster. Multiple endpoints enable leader probing
+and retry: five ordered rounds, a one-second pause between rounds, and an
+eight-second RPC deadline per attempt. Connection establishment also depends on
+the transport/OS timeout; this is an attempt bound, not a total wall-clock deadline.
+Connection failures, unavailable/deadline/backpressure statuses and leader changes
+are retried. Invalid requests and other application errors stop immediately.
+Every write retry uses identical JSON, including its request ID. Exhausting
+retries leaves the commit outcome uncertain. `status` still accepts one endpoint.
+
+Lookup takes `{"parent":1,"name":"photos"}` and returns a node or `null`.
+List takes `{"parent":1,"limit":16,"after":null}` and returns
+`{"entries":[...],"next":null}`. Both use ReadIndex and one LMDB read transaction.
+A missing parent or non-directory parent is an RPC error. Names use the existing
+ASCII-case-insensitive lookup rules. Pages contain 1–16 entries at most, ordered
+by case-folded UTF-8 name bytes; `next` is an exclusive name cursor, or `null` at
+the end. Empty directories return an empty page. Each page is independently
+consistent; concurrent inserts/removes/renames between pages may omit or repeat
+entries. Restart enumeration when a fresh full view is needed.
+
+The envelope JSON limit is 32 KiB to accommodate 16 maximally escaped names;
+incoming requests and replicated commands retain their 4 KiB limit. Page results
+own their names and remain valid after the LMDB transaction ends.
 
 ### Persistence and recovery
 

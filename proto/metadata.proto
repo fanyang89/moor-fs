@@ -9,5 +9,7 @@ message Envelope {
 service Metadata {
   rpc Apply(Envelope) returns (Envelope);
   rpc Get(Envelope) returns (Envelope);
+  rpc Lookup(Envelope) returns (Envelope);
+  rpc List(Envelope) returns (Envelope);
   rpc Status(Envelope) returns (Envelope);
 }

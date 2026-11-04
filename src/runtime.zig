@@ -126,6 +126,8 @@ pub const Runtime = struct {
         errdefer self.server.deinit();
         try self.server.registerUnary("/nas.fs.Metadata/Apply", grpc.UnaryHandler.bind(Runtime, self, apply));
         try self.server.registerUnary("/nas.fs.Metadata/Get", grpc.UnaryHandler.bind(Runtime, self, get));
+        try self.server.registerUnary("/nas.fs.Metadata/Lookup", grpc.UnaryHandler.bind(Runtime, self, lookup));
+        try self.server.registerUnary("/nas.fs.Metadata/List", grpc.UnaryHandler.bind(Runtime, self, list));
         try self.server.registerUnary("/nas.fs.Metadata/Status", grpc.UnaryHandler.bind(Runtime, self, status));
         self.driver = try std.Thread.spawn(.{}, drive, .{self});
         errdefer {
@@ -186,11 +188,7 @@ pub const Runtime = struct {
         const data = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
         const parsed = std.json.parseFromSlice(struct { id: u64 }, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
         defer parsed.deinit();
-        if (!self.node.isLeader()) return fail(allocator, error.NotLeader);
-        var pending: Pending = .{};
-        self.node.readIndex("metadata-get", .{ .ctx = &pending, .function = Pending.read }) catch |err| return fail(allocator, err);
-        pending.wait();
-        if (pending.failure) |err| return fail(allocator, err);
+        self.readBarrier() catch |err| return fail(allocator, err);
         const node = self.store.get(allocator, parsed.value.id) catch |err| return fail(allocator, err);
         defer if (node) |value| allocator.free(value.name);
         return reply(allocator, node);
@@ -200,6 +198,34 @@ pub const Runtime = struct {
         _ = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
         if (self.failed.load(.acquire)) return fail(allocator, error.ShuttingDown);
         return reply(allocator, self.node.getStatus());
+    }
+
+    fn readBarrier(self: *Runtime) !void {
+        if (!self.node.isLeader()) return error.NotLeader;
+        var pending: Pending = .{};
+        try self.node.readIndex("metadata-read", .{ .ctx = &pending, .function = Pending.read });
+        pending.wait();
+        if (pending.failure) |err| return err;
+    }
+
+    fn lookup(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        const data = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
+        const parsed = std.json.parseFromSlice(struct { parent: u64, name: []const u8 }, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
+        defer parsed.deinit();
+        self.readBarrier() catch |err| return fail(allocator, err);
+        const node = self.store.lookupNode(allocator, parsed.value.parent, parsed.value.name) catch |err| return fail(allocator, err);
+        defer if (node) |value| allocator.free(value.name);
+        return reply(allocator, node);
+    }
+
+    fn list(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        const data = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
+        const parsed = std.json.parseFromSlice(@import("durable.zig").ListRequest, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
+        defer parsed.deinit();
+        self.readBarrier() catch |err| return fail(allocator, err);
+        const page = self.store.list(allocator, parsed.value) catch |err| return fail(allocator, err);
+        defer page.deinit(allocator);
+        return reply(allocator, page);
     }
 };
 
@@ -248,6 +274,8 @@ fn fail(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
     const code: grpc.StatusCode = switch (err) {
         error.NotLeader, error.LostLeadership => .failed_precondition,
         error.InvalidRequest => .invalid_argument,
+        error.NotFound => .not_found,
+        error.NotDirectory => .failed_precondition,
         error.ProposalBackpressure, error.ReadIndexBackpressure => .resource_exhausted,
         error.ShuttingDown, error.Timeout, error.ProposalDropped => .unavailable,
         else => .internal,
@@ -256,6 +284,33 @@ fn fail(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
 }
 
 pub fn call(allocator: std.mem.Allocator, address: []const u8, method: []const u8, json: []const u8) ![]u8 {
+    var addresses: [3][]const u8 = undefined;
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, address, ',');
+    while (parts.next()) |part| {
+        if (count == addresses.len) return error.InvalidEndpoint;
+        _ = try endpoint(part);
+        addresses[count] = part;
+        count += 1;
+    }
+    if (count == 1) return callOne(allocator, address, method, json);
+    if (std.mem.eql(u8, method, "Status")) return error.InvalidEndpoint;
+    for (0..5) |round| {
+        for (addresses[0..count]) |target| {
+            return callOne(allocator, target, method, json) catch |err| switch (err) {
+                error.RetryableRpc, error.ConnectionFailed => continue,
+                else => return err,
+            };
+        }
+        if (round < 4) {
+            const duration: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
+            _ = std.os.linux.nanosleep(&duration, null);
+        }
+    }
+    return error.ClusterUnavailable;
+}
+
+fn callOne(allocator: std.mem.Allocator, address: []const u8, method: []const u8, json: []const u8) ![]u8 {
     _ = try endpoint(address);
     var channel = try grpc.Channel.init(allocator, address, .{});
     defer channel.deinit();
@@ -263,9 +318,13 @@ pub fn call(allocator: std.mem.Allocator, address: []const u8, method: []const u
     defer allocator.free(path);
     const request = try wire.encode(allocator, json);
     defer allocator.free(request);
-    var result = try channel.callUnary(allocator, path, request, .{ .timeout_ns = 8 * std.time.ns_per_s });
+    var result = try channel.callUnary(allocator, path, request, .{ .timeout_ns = 8 * std.time.ns_per_s, .max_response_size = 32776 });
     defer result.deinit();
     if (!result.status.isOk()) {
+        if (result.status.code == .unavailable or result.status.code == .deadline_exceeded or
+            result.status.code == .resource_exhausted or
+            (result.status.code == .failed_precondition and
+                (std.mem.eql(u8, result.status.message, "NotLeader") or std.mem.eql(u8, result.status.message, "LostLeadership")))) return error.RetryableRpc;
         std.log.err("RPC {s}: {s}", .{ @tagName(result.status.code), result.status.message });
         return error.RpcFailed;
     }
