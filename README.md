@@ -43,20 +43,22 @@ For the native FUSE build/link probe, see `third_party/README.md`.
 ## Current boundaries
 
 This is the first part of milestone M0, not a usable distributed filesystem.
-The state machine is in memory and does not advertise `durable_applied` support.
-Snapshots are serialized buffers; disk persistence, RocksDB, a running Raft group,
-network RPC endpoints, linearizable read routing, and process recovery are pending.
+The reference state machine remains in memory. The LMDB `Store` implements
+`durable_applied`, synchronous transactional persistence, and logical snapshot
+restore. A running Raft group, network RPC endpoints, linearizable read routing,
+and coordinated WAL/state-machine recovery are pending.
 The deterministic replay tests do not constitute a network consensus test.
 
 Replica counts are desired metadata only. No file contents, write leases, physical
 replicas, repairs, SMB exports, or FUSE operations are implemented yet. Metadata
 deletion is not a physical-object garbage collection protocol.
 
-The initial implementation uses bounded arrays and linear searches: 4,096 live
+The reference implementation uses arrays; LMDB uses indexed named databases.
+Both retain prototype bounds: 4,096 live
 inodes (including root) and 8,192 retained request receipts. Receipts are not
 silently evicted; at the receipt limit new request IDs are rejected, while known
-IDs remain replayable. A durable store and an explicit deduplication retention
-protocol must replace these prototype limits before deployment.
+IDs remain replayable. An explicit deduplication retention protocol and capacity
+planning must replace these prototype limits before deployment.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future RPC layer must allocate a suitable client/session-scoped identity.
@@ -98,7 +100,40 @@ access with reads and snapshot creation; the in-memory type has no internal lock
 
 ## Next milestones
 
-1. Durable metadata storage and atomic applied-cursor persistence.
+1. Durable metadata storage and atomic applied-cursor persistence (implemented).
 2. Three-node Raft/RPC operation, failure recovery, and linearizable reads.
 3. SMB/FUSE share-mode prototype, followed by NAS data placement and strict
    two-replica publication.
+
+## Local LMDB storage
+
+LMDB 0.9.36 is compiled from the pinned source submodule. Store each node's
+database on local SSD, never on an SMB share. Default synchronous commits are
+used; no `NOSYNC`, `NOMETASYNC`, `MAPASYNC`, or `WRITEMAP` flags are enabled.
+Each command atomically persists inode/directory updates, its request receipt,
+and the applied index/term. Storage failures abort the transaction and are fatal
+to the Raft adapter. Returned node names are caller-owned.
+
+```sh
+mkdir -p metadata-local
+zig build run -- metadata-apply metadata-local 1 1 '{"request_id":1,"command":{"create":{"parent":1,"name":"photos","kind":"directory"}}}'
+zig build run -- metadata-show metadata-local
+```
+
+These are local development tools, not Raft proposals; use a separate test
+database. The directory must exist. `metadata-show` initializes an empty store
+when needed. CLI map size is 256 MiB; the library requires an explicit size.
+Automatic map resizing and receipt expiry are not implemented. A full map
+rolls back the complete operation.
+
+Named databases are `meta`, `inodes`, `dirents`, and `requests`. Logical snapshots
+share format version 1 with the reference machine. Restore validates the bounded
+image, replaces records, rebuilds directory indexes, and commits the new cursor
+in one transaction. It requires enough map space for copy-on-write replacement.
+Keep one environment handle per database per process, serialize state-machine
+operations, and close it only after all users have stopped. NAS/RPC work must
+remain outside database transactions. Tests cover reopen, reference parity,
+snapshot replacement, map exhaustion, and allocation-failure rollback.
+Run `python3 tools/test_lmdb_recovery.py` after `zig build` for repeated process
+restart/SIGKILL checks. This checks transaction consistency and acknowledged
+commits across process death, not hardware power-loss durability.

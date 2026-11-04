@@ -13,3 +13,6 @@
 [submodule "third_party/raftz"]
 	path = third_party/raftz
 	url = https://github.com/fanyang89/raftz.git
+[submodule "third_party/lmdb"]
+	path = third_party/lmdb
+	url = https://github.com/LMDB/lmdb.git

@@ -7,8 +7,33 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.Writer.init(.stdout(), init.io, &buffer);
     const writer = &output.interface;
+    if (args.len >= 3 and (std.mem.eql(u8, args[1], "metadata-show") or std.mem.eql(u8, args[1], "metadata-apply"))) {
+        const show = std.mem.eql(u8, args[1], "metadata-show");
+        if (args.len != (if (show) @as(usize, 3) else 6)) return error.InvalidArguments;
+        const path = try allocator.dupeSentinel(u8, args[2], 0);
+        var store = try nas.Store.open(allocator, path, 256 * 1024 * 1024);
+        defer store.close();
+        if (show) {
+            const cursor = try store.applied();
+            const data = try store.snapshot(allocator, cursor.index, cursor.term);
+            try writer.print("{s}\n", .{data});
+        } else {
+            var result = try store.applyEntry(.{
+                .index = try std.fmt.parseInt(u64, args[3], 10),
+                .term = try std.fmt.parseInt(u64, args[4], 10),
+                .data = @constCast(args[5]),
+            });
+            defer result.deinit(allocator);
+            if (result.response) |response| {
+                const decoded = try nas.machine.decodeResult(response);
+                try writer.print("status={s} inode={d}\n", .{ @tagName(decoded.status), decoded.inode });
+            }
+        }
+        try writer.flush();
+        return;
+    }
     if (args.len != 2 or !std.mem.eql(u8, args[1], "metadata-demo")) {
-        try writer.writeAll("Usage: nas-fs metadata-demo\nRuns an in-memory metadata demonstration; does not start SMB or Raft networking.\n");
+        try writer.writeAll("Usage:\n  nas-fs metadata-demo\n  nas-fs metadata-show DIRECTORY\n  nas-fs metadata-apply DIRECTORY INDEX TERM JSON\nLocal metadata tools; DIRECTORY must exist. No SMB or Raft networking.\n");
         try writer.flush();
         return;
     }

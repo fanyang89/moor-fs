@@ -83,10 +83,7 @@ pub const State = struct {
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (request.request_id == 0) return .{ .status = .invalid_request };
-        const encoded = try std.json.Stringify.valueAlloc(self.allocator, request, .{});
-        defer self.allocator.free(encoded);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
+        const digest = try requestDigest(self.allocator, request);
         for (self.receipts.items) |receipt| {
             if (receipt.request_id == request.request_id) {
                 if (!std.mem.eql(u8, &receipt.digest, &digest)) return .{ .status = .request_conflict };
@@ -197,7 +194,15 @@ pub fn validName(name: []const u8) bool {
     return std.mem.indexOfAny(u8, name, "/\\\x00") == null;
 }
 
-fn validateSnapshot(data: Snapshot) !void {
+pub fn requestDigest(allocator: std.mem.Allocator, request: Request) ![32]u8 {
+    const encoded = try std.json.Stringify.valueAlloc(allocator, request, .{});
+    defer allocator.free(encoded);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
+    return digest;
+}
+
+pub fn validateSnapshot(data: Snapshot) !void {
     if (data.nodes.len == 0 or data.nodes.len > max_nodes or data.receipts.len > max_receipts) return error.InvalidSnapshot;
     const root = data.nodes[0];
     if (root.id != root_id or root.parent != 0 or root.name.len != 0 or root.kind != .directory) return error.InvalidSnapshot;

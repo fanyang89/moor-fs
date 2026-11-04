@@ -6,5 +6,5 @@
     .dependencies = .{
         .raftz = .{ .path = "third_party/raftz" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "third_party/raftz", "tools" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "third_party/raftz", "third_party/lmdb", "tools" },
 }

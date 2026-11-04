@@ -6,7 +6,7 @@ pub const max_command_bytes = 4096;
 pub const max_snapshot_bytes = 8 * 1024 * 1024;
 pub const response_size = 10;
 
-const Image = struct {
+pub const Image = struct {
     version: u32 = 1,
     index: u64,
     term: u64,

@@ -10,6 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / ".deps-build" / "libfuse"
 SOURCES = {
+    "lmdb": ("libraries/liblmdb/LICENSE", "libraries/liblmdb/lmdb.h"),
     "samba": ("COPYING", "source3/include/vfs.h"),
     "libfuse": ("LICENSE", "include/fuse_lowlevel.h"),
     "cifs-utils": ("COPYING", "mount.cifs.c"),
