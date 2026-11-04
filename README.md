@@ -48,15 +48,15 @@ The reference state machine remains in memory. The LMDB `Store` implements
 restore. A fixed three-voter Raft group now runs over grpc-lite with persistent
 WAL, automatic snapshots, leader-only proposals, and ReadIndex-protected reads.
 Real-process tests cover failover, catch-up, full restart and metadata rebuild.
-An optional read-only FUSE namespace adapter supports lookup, attributes and
-directory handles. Membership changes, TLS/authentication, and
+An optional read-only FUSE adapter supports lookup, attributes, directory handles
+and version-pinned file reads. Membership changes, TLS/authentication, and
 production load/partition testing remain pending. The current network service
 is a cleartext prototype for trusted development networks.
 
 The CLI can copy, verify and publish whole files on configured mounted backend
 directories, and export a verified replica. Write leases, automatic placement,
-repairs, FUSE file-content access and SMB exports remain pending. Metadata deletion
-is not a physical-object garbage collection protocol. Raw `apply` publication
+repairs and SMB exports remain pending. FUSE supports verified read-only file access.
+Metadata deletion is not a physical-object garbage collection protocol. Raw `apply` publication
 still validates metadata declarations only.
 
 The reference implementation uses arrays; LMDB uses indexed named databases.
@@ -235,10 +235,29 @@ to unmount. It requires `/dev/fuse` and a working system `fusermount3` helper.
 The binary links the locally built libfuse and records its build directory as a
 runtime library path. The default build does not require libfuse and omits `mount`.
 
-This is a metadata-only, read-only view. Directories have mode 0555, files 0444,
-and ownership is the mounting user's UID/GID. Sizes and timestamps are placeholders
-(zero); opening file contents fails with `EOPNOTSUPP`, while mutations are rejected
-by the read-only mount. This mount does not expose CLI file contents or SMB.
+Directories have mode 0555, files 0444, and ownership is the mounting user's UID/GID.
+Published file sizes come from immutable version metadata; timestamps remain zero.
+Add `--backends backends.json` to enable read-only contents using the same local
+mapping as `put-file`/`get-file`:
+
+```sh
+zig-out/bin/nas-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json
+```
+
+Each open pins the queried version and fully verifies a replica's size/SHA-256
+before returning its descriptor. Missing, unreadable or corrupt replicas are
+skipped. Offset reads use that descriptor and the pinned size, including after
+publication of a newer version or metadata unlink. New opens observe current
+metadata. `direct_io` avoids sharing inode page-cache contents between different
+versions. File attributes requested without a handle describe the current version,
+not necessarily the version held by an older descriptor.
+
+Without `--backends`, content opens return `EOPNOTSUPP`. With a mapping, unpublished
+files return `ENODATA`, and no healthy replica returns `EIO`; a published empty file
+is readable. Mutations are rejected. Reads after open do not rehash each range or
+automatically switch replicas: backend read errors/premature EOF return `EIO`.
+Installed objects must remain immutable; same-size out-of-band changes after open
+are not detected. There is no client-facing SMB export yet.
 
 Lookup and getattr use the remote linearizable metadata queries with zero entry
 and attribute cache timeouts. Each opendir gathers pages into an owned list and
@@ -246,12 +265,14 @@ adds `.`/`..`; readdir offsets index that list, so rewind/resume and subsequent
 metadata changes do not shift an open handle's entries. Reopen to refresh the
 listing. Collection itself uses independent pages, not a global snapshot; a
 detected duplicate inode or capacity overflow returns `EAGAIN`. Other concurrent
-changes can still produce omissions. Up to 64 open directory handles are allowed,
-each bounded by the metadata inode limit. Handles are freed on close or unmount.
+changes can still produce omissions. Up to 64 combined file/directory handles are
+allowed; each directory list is bounded by the metadata inode limit. Handles and
+object descriptors are freed on close or unmount.
 
-The initial adapter uses libfuse's single-threaded loop. Slow RPCs can stall other
-filesystem operations; multi-address retries retain their documented attempt
-bounds. This is intended for namespace validation before adding file data and SMB.
+The adapter uses libfuse's single-threaded loop. Slow RPCs, whole-file verification
+on open and backend reads can stall other filesystem operations. Multi-address
+retries retain their documented attempt bounds; NAS I/O has no deadline. Read
+buffers are capped at 1 MiB; no mmap or SMB share-mode semantics are provided.
 
 ```sh
 zig build test-fuse -Dfuse=true
@@ -259,7 +280,8 @@ zig build test-fuse -Dfuse=true
 
 This extends the real three-node test with two temporary FUSE mounts, multi-page
 enumeration, open-handle stability during rename, cross-mount visibility,
-read-only/content-open errors, leader failover and clean unmount. It requires
+verified contents, offset/EOF reads, pinned versions, corruption/unavailable-root
+fallback, empty/unpublished files, leader failover and clean unmount. It requires
 working mount permissions and fails rather than silently skipping mount checks.
 
 ### Backend and immutable version metadata
@@ -298,7 +320,7 @@ version garbage collection yet.
 
 Raw `apply` checks validate metadata declarations only: no NAS copies, checksums,
 flushes or write-session fencing are performed. A successful publication is not
-proof of physical file durability, and FUSE still does not expose file contents.
+proof of physical file durability. FUSE content opens independently verify a replica.
 
 Opening a schema-1 LMDB store transactionally upgrades it to schema 2 with
 `backends` and `versions` databases. Snapshots now emit version 2; version-1
@@ -382,6 +404,7 @@ whole-cluster restart. These tests do not emulate NAS hardware durability.
 ```sh
 zig build test-e2e
 zig build test-e2e -Doptimize=safe
+zig build test-e2e -Dfuse=true -Doptimize=safe
 ```
 
 Requires `smbd`, `smbclient`, `mount.cifs`, `umount`, `unshare`, Python 3 and
@@ -403,6 +426,8 @@ Successful runs stop processes, unmount shares and remove their workspace; failu
 retain Samba logs and backend objects under `${TMPDIR:-/tmp/opencode}/nas-fs-e2e-*`.
 Verified with Samba 4.24.7 and Linux CIFS. This covers the backend SMB transport,
 not a client-facing unified SMB export or physical NAS power-loss durability.
+With `-Dfuse=true`, the suite also runs two real FUSE mounts over these CIFS-backed
+objects, including version-pinned reads; build libfuse and enable `/dev/fuse` first.
 
 ### Persistence and recovery
 

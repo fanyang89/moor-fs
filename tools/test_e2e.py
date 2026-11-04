@@ -191,6 +191,8 @@ follow symlinks = no
             "--smb-ports",
             *(str(s["port"]) for s in servers),
         ]
+        if args.fuse:
+            command.append("--fuse")
         environment = dict(os.environ, HOME=account.pw_dir, TMPDIR=str(directory))
         # Metadata processes and file operations run as the original ordinary user.
         cluster = subprocess.Popen(
@@ -248,6 +250,7 @@ follow symlinks = no
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
+    parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
@@ -272,26 +275,27 @@ def main():
     base = Path(os.environ.get("TMPDIR", "/tmp/opencode"))
     base.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="nas-fs-e2e-", dir=base)).resolve()
-    result = subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "unshare",
-            "--mount",
-            "--propagation",
-            "private",
-            sys.executable,
-            str(Path(__file__).resolve()),
-            executable,
-            "--worker",
-            "--directory",
-            str(directory),
-            "--uid",
-            str(os.getuid()),
-            "--gid",
-            str(os.getgid()),
-        ]
-    )
+    command = [
+        "sudo",
+        "-n",
+        "unshare",
+        "--mount",
+        "--propagation",
+        "private",
+        sys.executable,
+        str(Path(__file__).resolve()),
+        executable,
+        "--worker",
+        "--directory",
+        str(directory),
+        "--uid",
+        str(os.getuid()),
+        "--gid",
+        str(os.getgid()),
+    ]
+    if args.fuse:
+        command.append("--fuse")
+    result = subprocess.run(command)
     if result.returncode:
         print(f"E2E failed; workspace: {directory}", file=sys.stderr)
     else:

@@ -1,19 +1,23 @@
 const std = @import("std");
 const nas = @import("nas_fs");
 const m = nas.metadata;
+const objects = nas.objects;
 const allocator = std.heap.smp_allocator;
 
-const Entry = extern struct { id: u64, parent: u64, directory: c_int, name: [256]u8 };
+const Entry = extern struct { id: u64, parent: u64, size: u64, directory: c_int, name: [256]u8 };
 const Api = extern struct {
     context: *anyopaque,
     get: *const fn (*anyopaque, u64, ?[*:0]const u8, *Entry) callconv(.c) c_int,
     list: *const fn (*anyopaque, u64, *?[*]Entry, *usize) callconv(.c) c_int,
     free: *const fn ([*]Entry, usize) callconv(.c) void,
+    open: *const fn (*anyopaque, u64, *Entry, *c_int) callconv(.c) c_int,
 };
 extern fn nas_fuse_run(path: [*:0]const u8, api: *const Api) c_int;
 
 const Client = struct {
     endpoints: []const u8,
+    io: std.Io,
+    mappings: []const objects.Mapping,
 
     fn query(self: *Client, comptime T: type, method: []const u8, request: anytype) !std.json.Parsed(T) {
         const json = try std.json.Stringify.valueAlloc(allocator, request, .{});
@@ -29,7 +33,38 @@ const Client = struct {
         else
             try self.query(?m.Node, "Get", .{ .id = id });
         defer result.deinit();
-        return entry(result.value orelse return error.NotFound);
+        const node = result.value orelse return error.NotFound;
+        var out = try entry(node);
+        if (try self.getVersion(node)) |version| out.size = version.size;
+        return out;
+    }
+
+    fn getVersion(self: *Client, node: m.Node) !?m.Version {
+        if (node.kind == .directory or node.current_version == 0) return null;
+        const record = try self.query(?m.Version, "Version", .{ .id = node.current_version });
+        defer record.deinit();
+        const value = record.value orelse return error.InvalidResponse;
+        if (value.inode != node.id or value.size > std.math.maxInt(i64)) return error.InvalidResponse;
+        return value;
+    }
+
+    fn openFile(self: *Client, id: u64, out: *Entry) !std.Io.File {
+        if (self.mappings.len == 0) return error.NoBackendConfig;
+        const record = try self.query(?m.Node, "Get", .{ .id = id });
+        defer record.deinit();
+        const node = record.value orelse return error.NotFound;
+        if (node.kind == .directory) return error.IsDirectory;
+        const version = (try self.getVersion(node)) orelse return error.NoPublishedVersion;
+        out.* = try entry(node);
+        out.size = version.size;
+        for (version.backends) |backend| {
+            if (backend == 0) continue;
+            const root = objects.rootFor(self.mappings, backend) catch continue;
+            const store = objects.Store.open(self.io, root, false) catch continue;
+            defer store.close();
+            return store.openVerified(version) catch continue;
+        }
+        return error.NoHealthyReplica;
     }
 
     fn readDirectory(self: *Client, id: u64) ![]Entry {
@@ -66,7 +101,7 @@ const Client = struct {
 
 fn entry(node: m.Node) !Entry {
     if (node.name.len > 255) return error.InvalidResponse;
-    var result: Entry = .{ .id = node.id, .parent = node.parent, .directory = @intFromBool(node.kind == .directory), .name = @splat(0) };
+    var result: Entry = .{ .id = node.id, .parent = node.parent, .size = 0, .directory = @intFromBool(node.kind == .directory), .name = @splat(0) };
     @memcpy(result.name[0..node.name.len], node.name);
     return result;
 }
@@ -77,6 +112,9 @@ fn errno(err: anyerror) c_int {
         error.NotDirectory => 20,
         error.OutOfMemory => 12,
         error.DirectoryChanged => 11,
+        error.IsDirectory => 21,
+        error.NoPublishedVersion => 61,
+        error.NoBackendConfig => 95,
         else => 5,
     };
 }
@@ -99,11 +137,21 @@ fn free(entries: [*]Entry, count: usize) callconv(.c) void {
     allocator.free(entries[0..count]);
 }
 
-pub fn mount(gpa: std.mem.Allocator, endpoints: []const u8, path: []const u8) !void {
-    var client: Client = .{ .endpoints = endpoints };
+fn open(context: *anyopaque, id: u64, out: *Entry, fd: *c_int) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    const file = client.openFile(id, out) catch |err| return errno(err);
+    // Ownership transfers to the C bridge, which closes on release or unmount.
+    fd.* = file.handle;
+    return 0;
+}
+
+pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []const u8, config: []const u8) !void {
+    const mappings = if (config.len == 0) null else try objects.loadMappings(gpa, io, config);
+    defer if (mappings) |parsed| parsed.deinit();
+    var client: Client = .{ .endpoints = endpoints, .io = io, .mappings = if (mappings) |parsed| parsed.value else &.{} };
     _ = try client.getNode(1, null);
     const mountpoint = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(mountpoint);
-    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free };
+    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free, .open = open };
     if (nas_fuse_run(mountpoint, &api) != 0) return error.FuseFailed;
 }

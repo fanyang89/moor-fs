@@ -5,6 +5,27 @@ const Dir = Io.Dir;
 const File = Io.File;
 
 pub const Digest = struct { size: u64, sha256: [32]u8 };
+pub const Mapping = struct { id: u64, root: []const u8 };
+
+pub fn loadMappings(gpa: std.mem.Allocator, io: Io, path: []const u8) !std.json.Parsed([]Mapping) {
+    const data = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024));
+    defer gpa.free(data);
+    const parsed = try std.json.parseFromSlice([]Mapping, gpa, data, .{ .allocate = .alloc_always });
+    errdefer parsed.deinit();
+    if (parsed.value.len == 0 or parsed.value.len > m.max_backends) return error.InvalidBackendConfig;
+    for (parsed.value, 0..) |mapping, i| {
+        if (mapping.id == 0 or !std.fs.path.isAbsolute(mapping.root) or std.mem.indexOfScalar(u8, mapping.root, 0) != null) return error.InvalidBackendConfig;
+        for (parsed.value[0..i]) |previous| {
+            if (mapping.id == previous.id or std.mem.eql(u8, mapping.root, previous.root)) return error.InvalidBackendConfig;
+        }
+    }
+    return parsed;
+}
+
+pub fn rootFor(config: []const Mapping, id: u64) ![]const u8 {
+    for (config) |mapping| if (mapping.id == id) return mapping.root;
+    return error.BackendNotConfigured;
+}
 
 pub fn hash(io: Io, file: File) !Digest {
     return transfer(io, file, null);

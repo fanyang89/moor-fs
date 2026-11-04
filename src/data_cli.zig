@@ -3,7 +3,7 @@ const nas = @import("nas_fs");
 const zli = @import("zli");
 const m = nas.metadata;
 const objects = nas.objects;
-const Mapping = struct { id: u64, root: []const u8 };
+const rootFor = objects.rootFor;
 const Upload = struct { request_id: u64, inode: u64, version_id: u64, expected_version: u64, backends: [2]u64 };
 
 fn query(ctx: zli.CommandContext, comptime T: type, method: []const u8, value: anytype) !std.json.Parsed(T) {
@@ -14,24 +14,8 @@ fn query(ctx: zli.CommandContext, comptime T: type, method: []const u8, value: a
     return std.json.parseFromSlice(T, ctx.allocator, response, .{ .allocate = .alloc_always });
 }
 
-fn mappings(ctx: zli.CommandContext) !std.json.Parsed([]Mapping) {
-    const data = try std.Io.Dir.cwd().readFileAlloc(ctx.io, ctx.getArg("config").?, ctx.allocator, .limited(64 * 1024));
-    defer ctx.allocator.free(data);
-    const parsed = try std.json.parseFromSlice([]Mapping, ctx.allocator, data, .{ .allocate = .alloc_always });
-    errdefer parsed.deinit();
-    if (parsed.value.len == 0 or parsed.value.len > m.max_backends) return error.InvalidBackendConfig;
-    for (parsed.value, 0..) |mapping, i| {
-        if (mapping.id == 0 or !std.fs.path.isAbsolute(mapping.root) or std.mem.indexOfScalar(u8, mapping.root, 0) != null) return error.InvalidBackendConfig;
-        for (parsed.value[0..i]) |previous| {
-            if (mapping.id == previous.id or std.mem.eql(u8, mapping.root, previous.root)) return error.InvalidBackendConfig;
-        }
-    }
-    return parsed;
-}
-
-fn rootFor(config: []const Mapping, id: u64) ![]const u8 {
-    for (config) |mapping| if (mapping.id == id) return mapping.root;
-    return error.BackendNotConfigured;
+fn mappings(ctx: zli.CommandContext) !std.json.Parsed([]objects.Mapping) {
+    return objects.loadMappings(ctx.allocator, ctx.io, ctx.getArg("config").?);
 }
 
 fn publish(ctx: zli.CommandContext, request: m.Request) !void {

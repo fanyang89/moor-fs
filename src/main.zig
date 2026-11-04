@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "file-version", "Read an immutable file version", &.{ "endpoint", "id" }, remoteVersion);
     try register(root, options, "put-file", "Copy, verify and publish a file version", &.{ "endpoint", "config", "json", "source" }, @import("data_cli.zig").put);
     try register(root, options, "get-file", "Read a verified replica into a new local file", &.{ "endpoint", "config", "id", "destination" }, @import("data_cli.zig").get);
-    if (@import("build_options").fuse) try register(root, options, "mount", "Mount the read-only metadata namespace in foreground", &.{ "endpoint", "mountpoint" }, mount);
+    if (@import("build_options").fuse) try register(root, options, "mount", "Mount the read-only namespace and optional backend contents", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
     try root.addCommand(serve);
     for ([_][]const u8{ "node-id", "cluster-id", "raft-listen", "api-listen", "data-dir", "peers" }) |name| {
@@ -45,6 +45,9 @@ fn register(root: *zli.Command, options: zli.InitOptions, name: []const u8, desc
     if (std.mem.eql(u8, name, "list")) {
         try command.addFlag(.{ .name = "after", .description = "Exclusive name cursor from previous page", .type = .String, .default_value = .{ .String = "" } });
         try command.addFlag(.{ .name = "limit", .description = "Page size (1-16)", .type = .Int, .default_value = .{ .Int = 16 } });
+    }
+    if (std.mem.eql(u8, name, "mount")) {
+        try command.addFlag(.{ .name = "backends", .description = "Backend mapping JSON for verified file reads", .type = .String, .default_value = .{ .String = "" } });
     }
 }
 
@@ -121,7 +124,7 @@ fn remoteStatus(ctx: zli.CommandContext) !void {
 }
 
 fn mount(ctx: zli.CommandContext) !void {
-    try @import("fuse.zig").mount(ctx.allocator, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?);
+    try @import("fuse.zig").mount(ctx.allocator, ctx.io, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?, ctx.flag("backends", []const u8));
 }
 
 fn remoteLookup(ctx: zli.CommandContext) !void {
