@@ -382,3 +382,15 @@ DISCOVERED → CLAIMED → STAGED → REPLICATING → PUBLISHED
 7. zookeeper-zig 中值得直接复用或提取的模块，以及依赖的精确版本。
 
 上述事项需要原型和故障测试验证，不应视为已有实现保证。
+
+## 15. 开源依赖源码接入
+
+已通过固定提交的 Git submodule 接入 Samba、libfuse、cifs-utils、grpc-lite、raftz 和 zookeeper-zig，位于 `third_party/`。Samba 同时包含 CTDB 和 VFS 接口源码；NAS 后端采用 Linux 内核 CIFS，因此暂不增加 libsmb2 或 libsmbclient。
+
+当前完成源码固定与初始化工具，libfuse 提供本地编译及 C 接口链接探针。Zig 核心依赖尚未导入应用构建图，SMB 导出、FUSE 操作、跨节点锁及缓存协调也尚未实现。具体版本、职责和构建说明见 `third_party/README.md`。
+
+```sh
+python3 tools/deps.py init
+python3 tools/deps.py check
+python3 tools/deps.py build-fuse
+```
