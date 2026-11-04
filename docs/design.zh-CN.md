@@ -627,3 +627,13 @@ Debug 与 Safe 的完整 `test-smb -Dfuse=true -Dfault-injection=true` 均通过
 恢复多数派并选出 leader 后，线性化读取实际 current_version，只接受此前版本或暂停前记录的待发布版本，拒绝第三种结果。如果仍是此前版本，待发布版本不得出现在元数据；如果待发布版本已提交，则按新内容验证。继续检查只读入口完整内容、双副本健康和接入重启后的新写入。
 
 Debug 与 Safe 完整 SMB 故障套件均通过，矩阵增至十一例。两个构建的直接 FUSE 场景均观察到：客户端已收到失败，恢复多数派后原请求仍提交。其原因是无成功确认不等于日志提案撤销，超时提案可能在多数派恢复后提交；这不是无多数派提交，也不是假成功。两个对象副本完成只满足数据阶段条件，不能单独成为客户端成功依据。恢复流程必须检查实际版本，不能盲目假定失败操作已回滚。
+
+## 34. 提交回复丢失与 leader 切换后的原请求重放
+
+测试构建新增元数据服务端检查点：成功的非空 publish 已应用、准备返回 RPC 回复时，读取 NAS_FS_PUBLISH_STOP_DIR 指定目录中以 inode 命名的一次性标记。原子消费标记后记录 inode 与原 request_id，再 SIGSTOP 整个服务端进程。正常构建不读取该变量或执行检查点；空截断不会触发。
+
+FUSE 和 SMB 各增加一例：先在双副本落盘后暂停接入进程，再放置 inode 标记并恢复接入请求；通过 waitpid(WUNTRACED) 确认服务端已停在提交后的回复前检查点，捕获原请求 ID，杀掉该 leader，等待另一 voter 成为 leader。原 leader 保持停止直至重放验证结束，保证请求由剩余 voter 处理。
+
+自动重试有预算上限，实际测试曾遇到 ClusterUnavailable，因此本场景不承诺客户端一定透明成功。无论自动重试成功还是明确失败，都在新 leader 上以原 request_id、原 expected_version 和相同 publication 重放。必须返回原来的 ok/inode 回执，current_version 必须保持为暂停前的对象版本；不能因为 expected_version 已过期而将重复请求误判为版本冲突。随后校验完整内容、健康双副本及接入重启后继续写入，最后恢复旧 voter。
+
+Debug 与 Safe 完整 SMB 故障套件通过，矩阵增至十三例；35 项单测通过，普通 Safe FUSE 构建检查确认不含三类故障选择器。另为 FUSE 发布失败增加 inode、expected_version 和错误名日志，帮助定位不确定结果。重放原请求的幂等性不等于普通 SMB 客户端重新打开并重写会复用同一 request_id，也不等于会话透明恢复；部署恢复与 Windows/macOS 验收仍待完成。

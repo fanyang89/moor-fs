@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse = b.option(bool, "fuse", "Build the FUSE namespace and file adapter") orelse false;
-    const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair and write SIGSTOP checkpoints") orelse false;
+    const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair, write and metadata reply SIGSTOP checkpoints") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "fuse", fuse);
     options.addOption(bool, "fault_injection", fault_injection);

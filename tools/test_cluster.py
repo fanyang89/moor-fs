@@ -3,6 +3,8 @@
 
 import argparse
 import json
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
@@ -40,6 +42,9 @@ def main():
         peers = ",".join(f"{i + 1}={addresses[i]}" for i in range(3))
         processes = {}
         logs = []
+        publish_stops = directory / "publish-stops"
+        if options.repair_faults:
+            publish_stops.mkdir()
 
         def run(*args, success=True):
             result = subprocess.run(
@@ -55,6 +60,10 @@ def main():
             return result
 
         def start(i):
+            environment = dict(os.environ)
+            environment.pop("NAS_FS_PUBLISH_STOP_DIR", None)
+            if options.repair_faults:
+                environment["NAS_FS_PUBLISH_STOP_DIR"] = str(publish_stops)
             log = open(directory / f"node-{i}.log", "a")
             logs.append(log)
             processes[i] = subprocess.Popen(
@@ -78,6 +87,7 @@ def main():
                 ],
                 stdout=log,
                 stderr=log,
+                env=environment,
             )
 
         def stop(i, kill=True):
@@ -114,6 +124,45 @@ def main():
                 return found if len(found) == 1 else None
 
             return eventually(find)[0]
+
+        def drop_publish_reply(inode, access):
+            marker = publish_stops / str(inode)
+            marker.touch(exist_ok=False)
+            try:
+                access.send_signal(signal.SIGCONT)
+                deadline = time.monotonic() + 45
+                while True:
+                    for i, process in list(processes.items()):
+                        pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+                        if not pid:
+                            continue
+                        if not os.WIFSTOPPED(status):
+                            process.returncode = os.waitstatus_to_exitcode(status)
+                            raise AssertionError(
+                                f"metadata node {i} exited before reply checkpoint: {status}"
+                            )
+                        assert os.WSTOPSIG(status) == signal.SIGSTOP
+                        assert not marker.exists(), (
+                            "metadata checkpoint did not consume marker"
+                        )
+                        receipt = re.findall(
+                            rf"NAS_FS_PUBLISH_STOP inode={inode} request=(\d+)",
+                            (directory / f"node-{i}.log").read_text(),
+                        )
+                        assert len(receipt) == 1, receipt
+                        stop(i)
+                        try:
+                            assert leader() != i
+                        except BaseException:
+                            start(i)
+                            raise
+                        return i, int(receipt[0])
+                    assert time.monotonic() < deadline, (
+                        "metadata reply checkpoint timed out"
+                    )
+                    time.sleep(0.02)
+            finally:
+                marker.unlink(missing_ok=True)
 
         def apply(i, request):
             return run("apply", addresses[i + 3], json.dumps(request))
@@ -407,6 +456,7 @@ def main():
                     start,
                     smb=options.smb,
                     write_faults=options.repair_faults,
+                    drop_publish_reply=drop_publish_reply,
                 )
             for i in list(processes):
                 stop(i, kill=False)

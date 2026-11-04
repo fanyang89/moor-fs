@@ -207,7 +207,10 @@ fn prepare(context: *anyopaque, id: u64, out: *Entry, fd: *c_int, expected: *u64
 
 fn commit(context: *anyopaque, id: u64, fd: c_int, expected: *u64, size: *u64) callconv(.c) c_int {
     const client: *Client = @ptrCast(@alignCast(context));
-    client.publishFile(id, fd, expected, size) catch |err| return errno(err);
+    client.publishFile(id, fd, expected, size) catch |err| {
+        std.log.err("publish inode {d}, expected version {d}: {s}", .{ id, expected.*, @errorName(err) });
+        return errno(err);
+    };
     return 0;
 }
 

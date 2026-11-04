@@ -535,6 +535,24 @@ may commit once quorum returns; the direct FUSE cases observed this delayed comm
 in both Debug and Safe runs. Object installation alone never warrants a successful
 client reply. The full fault matrix now contains eleven scenarios.
 
+Two metadata-reply-loss cases extend this matrix to thirteen scenarios. After a
+nonempty publication commits, a one-shot server checkpoint stops the leader before
+its RPC reply. The harness kills it, waits for a different leader, and replays the
+exact original request ID and publication. The new leader must return the original
+successful receipt despite its now-stale `expected_version`, without changing the
+published version. FUSE/SMB contents, two healthy replicas and writable restart
+are checked afterward. Automatic client retries remain bounded and can return
+failure during election; receipt replay and committed-state recovery are verified
+even in that case. This does not make ordinary client reopen/rewrite reuse the
+original request ID or guarantee transparent SMB session recovery.
+
+Only instrumented metadata servers read `NAS_FS_PUBLISH_STOP_DIR`: an inode-named
+marker in this directory arms the next successful nonempty publication's reply
+checkpoint. The server consumes the marker before stopping so replay on another
+voter does not stop again. Normal builds omit this selector and checkpoint.
+Debug and Safe complete SMB fault suites pass. FUSE publication failures now log
+the inode, expected version and error name to aid uncertain-outcome diagnosis.
+
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical

@@ -19,6 +19,7 @@ def test_mounts(
     start,
     smb=False,
     write_faults=False,
+    drop_publish_reply=None,
 ):
     processes = []
     mounts = []
@@ -226,6 +227,7 @@ def test_mounts(
                 leader,
                 stop,
                 start,
+                drop_publish_reply,
             )
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0

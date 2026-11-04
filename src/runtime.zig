@@ -183,6 +183,12 @@ pub const Runtime = struct {
         pending.wait();
         if (pending.failure) |err| return fail(allocator, err);
         const result = try protocol.decodeResult(&pending.response);
+        if (result.status == .ok) switch (parsed.value.command) {
+            .publish => |publication| {
+                if (publication.version.size != 0) @import("publish_fault.zig").beforeReply(publication.version.inode, parsed.value.request_id);
+            },
+            else => {},
+        };
         return reply(allocator, result);
     }
 

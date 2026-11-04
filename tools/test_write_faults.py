@@ -22,6 +22,7 @@ def test_write_faults(
     leader,
     stop,
     start,
+    drop_publish_reply,
 ):
     original = b"old" * 1024
     content = b"new" * 1024
@@ -125,7 +126,9 @@ def test_write_faults(
         source.write_bytes(content)
         expected = (
             content
-            if point == "published" or kind == "disconnect" or outage == "election"
+            if point == "published"
+            or kind == "disconnect"
+            or outage in ("election", "reply-loss")
             else original
             if kind == "fuse"
             else b""
@@ -203,23 +206,61 @@ def test_write_faults(
                         flush=True,
                     )
                     return
-                if outage == "election":
-                    old = leader()
-                    stop(old)
+                if outage in ("election", "reply-loss"):
+                    old = None
                     try:
-                        assert leader() != old
-                        assert (
-                            run("get", endpoints, inode)["current_version"] == current
-                        )
-                        assert run("file-version", endpoints, staged_version) is None
-                        access.send_signal(signal.SIGCONT)
+                        if outage == "reply-loss":
+                            old, request = drop_publish_reply(inode, access)
+                        else:
+                            old = leader()
+                            stop(old)
+                            assert leader() != old
+                            assert (
+                                run("get", endpoints, inode)["current_version"]
+                                == current
+                            )
+                            assert (
+                                run("file-version", endpoints, staged_version) is None
+                            )
+                            access.send_signal(signal.SIGCONT)
                         code = client.wait(timeout=45)
                         output = log.read_text()
-                        assert code == 0, output
-                        if kind == "fuse":
-                            assert f"WRITE_ACK {len(content)}" in output, output
+                        if outage == "reply-loss":
+                            # Bounded automatic retries may expire during election.
+                            # Replay the exact original request to verify its durable receipt.
+                            if kind == "fuse":
+                                assert (
+                                    code == 0 and f"WRITE_ACK {len(content)}" in output
+                                ) or (code != 0 and "WRITE_ACK" not in output), output
+                            else:
+                                assert code == 0 or "NT_STATUS_" in output, output
+                            version = run("file-version", endpoints, staged_version)
+                            replay = run(
+                                "apply",
+                                endpoints,
+                                json.dumps(
+                                    {
+                                        "request_id": request,
+                                        "command": {
+                                            "publish": {
+                                                "expected_version": current,
+                                                "version": version,
+                                            }
+                                        },
+                                    }
+                                ),
+                            )
+                            assert replay == {"status": "ok", "inode": inode}, replay
+                            print(
+                                f"PASS: {label} original request receipt replayed on new leader",
+                                flush=True,
+                            )
                         else:
-                            assert "NT_STATUS_" not in output, output
+                            assert code == 0, output
+                            if kind == "fuse":
+                                assert f"WRITE_ACK {len(content)}" in output, output
+                            else:
+                                assert "NT_STATUS_" not in output, output
                         assert (
                             run("get", endpoints, inode)["current_version"]
                             == staged_version
@@ -228,7 +269,8 @@ def test_write_faults(
                             "all_healthy"
                         ]
                     finally:
-                        start(old)
+                        if old is not None:
+                            start(old)
                     return
                 if kind == "disconnect":
                     client.kill()
@@ -314,5 +356,6 @@ def test_write_faults(
             exercise(kind, point)
         exercise(kind, "both_replicas", outage="election")
         exercise(kind, "both_replicas", outage="quorum")
+        exercise(kind, "both_replicas", outage="reply-loss")
     if smb:
         exercise("disconnect", "first_replica")
