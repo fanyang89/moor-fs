@@ -84,6 +84,9 @@ def test_data(
             assert (item["reason"] is None) == (item["status"] == "healthy"), result
         return result
 
+    def repair(backend, **kwargs):
+        return run("repair-file", endpoints, config, inode, backend, **kwargs)
+
     failure = run("check-file", endpoints, config, inode, success=False)
     assert "NoPublishedVersion" in failure.stdout + failure.stderr
 
@@ -150,6 +153,7 @@ def test_data(
     try:
         download("unavailable-fallback.bin", content, 2)
         check(200, ["unavailable", "healthy"])
+        repair(1, success=False)
         assert not roots[0].exists()
     finally:
         offline.rename(roots[0])
@@ -158,8 +162,24 @@ def test_data(
     first.unlink()
     check(200, ["missing", "healthy"])
     assert not first.exists()
+    # Concurrent repairs converge on the same immutable bytes without changing metadata.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: repair(1), range(2)))
+    for result in results:
+        assert result["status"] in ("repaired", "already_healthy"), result
+        assert result["version"] == 200 and result["backend"] == 1, result
+    assert first.read_bytes() == content
+    assert repair(1)["status"] == "already_healthy"
+    assert run("file-version", endpoints, 200) == version
+    assert run("get", endpoints, inode)["current_version"] == 200
+    repair(0, success=False)
+    repair(999, success=False)
+    check(200, ["healthy", "healthy"])
     first.write_bytes(b"x" * len(content))
     check(200, ["corrupt", "healthy"])
+    failure = repair(1, success=False)
+    assert "ChecksumMismatch" in failure.stdout + failure.stderr
+    assert first.read_bytes() == b"x" * len(content)
     first.write_bytes(b"corrupt")
     download("fallback.bin", content, 2)
     second = object_path(roots[1], 200, content)
@@ -170,11 +190,18 @@ def test_data(
     missing = directory / "unreadable.bin"
     run("get-file", endpoints, config, inode, missing, success=False)
     assert not missing.exists()
+    first.unlink()
+    failure = repair(1, success=False)
+    assert "NoHealthyReplica" in failure.stdout + failure.stderr
+    assert not first.exists()
+    first.write_bytes(b"corrupt")
     # Readers reject symlinks rather than following a substituted object.
     first.unlink()
     symlink = object_path(server_roots[0], 200, content) if server_roots else first
     symlink.symlink_to(source)
     run("get-file", endpoints, config, inode, missing, success=False)
+    repair(1, success=False)
+    assert symlink.is_symlink()
     symlink.unlink()
     first.write_bytes(content)
     second.write_bytes(content)
@@ -184,6 +211,10 @@ def test_data(
     assert upload(2002, 201, 200, empty)["status"] == "ok"
     download("empty-read.bin", b"", 1)
     assert check(201, ["healthy", "healthy"])["size"] == 0
+    object_path(roots[1], 201, b"").unlink()
+    result = repair(2)
+    assert result["status"] == "repaired" and result["source_backend"] == 1, result
+    check(201, ["healthy", "healthy"])
     assert run("file-version", endpoints, 200) == version
     assert first.read_bytes() == content
     # Preflight rejects stale CAS and mismatched replica policy before copying.
@@ -249,6 +280,8 @@ def test_data(
     assert not object_path(roots[1], 220, b"").exists()
     download("single.bin", b"", 1)
     check(220, ["healthy"])
+    assert repair(1)["status"] == "already_healthy"
+    repair(2, success=False)
     for i in range(3):
         stop(i)
     for i in range(3):
@@ -259,6 +292,6 @@ def test_data(
     assert run("file-version", endpoints, 200) == version
     assert all(not list((root / "staging").iterdir()) for root in roots)
     print(
-        "PASS: object copy/readback, replica health checks, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
+        "PASS: object copy/readback, replica health and concurrent missing-replica repair, failed replica atomicity, immutable retry, verified read fallback, empty/single replicas and publication race",
         flush=True,
     )

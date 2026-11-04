@@ -124,6 +124,53 @@ const ReplicaCheck = struct {
     reason: ?[]const u8 = null,
 };
 
+pub fn repair(ctx: zli.CommandContext) !void {
+    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    const backend = try std.fmt.parseUnsigned(u64, ctx.getArg("backend").?, 10);
+    const config = try mappings(ctx);
+    defer config.deinit();
+    const version = try currentVersion(ctx, id);
+    if (backend == 0 or std.mem.indexOfScalar(u64, &version.backends, backend) == null) return error.ReplicaNotDeclared;
+    // Do not initialize an absent mount or change immutable replica declarations.
+    const target = try objects.Store.open(ctx.io, try rootFor(config.value, backend), false);
+    defer target.close();
+    const existing: ?std.Io.File = target.openVerified(version) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (existing) |file| {
+        file.close(ctx.io);
+        try repairResult(ctx, version, backend, null);
+        return;
+    }
+    for (version.backends) |source_backend| {
+        if (source_backend == 0 or source_backend == backend) continue;
+        const root = rootFor(config.value, source_backend) catch continue;
+        const store = objects.Store.open(ctx.io, root, false) catch continue;
+        defer store.close();
+        const source = store.openVerified(version) catch continue;
+        defer source.close(ctx.io);
+        // put rechecks copied bytes, syncs/readbacks staging and installs without replacement.
+        // A concurrent publication or unlink cannot change this version's object name.
+        try target.put(source, version);
+        try repairResult(ctx, version, backend, source_backend);
+        return;
+    }
+    return error.NoHealthyReplica;
+}
+
+fn repairResult(ctx: zli.CommandContext, version: m.Version, backend: u64, source_backend: ?u64) !void {
+    const json = try std.json.Stringify.valueAlloc(ctx.allocator, .{
+        .inode = version.inode,
+        .version = version.id,
+        .backend = backend,
+        .source_backend = source_backend,
+        .status = if (source_backend != null) "repaired" else "already_healthy",
+    }, .{});
+    defer ctx.allocator.free(json);
+    try ctx.writer.print("{s}\n", .{json});
+}
+
 fn checkReplica(io: std.Io, config: []const objects.Mapping, backend: u64, version: m.Version) ReplicaCheck {
     const root = rootFor(config, backend) catch |err| return .{ .backend = backend, .status = .unconfigured, .reason = @errorName(err) };
     const store = objects.Store.open(io, root, false) catch |err| return .{ .backend = backend, .status = .unavailable, .reason = @errorName(err) };

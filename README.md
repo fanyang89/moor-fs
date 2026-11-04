@@ -55,7 +55,8 @@ is a cleartext prototype for trusted development networks.
 
 The CLI can copy, verify and publish whole files on configured mounted backend
 directories, and export a verified replica. Write leases, automatic placement,
-repairs and writable SMB exports remain pending. FUSE supports verified read-only
+automatic repairs and writable SMB exports remain pending. Missing declared replicas
+can be restored manually with `repair-file`. FUSE supports verified read-only
 file access, with a single-user Samba export helper.
 Metadata deletion is not a physical-object garbage collection protocol. Raw `apply` publication
 still validates metadata declarations only.
@@ -397,6 +398,31 @@ The scan does not modify metadata or object contents, initialize roots, or repai
 replicas. Results describe sequential observations of one pinned version, not an
 atomic health snapshot; concurrent publication can make that version historical.
 Full-file hashing is synchronous and has no NAS I/O deadline.
+
+Restore a missing object on an already-declared backend:
+
+```sh
+zig-out/bin/nas-fs repair-file "$ENDPOINTS" backends.json 2 1
+```
+
+The last arguments are the inode and destination backend ID. The command pins
+the observed current version and requires an existing backend store. It selects
+a fully verified other replica, copies through staging, checks and reads back the
+bytes, syncs, then atomically installs without replacing an existing object.
+Concurrent repairs converge on a verified object. No metadata update is needed.
+The JSON result includes `inode`, `version`, `backend`, `source_backend` and
+`status`: `repaired`, or `already_healthy` with a null source for a verified no-op.
+`repaired` can include another concurrent repair winning the installation race.
+
+Missing mappings/stores, undeclared destinations, corrupt existing objects and
+absence of a healthy source fail the command. Existing corrupt objects are not
+deleted or replaced. The command does not initialize directories or add replica
+locations. A failure after installation may leave a valid object; retrying is
+safe. Concurrent publication/deletion can make the pinned version historical,
+but repair never republishes it or recreates namespace entries. Retry after
+checking the reported version if the current file changed. Backend mount identity
+is still trusted configuration; automatic repair, corrupt-object replacement and
+coordination with future garbage collection remain pending.
 
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
