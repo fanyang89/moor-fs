@@ -386,10 +386,32 @@ DISCOVERED → CLAIMED → STAGED → REPLICATING → PUBLISHED
 
 已通过固定提交的 Git submodule 接入 Samba、libfuse、cifs-utils、grpc-lite 和 raftz，位于 `third_party/`。Samba 同时包含 CTDB 和 VFS 接口源码；NAS 后端采用 Linux 内核 CIFS，因此暂不增加 libsmb2 或 libsmbclient。
 
-当前完成源码固定与初始化工具，libfuse 提供本地编译及 C 接口链接探针。Zig 核心依赖尚未导入应用构建图，SMB 导出、FUSE 操作、跨节点锁及缓存协调也尚未实现。具体版本、职责和构建说明见 `third_party/README.md`。
+已完成源码固定与初始化工具，libfuse 提供本地编译及 C 接口链接探针。raftz 及其固定版本 grpc-lite 已接入 Zig 应用构建图；SMB 导出、FUSE 操作、跨节点锁及缓存协调尚未实现。具体版本、职责和构建说明见 `third_party/README.md`。
 
 ```sh
 python3 tools/deps.py init
 python3 tools/deps.py check
 python3 tools/deps.py build-fuse
 ```
+
+## 16. M0 元数据核心实现进度
+
+已完成可编译的 Zig 项目、内存命名空间及 raftz `StateMachine` 适配：
+
+- 稳定 inode ID，目录和文件创建、非覆盖重命名、删除、期望副本策略修改。
+- 根目录默认两副本；新子项记录父目录当前策略，移动保留策略，目录策略修改不追溯已有子项。
+- 非零请求 ID 去重；失败结果同样记录，同一 ID 携带不同命令返回冲突。
+- 版本化快照、分段读取恢复、目录树与游标校验，恢复成功后原子替换状态。
+- 业务失败返回结果而不终止 Raft；损坏的已提交命令或内存分配失败保持逻辑状态不变。
+
+验证覆盖确定性重放、重命名冲突和循环、非空目录删除、请求重试、快照内存所有权及分配失败。运行入口：
+
+```sh
+zig build
+zig build test
+zig build run -- metadata-demo
+```
+
+本阶段尚未连接 RocksDB、启动 Raft 网络集群或写入 NAS。副本字段表示期望策略，不代表已存在物理副本。快照目前为内存缓冲区，不提供磁盘持久性保证。
+
+原型暂限 4096 个存活 inode、8192 条请求记录及 8 MiB 快照；请求记录不自动淘汰，达到上限后新请求被拒绝，已有请求仍可查询原结果。名称暂采用 ASCII 大小写不敏感比较与 UTF-8 校验，尚不构成完整 SMB 名称兼容。后续需要持久化存储、去重保留协议和客户端身份域。

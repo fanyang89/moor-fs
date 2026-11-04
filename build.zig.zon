@@ -1,0 +1,10 @@
+.{
+    .name = .nas_fs,
+    .version = "0.1.0",
+    .fingerprint = 0xc3af1b2c8dc0ca5e, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .raftz = .{ .path = "third_party/raftz" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "third_party/raftz", "tools" },
+}

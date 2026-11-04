@@ -87,11 +87,12 @@ SMB client -> Samba -> nas-fs FUSE/VFS adapter -> Linux CIFS -> NAS
 
 ## Zig dependency integration
 
-The Zig projects are currently pinned source dependencies, not imports in the
-application build graph. When implementing the core, use Zig `b.dependency` and
-path dependencies pointing to these submodules, and preserve upstream transitive
-dependency hashes. Reuse raftz's grpc-lite dependency instance when both APIs are
-needed, rather than creating incompatible duplicate module instances.
+The application imports raftz through `b.dependency` and a path dependency on
+`third_party/raftz`. Its grpc-lite module is supplied by raftz's pinned transitive
+dependency, preserving the upstream package hash. The grpc-lite submodule is the
+matching source reference; it is not a second module instance in the build graph.
+When adding application RPC endpoints, reuse raftz's grpc-lite dependency instance
+rather than creating incompatible duplicate module instances.
 
 The selected raftz revision pins the selected grpc-lite revision. Introduce a
 RocksDB binding directly when implementing the metadata store.
