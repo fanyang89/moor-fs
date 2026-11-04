@@ -359,8 +359,9 @@ Operational boundaries:
   configuration, not discovered: two local directories are not physical replicas.
 - `staging/` and `objects/` must share a filesystem supporting atomic no-replace
   rename and file/directory fsync. Unsupported operations fail the upload. CIFS
-  mounts and NAS power-loss durability have not yet been validated; readback can
-  hit the client cache, and fsync relies on the server's persistence contract.
+  transport is covered by the Samba E2E below; NAS power-loss durability remains
+  unverified. Readback can hit the client cache, and fsync relies on the server's
+  persistence contract.
 - Keep source files stable during upload and protect installed objects from direct
   modification. Size/timestamp changes and digest mismatches are detected, but
   this is not a filesystem snapshot or a write-session fencing protocol.
@@ -375,6 +376,33 @@ Operational boundaries:
 second-replica publication, retries, corruption/unavailable-replica fallback,
 non-overwriting exports, empty/single-replica files, concurrent publishers and
 whole-cluster restart. These tests do not emulate NAS hardware durability.
+
+### Real Samba/CIFS backend E2E (Linux)
+
+```sh
+zig build test-e2e
+zig build test-e2e -Doptimize=safe
+```
+
+Requires `smbd`, `smbclient`, `mount.cifs`, `umount`, `unshare`, Python 3 and
+non-interactive `sudo -n` access, plus kernel CIFS and mount-namespace support.
+Run as an ordinary user. The runner starts two loopback-only Samba instances on
+temporary high ports with private configuration/state and guest shares. It mounts
+SMB 3.1.1 shares inside a private mount namespace (`cache=none,actimeo=0`) and drops
+privileges for the three-node metadata/object suite. No existing Samba service or
+system configuration is changed.
+
+Coverage includes failed-second-replica publication, immutable retries, checksum
+and unavailable-root fallback, concurrent publication, metadata failover/restart,
+and independent `smbclient` downloads of both replicas. The runner then unmounts,
+restarts Samba, remounts, and checks every installed object's SHA-256. The unavailable
+root check renames a directory; it does not simulate an unreachable NAS or test I/O
+timeouts. Server-side symlink injection checks that substituted objects cannot be read.
+
+Successful runs stop processes, unmount shares and remove their workspace; failures
+retain Samba logs and backend objects under `${TMPDIR:-/tmp/opencode}/nas-fs-e2e-*`.
+Verified with Samba 4.24.7 and Linux CIFS. This covers the backend SMB transport,
+not a client-facing unified SMB export or physical NAS power-loss durability.
 
 ### Persistence and recovery
 

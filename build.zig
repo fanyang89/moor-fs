@@ -64,6 +64,9 @@ pub fn build(b: *std.Build) void {
     const cluster_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
     cluster_test.addArtifactArg(exe);
     b.step("test-cluster", "Test three processes, failover, snapshots and recovery").dependOn(&cluster_test.step);
+    const e2e_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+    e2e_test.addArtifactArg(exe);
+    b.step("test-e2e", "Test real Samba/CIFS backends in a private mount namespace (requires sudo)").dependOn(&e2e_test.step);
     if (fuse) {
         const fuse_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
         fuse_test.addArtifactArg(exe);

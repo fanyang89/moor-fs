@@ -6,8 +6,19 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 
-def test_data(executable, directory, endpoints, run, leader, stop, start):
-    roots = [directory / "nas-a", directory / "nas-b"]
+def test_data(
+    executable,
+    directory,
+    endpoints,
+    run,
+    leader,
+    stop,
+    start,
+    roots=None,
+    server_roots=None,
+    smb_ports=None,
+):
+    roots = roots or [directory / "nas-a", directory / "nas-b"]
     for root in roots:
         root.mkdir()
     config = directory / "backends.json"
@@ -81,10 +92,38 @@ def test_data(executable, directory, endpoints, run, leader, stop, start):
     assert version["sha256"] == list(hashlib.sha256(content).digest())
     for root in roots:
         assert object_path(root, 200, content).read_bytes() == content
+    if smb_ports:
+        for i, port in enumerate(smb_ports):
+            target = directory / f"smb-client-{i}.bin"
+            remote = (
+                f"{roots[i].name}/objects/{object_path(roots[i], 200, content).name}"
+            )
+            result = subprocess.run(
+                [
+                    "smbclient",
+                    "//127.0.0.1/data",
+                    "-p",
+                    str(port),
+                    "-N",
+                    "-U",
+                    "guest",
+                    "-c",
+                    f'get "{remote}" "{target}"',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert target.read_bytes() == content
+        print(
+            "PASS: independent SMB clients read both published CIFS-backed objects",
+            flush=True,
+        )
     target = download("read.bin", content, 1)
     run("get-file", endpoints, config, inode, target, success=False)
     assert target.read_bytes() == content
-    offline = directory / "nas-a-offline"
+    offline = roots[0].with_name("nas-a-offline")
     roots[0].rename(offline)
     try:
         download("unavailable-fallback.bin", content, 2)
@@ -101,9 +140,10 @@ def test_data(executable, directory, endpoints, run, leader, stop, start):
     assert not missing.exists()
     # Readers reject symlinks rather than following a substituted object.
     first.unlink()
-    first.symlink_to(source)
+    symlink = object_path(server_roots[0], 200, content) if server_roots else first
+    symlink.symlink_to(source)
     run("get-file", endpoints, config, inode, missing, success=False)
-    first.unlink()
+    symlink.unlink()
     first.write_bytes(content)
     second.write_bytes(content)
 

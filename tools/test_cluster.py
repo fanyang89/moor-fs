@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run three real processes through election, failover, snapshots and WAL recovery."""
 
+import argparse
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,9 +14,14 @@ import time
 
 
 def main():
-    executable = str(
-        Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/nas-fs").resolve()
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
+    parser.add_argument("--fuse", action="store_true")
+    parser.add_argument("--backend-roots", nargs=2, type=Path)
+    parser.add_argument("--backend-server-roots", nargs=2, type=Path)
+    parser.add_argument("--smb-ports", nargs=2, type=int)
+    options = parser.parse_args()
+    executable = str(Path(options.executable).resolve())
     with tempfile.TemporaryDirectory(prefix="nas-fs-cluster-") as temporary:
         directory = Path(temporary)
         sockets = [socket.socket() for _ in range(6)]
@@ -350,8 +356,19 @@ def main():
             )
             from test_data import test_data
 
-            test_data(executable, directory, endpoints, run, leader, stop, start)
-            if "--fuse" in sys.argv[2:]:
+            test_data(
+                executable,
+                directory,
+                endpoints,
+                run,
+                leader,
+                stop,
+                start,
+                roots=options.backend_roots,
+                server_roots=options.backend_server_roots,
+                smb_ports=options.smb_ports,
+            )
+            if options.fuse:
                 from test_fuse import test_mounts
 
                 test_mounts(executable, directory, endpoints, run, leader, stop, start)
