@@ -1,8 +1,8 @@
 # Third-party dependencies
 
 The parent repository's gitlinks are the authoritative commit locks. No floating
-branch is used during initialization. Source integration does not yet implement
-SMB exports, a FUSE filesystem, or distributed metadata.
+branch is used during initialization. The application runs distributed metadata
+with raftz/grpc-lite and LMDB; SMB exports and a FUSE filesystem remain pending.
 
 ## Selected projects
 
@@ -14,6 +14,7 @@ SMB exports, a FUSE filesystem, or distributed metadata.
 | grpc-lite | db3c400bf70419742ebcb42fe316ba8b754b4975 | Internal RPC and Raft transport | Source submodule, aligned with raftz's dependency pin |
 | raftz | d5eba2b338cfd00f2306680cc2dcafb016add3a0 | Metadata consensus and state-machine runtime | Source submodule |
 | LMDB | LMDB_0.9.36 / 028f61b6832032174f893484719ed4848d8d60db | Local transactional metadata | C sources compiled into Zig application |
+| zli | v6.0.0 / 52a3773e7b825e755c878b022cb4f9c589c3712f | CLI commands, flags and help | Zig path dependency |
 
 Upstream repositories:
 
@@ -23,6 +24,7 @@ Upstream repositories:
 - grpc-lite: https://github.com/fanyang89/grpc-lite
 - raftz: https://github.com/fanyang89/raftz
 - LMDB: https://github.com/LMDB/lmdb
+- zli: https://github.com/xcaeser/zli
 
 The pins are development baselines, not claims that every component is the latest
 release or that the distributed combination has passed interoperability tests.
@@ -93,11 +95,10 @@ The application imports raftz through `b.dependency` and a path dependency on
 `third_party/raftz`. Its grpc-lite module is supplied by raftz's pinned transitive
 dependency, preserving the upstream package hash. The grpc-lite submodule is the
 matching source reference; it is not a second module instance in the build graph.
-When adding application RPC endpoints, reuse raftz's grpc-lite dependency instance
-rather than creating incompatible duplicate module instances.
+Application RPC endpoints and Raft transport reuse that same dependency instance.
 
-The selected raftz revision pins the selected grpc-lite revision. Introduce a
-RocksDB binding directly when implementing the metadata store.
+The selected raftz revision pins the selected grpc-lite revision. LMDB is compiled
+directly from its C sources; zli is imported as a pinned Zig path dependency.
 Similarly, nghttp2, libxev, c-ares, and protobuf dependencies remain managed by
 grpc-lite's own build rather than duplicated here.
 

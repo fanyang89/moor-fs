@@ -16,3 +16,6 @@
 [submodule "third_party/lmdb"]
 	path = third_party/lmdb
 	url = https://github.com/LMDB/lmdb.git
+[submodule "third_party/zli"]
+	path = third_party/zli
+	url = https://github.com/xcaeser/zli.git

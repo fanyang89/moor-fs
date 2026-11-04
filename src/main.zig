@@ -1,42 +1,149 @@
 const std = @import("std");
 const nas = @import("nas_fs");
+const zli = @import("zli");
+
+var stopping = std.atomic.Value(bool).init(false);
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(allocator);
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.Writer.init(.stdout(), init.io, &buffer);
-    const writer = &output.interface;
-    if (args.len >= 3 and (std.mem.eql(u8, args[1], "metadata-show") or std.mem.eql(u8, args[1], "metadata-apply"))) {
-        const show = std.mem.eql(u8, args[1], "metadata-show");
-        if (args.len != (if (show) @as(usize, 3) else 6)) return error.InvalidArguments;
-        const path = try allocator.dupeSentinel(u8, args[2], 0);
-        var store = try nas.Store.open(allocator, path, 256 * 1024 * 1024);
-        defer store.close();
-        if (show) {
-            const cursor = try store.applied();
-            const data = try store.snapshot(allocator, cursor.index, cursor.term);
-            try writer.print("{s}\n", .{data});
-        } else {
-            var result = try store.applyEntry(.{
-                .index = try std.fmt.parseInt(u64, args[3], 10),
-                .term = try std.fmt.parseInt(u64, args[4], 10),
-                .data = @constCast(args[5]),
-            });
-            defer result.deinit(allocator);
-            if (result.response) |response| {
-                const decoded = try nas.machine.decodeResult(response);
-                try writer.print("status={s} inode={d}\n", .{ @tagName(decoded.status), decoded.inode });
-            }
-        }
-        try writer.flush();
-        return;
+    var input_buffer: [1024]u8 = undefined;
+    var input = std.Io.File.Reader.init(.stdin(), init.io, &input_buffer);
+    const options: zli.InitOptions = .{ .allocator = init.gpa, .io = init.io, .writer = &output.interface, .reader = &input.interface };
+    const root = try zli.Command.init(options, .{ .name = "nas-fs", .description = "Distributed NAS metadata service", .version = .{ .major = 0, .minor = 1, .patch = 0 } }, help);
+    defer root.deinit();
+    try register(root, options, "version", "Show version", &.{}, version);
+    try register(root, options, "metadata-demo", "Run the in-memory demonstration", &.{}, demo);
+    try register(root, options, "metadata-show", "Inspect an offline LMDB store", &.{"directory"}, localShow);
+    try register(root, options, "metadata-apply", "Apply to an offline test store", &.{ "directory", "index", "term", "json" }, localApply);
+    try register(root, options, "apply", "Propose a metadata request to the leader", &.{ "endpoint", "json" }, remoteApply);
+    try register(root, options, "get", "Read an inode through the leader with ReadIndex", &.{ "endpoint", "id" }, remoteGet);
+    try register(root, options, "status", "Inspect a node's local Raft status", &.{"endpoint"}, remoteStatus);
+    const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
+    try root.addCommand(serve);
+    for ([_][]const u8{ "node-id", "cluster-id", "raft-listen", "api-listen", "data-dir", "peers" }) |name| {
+        try serve.addFlag(.{ .name = name, .description = name, .type = .String, .default_value = .{ .String = "" } });
     }
-    if (args.len != 2 or !std.mem.eql(u8, args[1], "metadata-demo")) {
-        try writer.writeAll("Usage:\n  nas-fs metadata-demo\n  nas-fs metadata-show DIRECTORY\n  nas-fs metadata-apply DIRECTORY INDEX TERM JSON\nLocal metadata tools; DIRECTORY must exist. No SMB or Raft networking.\n");
-        try writer.flush();
-        return;
+    try serve.addFlag(.{ .name = "snapshot-entries", .description = "Applied entries per automatic snapshot (0 disables)", .type = .String, .default_value = .{ .String = "1000" } });
+    var args = init.minimal.args.iterate();
+    const code = root.run(&args, .{});
+    try output.interface.flush();
+    if (code != 0) std.process.exit(code);
+}
+
+fn register(root: *zli.Command, options: zli.InitOptions, name: []const u8, description: []const u8, args: []const []const u8, handler: *const fn (zli.CommandContext) anyerror!void) !void {
+    const command = try zli.Command.init(options, .{ .name = name, .description = description }, handler);
+    try root.addCommand(command);
+    for (args) |arg| try command.addPositionalArg(.{ .name = arg, .description = arg, .required = true });
+}
+
+fn help(ctx: zli.CommandContext) !void {
+    try ctx.command.printHelp();
+}
+
+fn version(ctx: zli.CommandContext) !void {
+    try ctx.root.printVersion();
+}
+
+fn openLocal(ctx: zli.CommandContext) !nas.Store {
+    const path = try ctx.allocator.dupeSentinel(u8, ctx.getArg("directory").?, 0);
+    defer ctx.allocator.free(path);
+    return nas.Store.open(ctx.allocator, path, 256 * 1024 * 1024);
+}
+
+fn localShow(ctx: zli.CommandContext) !void {
+    var store = try openLocal(ctx);
+    defer store.close();
+    const cursor = try store.applied();
+    const data = try store.snapshot(ctx.allocator, cursor.index, cursor.term);
+    defer ctx.allocator.free(data);
+    try ctx.writer.print("{s}\n", .{data});
+}
+
+fn localApply(ctx: zli.CommandContext) !void {
+    var store = try openLocal(ctx);
+    defer store.close();
+    try store.requireStandalone();
+    var result = try store.applyEntry(.{
+        .index = try std.fmt.parseUnsigned(u64, ctx.getArg("index").?, 10),
+        .term = try std.fmt.parseUnsigned(u64, ctx.getArg("term").?, 10),
+        .data = @constCast(ctx.getArg("json").?),
+    });
+    defer result.deinit(ctx.allocator);
+    if (result.response) |response| {
+        const decoded = try nas.machine.decodeResult(response);
+        try ctx.writer.print("status={s} inode={d}\n", .{ @tagName(decoded.status), decoded.inode });
     }
+}
+
+fn remote(ctx: zli.CommandContext, method: []const u8, request: []const u8) !void {
+    const data = try nas.runtime.call(ctx.allocator, ctx.getArg("endpoint").?, method, request);
+    defer ctx.allocator.free(data);
+    try ctx.writer.print("{s}\n", .{data});
+}
+
+fn remoteApply(ctx: zli.CommandContext) !void {
+    try remote(ctx, "Apply", ctx.getArg("json").?);
+}
+
+fn remoteGet(ctx: zli.CommandContext) !void {
+    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    const data = try std.json.Stringify.valueAlloc(ctx.allocator, .{ .id = id }, .{});
+    defer ctx.allocator.free(data);
+    try remote(ctx, "Get", data);
+}
+
+fn remoteStatus(ctx: zli.CommandContext) !void {
+    try remote(ctx, "Status", "{}");
+}
+
+fn serveNode(ctx: zli.CommandContext) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cluster_id: nas.raft.ClusterId = undefined;
+    const cluster_text = ctx.flag("cluster-id", []const u8);
+    if (cluster_text.len != 32) return error.InvalidClusterId;
+    _ = try std.fmt.hexToBytes(&cluster_id, cluster_text);
+    var peers: std.ArrayList(nas.raft.Peer) = .empty;
+    var parts = std.mem.splitScalar(u8, ctx.flag("peers", []const u8), ',');
+    while (parts.next()) |part| {
+        const split = std.mem.indexOfScalar(u8, part, '=') orelse return error.InvalidPeer;
+        try peers.append(allocator, .{ .id = try std.fmt.parseUnsigned(u64, part[0..split], 10), .context = part[split + 1 ..] });
+    }
+    const config: nas.runtime.Config = .{
+        .node_id = try std.fmt.parseUnsigned(u64, ctx.flag("node-id", []const u8), 10),
+        .cluster_id = cluster_id,
+        .raft_listen = ctx.flag("raft-listen", []const u8),
+        .api_listen = ctx.flag("api-listen", []const u8),
+        .data_dir = ctx.flag("data-dir", []const u8),
+        .peers = peers.items,
+        .snapshot_entries = try std.fmt.parseUnsigned(u64, ctx.flag("snapshot-entries", []const u8), 10),
+    };
+    try config.validate();
+    try nas.raft.log.initGlobal(std.heap.smp_allocator, ctx.io, false);
+    defer nas.raft.log.deinitGlobal(std.heap.smp_allocator);
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = signal }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var old_int: std.posix.Sigaction = undefined;
+    var old_term: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &old_int);
+    defer std.posix.sigaction(.INT, &old_int, null);
+    std.posix.sigaction(.TERM, &action, &old_term);
+    defer std.posix.sigaction(.TERM, &old_term, null);
+    const runtime = try nas.runtime.Runtime.create(std.heap.smp_allocator, config);
+    defer runtime.destroy();
+    while (!stopping.load(.acquire) and !runtime.exited.load(.acquire)) try ctx.io.sleep(.fromMilliseconds(100), .awake);
+    runtime.shutdown();
+    if (runtime.failed.load(.acquire)) return error.RaftDriverFailed;
+}
+
+fn signal(_: std.posix.SIG) callconv(.c) void {
+    stopping.store(true, .release);
+}
+
+fn demo(ctx: zli.CommandContext) !void {
+    const allocator = ctx.allocator;
+    const writer = ctx.writer;
     var machine = try nas.Machine.init(allocator);
     defer machine.deinit();
     const commands = [_]nas.metadata.Request{

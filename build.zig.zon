@@ -4,7 +4,8 @@
     .fingerprint = 0xc3af1b2c8dc0ca5e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
+        .zli = .{ .path = "third_party/zli" },
         .raftz = .{ .path = "third_party/raftz" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "third_party/raftz", "third_party/lmdb", "tools" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "proto", "third_party/raftz", "third_party/lmdb", "third_party/zli", "tools" },
 }

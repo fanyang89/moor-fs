@@ -412,12 +412,30 @@ zig build test
 zig build run -- metadata-demo
 ```
 
-已接入 LMDB 0.9.36，本地元数据、请求结果与 applied index/term 在同一默认同步事务中落盘。尚未启动 Raft 网络集群或写入 NAS，副本字段仍表示期望策略。
+已接入 LMDB 0.9.36，本地元数据、请求结果与 applied index/term 在同一默认同步事务中落盘。现已完成三节点 Raft 网络运行与恢复（见第 17 节）；尚未写入 NAS，副本字段仍表示期望策略。
 
 每个元数据节点使用本地 SSD 上的独立 LMDB 环境，不允许将数据库放在 SMB 共享上。`meta`、`inodes`、`dirents`、`requests` 四个 named database 分别保存游标与 ID 分配、inode、目录索引及去重结果。普通操作直接访问索引，不重写整份状态。读事务保持短生命周期，返回名称复制到调用方内存。
 
 逻辑快照沿用版本 1 格式；当前有界原型在一个写事务内替换记录、重建目录索引和保存游标，失败全部回滚。恢复需要预留 copy-on-write 空间；未来大规模快照可采用独立环境构建与可恢复切换协议。map 满不自动扩容，存储错误映射为 Raft 终止错误，不能继续确认提交。默认不开启任何弱化同步持久性的 LMDB 标志。
 
-新增 `metadata-apply DIRECTORY INDEX TERM JSON` 和 `metadata-show DIRECTORY` 本地调试入口，目录需预先建立，CLI map 大小为 256 MiB。它们直接操作独立测试数据库，不替代 Raft 提案。测试覆盖内存实现对照、重新打开后的去重和游标、快照恢复、map 满与分配失败回滚；完整 WAL 重放、集群故障恢复及断电验证尚待后续实施。
+新增 `metadata-apply DIRECTORY INDEX TERM JSON` 和 `metadata-show DIRECTORY` 本地调试入口，目录需预先建立，CLI map 大小为 256 MiB。它们直接操作独立测试数据库，不替代 Raft 提案。测试覆盖内存实现对照、重新打开后的去重和游标、快照恢复、map 满与分配失败回滚；断电验证尚待后续实施。
+
+## 17. 三节点运行与恢复
+
+CLI 已改用 zli v6.0.0，固定源码版本 `52a3773e7b825e755c878b022cb4f9c589c3712f`，提供帮助、参数解析及非零错误退出码。`serve` 启动固定三个 voter 的 Raft 组；`status` 查询本地角色、任期、leader ID、commit/applied index；`apply` 向 leader 提交元数据 JSON；`get` 经 ReadIndex 屏障读取 inode。
+
+运行示例及完整参数见 `README.md` 的 Three-node development cluster。关键约定：
+
+- 所有节点使用同一个非零 32 位十六进制 cluster ID、相同的三个 peer 配置，以及各自独立的 node ID 和数据目录；IPv4 API 与 Raft 使用不同监听端口。
+- 每个节点的 `DATA_DIR/raft/` 保存 WAL、成员关系和快照，`DATA_DIR/metadata/` 保存 LMDB。LMDB 持久绑定 cluster/node identity；身份不一致拒绝启动，进程独占锁阻止同目录并发运行。本地修改命令拒绝写入集群数据库。
+- raftz 使用 pre-vote、check-quorum，禁止 proposal forwarding；非 leader 拒绝写入与业务读取。`status` 仅为本地诊断，不能用于线性一致读取。
+- API 在写入 Raft 前拒绝损坏 JSON、超长请求、版本不支持及零 request ID。RPC 使用 `proto/metadata.proto` 中的 Envelope 携带原型 JSON；命名空间业务失败仍作为结果返回。
+- 写入成功代表多数派 WAL 提交且 leader 的 LMDB 已同步应用。请求超时不代表一定没提交；调用方需查询 leader 后使用同一 request ID 和内容重试，CLI 暂不自动发现 leader 或重试。
+- 重启核对 LMDB applied cursor 与 WAL 的 commit/term；必要时恢复快照并重放未应用的已提交日志。落后节点在日志已压缩时通过网络快照追赶。自动快照默认阈值为 1000，测试使用 8。
+- SIGINT/SIGTERM 停止接收 API 并清理运行线程；进程被 SIGKILL 后使用原目录和身份重启。LMDB 不能独立替代 Raft WAL 作为集群备份。
+
+`zig build test-cluster` 启动三个真实进程，验证选主、请求去重、非 leader 拒绝、ReadIndex、leader 退出后选主与写入、网络快照追赶、全体 SIGKILL 后恢复、保留 WAL/快照重建缺失 LMDB，以及少数派不可确认写入与读取。集成测试使用临时目录和动态 loopback 端口，不修改现有集群。依赖 Linux io_uring。
+
+当前仍为受信任开发网络上的明文原型。尚未实现动态成员管理、客户端身份域、TLS/认证、SMB/FUSE、NAS 物理副本、跨机器长时间负载及硬件断电测试。
 
 原型暂限 4096 个存活 inode、8192 条请求记录及 8 MiB 快照；请求记录不自动淘汰，达到上限后新请求被拒绝，已有请求仍可查询原结果。名称暂采用 ASCII 大小写不敏感比较与 UTF-8 校验，尚不构成完整 SMB 名称兼容。后续需要持久化存储、去重保留协议和客户端身份域。

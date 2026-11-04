@@ -1,0 +1,13 @@
+syntax = "proto3";
+package nas.fs;
+
+// Version-1 typed JSON carried by the metadata prototype.
+message Envelope {
+  bytes json = 1;
+}
+
+service Metadata {
+  rpc Apply(Envelope) returns (Envelope);
+  rpc Get(Envelope) returns (Envelope);
+  rpc Status(Envelope) returns (Envelope);
+}

@@ -16,9 +16,16 @@ pub fn check(rc: c_int) Error!void {
 
 pub const Environment = struct {
     handle: *c.MDB_env,
+    lock_fd: c_int,
 
     pub fn open(path: [:0]const u8, map_size: usize) !Environment {
         if (map_size < 64 * 1024) return error.InvalidMapSize;
+        const lock_path = try std.fmt.allocPrintSentinel(std.heap.page_allocator, "{s}/nas-fs.lock", .{path}, 0);
+        defer std.heap.page_allocator.free(lock_path);
+        const fd = c.open(lock_path.ptr, c.O_CREAT | c.O_RDWR | c.O_CLOEXEC, @as(c_uint, 0o600));
+        if (fd < 0) return error.StorageIo;
+        errdefer _ = c.close(fd);
+        if (c.flock(fd, c.LOCK_EX | c.LOCK_NB) != 0) return error.StoreBusy;
         var handle: ?*c.MDB_env = null;
         try check(c.mdb_env_create(&handle));
         errdefer c.mdb_env_close(handle);
@@ -26,11 +33,12 @@ pub const Environment = struct {
         try check(c.mdb_env_set_maxdbs(handle, 4));
         try check(c.mdb_env_set_maxreaders(handle, 64));
         try check(c.mdb_env_open(handle, path.ptr, c.MDB_NOTLS, 0o600));
-        return .{ .handle = handle.? };
+        return .{ .handle = handle.?, .lock_fd = fd };
     }
 
     pub fn close(self: *Environment) void {
         c.mdb_env_close(self.handle);
+        _ = c.close(self.lock_fd);
         self.* = undefined;
     }
 

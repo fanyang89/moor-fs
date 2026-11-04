@@ -30,6 +30,34 @@ fn apply(store: *Store, index: u64, request: m.Request) !m.Result {
 
 const create: m.Request = .{ .request_id = 1, .command = .{ .create = .{ .parent = 1, .name = "photos", .kind = .directory } } };
 
+test "LMDB node binding survives restart and prevents identity reuse and local writes" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const cluster: [16]u8 = @splat(1);
+    {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        try t.expectError(error.StoreBusy, Store.open(t.allocator, fixture.path, 16 * 1024 * 1024));
+        try store.requireStandalone();
+        try store.bindIdentity(cluster, 1);
+    }
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    try store.bindIdentity(cluster, 1);
+    try t.expectError(error.IdentityMismatch, store.bindIdentity(cluster, 2));
+    try t.expectError(error.IdentityMismatch, store.bindIdentity(@splat(2), 1));
+    try t.expectError(error.ClusterManagedStore, store.requireStandalone());
+}
+
+test "existing standalone metadata cannot become a fresh Raft state machine" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    _ = try apply(&store, 1, create);
+    try t.expectError(error.UnboundMetadata, store.bindIdentity(@splat(1), 1));
+}
+
 test "LMDB matches reference semantics and retains receipts across restart" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

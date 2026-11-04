@@ -45,9 +45,12 @@ For the native FUSE build/link probe, see `third_party/README.md`.
 This is the first part of milestone M0, not a usable distributed filesystem.
 The reference state machine remains in memory. The LMDB `Store` implements
 `durable_applied`, synchronous transactional persistence, and logical snapshot
-restore. A running Raft group, network RPC endpoints, linearizable read routing,
-and coordinated WAL/state-machine recovery are pending.
-The deterministic replay tests do not constitute a network consensus test.
+restore. A fixed three-voter Raft group now runs over grpc-lite with persistent
+WAL, automatic snapshots, leader-only proposals, and ReadIndex-protected reads.
+Real-process tests cover failover, catch-up, full restart and metadata rebuild.
+Membership changes, automatic client leader discovery, TLS/authentication, and
+production load/partition testing remain pending. The current network service
+is a cleartext prototype for trusted development networks.
 
 Replica counts are desired metadata only. No file contents, write leases, physical
 replicas, repairs, SMB exports, or FUSE operations are implemented yet. Metadata
@@ -61,7 +64,7 @@ IDs remain replayable. An explicit deduplication retention protocol and capacity
 planning must replace these prototype limits before deployment.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
-future RPC layer must allocate a suitable client/session-scoped identity.
+future client/session identity protocol must allocate suitable request IDs.
 Snapshots retain receipts even if the referenced file has since been deleted.
 
 Names are valid UTF-8, at most 255 bytes, and cannot contain NUL or either path
@@ -84,8 +87,9 @@ so insignificant whitespace and omitted defaults do not change identity.
 
 Business failures are response statuses, not terminal Raft apply errors. Malformed
 committed payloads, invalid entry cursors, and allocation failures are terminal
-apply errors and leave the logical state unchanged. A future proposal endpoint
-must reject malformed input before appending it to Raft.
+apply errors and leave the logical state unchanged. The proposal endpoint rejects
+malformed JSON, unsupported versions, zero request IDs and oversized commands
+before appending them to Raft.
 
 Responses have a fixed ten-byte prototype encoding: version byte (1), status byte
 (`metadata.Status`), and an eight-byte little-endian inode ID. Allocating the
@@ -101,7 +105,7 @@ access with reads and snapshot creation; the in-memory type has no internal lock
 ## Next milestones
 
 1. Durable metadata storage and atomic applied-cursor persistence (implemented).
-2. Three-node Raft/RPC operation, failure recovery, and linearizable reads.
+2. Three-node Raft/RPC operation, failure recovery, and linearizable reads (implemented).
 3. SMB/FUSE share-mode prototype, followed by NAS data placement and strict
    two-replica publication.
 
@@ -137,3 +141,72 @@ snapshot replacement, map exhaustion, and allocation-failure rollback.
 Run `python3 tools/test_lmdb_recovery.py` after `zig build` for repeated process
 restart/SIGKILL checks. This checks transaction consistency and acknowledged
 commits across process death, not hardware power-loss durability.
+
+## Three-node development cluster
+
+The CLI uses pinned zli v6.0.0. Run `nas-fs --help` or `nas-fs serve --help`.
+Start each of the following in a separate terminal (replace paths as needed):
+
+```sh
+zig-out/bin/nas-fs serve --node-id 1 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9001 --api-listen 127.0.0.1:8001 --data-dir ./node-1 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+zig-out/bin/nas-fs serve --node-id 2 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9002 --api-listen 127.0.0.1:8002 --data-dir ./node-2 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+zig-out/bin/nas-fs serve --node-id 3 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9003 --api-listen 127.0.0.1:8003 --data-dir ./node-3 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+```
+
+Use the same nonzero 32-hex-digit cluster ID and three distinct peer IDs/IPv4
+addresses on all nodes. The local peer address must equal `--raft-listen`.
+Data directory parents must exist; each node creates its own directory. For
+separate machines, use their reachable IPv4 addresses. API ports are separate
+from Raft ports. Peers are the bootstrap membership; restarting reuses durable
+membership, and changing this flag does not reconfigure an existing cluster.
+
+```sh
+zig-out/bin/nas-fs status 127.0.0.1:8001
+zig-out/bin/nas-fs status 127.0.0.1:8002
+zig-out/bin/nas-fs status 127.0.0.1:8003
+# Use the API endpoint whose role is "leader":
+zig-out/bin/nas-fs apply 127.0.0.1:8001 '{"request_id":1,"command":{"create":{"parent":1,"name":"photos","kind":"directory"}}}'
+zig-out/bin/nas-fs get 127.0.0.1:8001 2
+```
+
+`status` is a local diagnostic, not a linearizable read. `apply` returns a JSON
+business result; `get` returns a node or `null`. Followers reject these operations
+with `NotLeader`; the CLI does not automatically forward or retry. A transport or
+timeout error may have an unknown commit outcome: find the current leader and
+retry the **same request ID and command**. Without a majority, no successful write
+or ReadIndex response is issued. SIGINT/SIGTERM drain the API and stop Raft.
+
+The API is declared in `proto/metadata.proto`: unary `Apply`, `Get`, and `Status`
+carry bounded version-1 JSON in an `Envelope.json` bytes field. Apply uses the
+request above; Get uses `{"id":2}`; Status uses `{}`. The prototype envelope codec
+accepts a single field (or an empty default envelope), not arbitrary extra fields.
+The internal ten-byte Raft response is converted to JSON for clients.
+
+### Persistence and recovery
+
+Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
+`DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
+the node and cluster identity; a mismatched identity fails startup. An exclusive
+process lock prevents simultaneous access by another server or local CLI tool.
+`metadata-show` can inspect a stopped node's metadata directory; `metadata-apply`
+rejects cluster-managed stores.
+
+Restart with the same identity, paths and addresses. raftz checks the LMDB cursor
+against committed WAL state, restores a newer snapshot when necessary, and
+replays committed entries after that cursor. A lagging peer can receive a remote
+snapshot and continue from its log. Automatic snapshots default to every 1,000
+applied entries (`--snapshot-entries 8` is useful in recovery tests).
+
+Both filesets are needed for normal recovery: retaining only LMDB is not a Raft
+backup. The integration test additionally exercises rebuilding a missing LMDB
+from intact local WAL/snapshots. It does not test lost disks, power cuts, or
+arbitrary storage corruption.
+
+```sh
+zig build test-cluster
+```
+
+This launches three processes on temporary loopback ports and isolated temporary
+directories, kills/restarts nodes, forces snapshot catch-up, rebuilds metadata,
+checks quorum loss, and verifies graceful shutdown. It requires Linux io_uring
+support for grpc-lite.

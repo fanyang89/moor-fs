@@ -53,6 +53,29 @@ pub const Store = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
+    pub fn bindIdentity(self: *Store, cluster_id: raft.ClusterId, node_id: u64) !void {
+        const Identity = struct { cluster_id: raft.ClusterId, node_id: u64 };
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        var txn = try self.env.begin(false);
+        defer txn.abort();
+        if (try txn.get(self.meta_db, "identity")) |data| {
+            const identity = try parse(Identity, arena.allocator(), data);
+            if (identity.node_id != node_id or !std.mem.eql(u8, &identity.cluster_id, &cluster_id)) return error.IdentityMismatch;
+        } else {
+            const meta = try self.readMeta(&txn, arena.allocator());
+            if (meta.index != 0) return error.UnboundMetadata;
+            try putJson(&txn, self.meta_db, "identity", arena.allocator(), Identity{ .cluster_id = cluster_id, .node_id = node_id });
+        }
+        try txn.commit();
+    }
+
+    pub fn requireStandalone(self: *Store) !void {
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        if (try txn.get(self.meta_db, "identity") != null) return error.ClusterManagedStore;
+    }
+
     pub fn applied(self: *Store) !raft.DurableApplied {
         var txn = try self.env.begin(true);
         defer txn.abort();
