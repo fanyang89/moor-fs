@@ -273,6 +273,10 @@ def main():
                 "PASS: no acknowledged write or linearizable read without quorum; cluster recovers",
                 flush=True,
             )
+            if "--fuse" in sys.argv[2:]:
+                from test_fuse import test_mounts
+
+                test_mounts(executable, directory, endpoints, run, leader, stop, start)
             for i in list(processes):
                 stop(i, kill=False)
         except BaseException:

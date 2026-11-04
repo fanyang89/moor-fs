@@ -48,12 +48,13 @@ The reference state machine remains in memory. The LMDB `Store` implements
 restore. A fixed three-voter Raft group now runs over grpc-lite with persistent
 WAL, automatic snapshots, leader-only proposals, and ReadIndex-protected reads.
 Real-process tests cover failover, catch-up, full restart and metadata rebuild.
-Membership changes, TLS/authentication, and
+An optional read-only FUSE namespace adapter supports lookup, attributes and
+directory handles. Membership changes, TLS/authentication, and
 production load/partition testing remain pending. The current network service
 is a cleartext prototype for trusted development networks.
 
 Replica counts are desired metadata only. No file contents, write leases, physical
-replicas, repairs, SMB exports, or FUSE operations are implemented yet. Metadata
+replicas, repairs, or SMB exports are implemented yet. Metadata
 deletion is not a physical-object garbage collection protocol.
 
 The reference implementation uses arrays; LMDB uses indexed named databases.
@@ -214,6 +215,49 @@ entries. Restart enumeration when a fresh full view is needed.
 The envelope JSON limit is 32 KiB to accommodate 16 maximally escaped names;
 incoming requests and replicated commands retain their 4 KiB limit. Page results
 own their names and remain valid after the LMDB transaction ends.
+
+### Read-only FUSE namespace
+
+Build the pinned libfuse source locally, then enable the optional adapter:
+
+```sh
+python3 tools/deps.py build-fuse
+zig build -Dfuse=true
+mkdir -p ./mountpoint
+zig-out/bin/nas-fs mount 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 ./mountpoint
+```
+
+`mount` runs in the foreground; use SIGINT/SIGTERM or `fusermount3 -u ./mountpoint`
+to unmount. It requires `/dev/fuse` and a working system `fusermount3` helper.
+The binary links the locally built libfuse and records its build directory as a
+runtime library path. The default build does not require libfuse and omits `mount`.
+
+This is a metadata-only, read-only view. Directories have mode 0555, files 0444,
+and ownership is the mounting user's UID/GID. Sizes and timestamps are placeholders
+(zero); opening file contents fails with `EOPNOTSUPP`, while mutations are rejected
+by the read-only mount. No NAS contents or SMB export are provided yet.
+
+Lookup and getattr use the remote linearizable metadata queries with zero entry
+and attribute cache timeouts. Each opendir gathers pages into an owned list and
+adds `.`/`..`; readdir offsets index that list, so rewind/resume and subsequent
+metadata changes do not shift an open handle's entries. Reopen to refresh the
+listing. Collection itself uses independent pages, not a global snapshot; a
+detected duplicate inode or capacity overflow returns `EAGAIN`. Other concurrent
+changes can still produce omissions. Up to 64 open directory handles are allowed,
+each bounded by the metadata inode limit. Handles are freed on close or unmount.
+
+The initial adapter uses libfuse's single-threaded loop. Slow RPCs can stall other
+filesystem operations; multi-address retries retain their documented attempt
+bounds. This is intended for namespace validation before adding file data and SMB.
+
+```sh
+zig build test-fuse -Dfuse=true
+```
+
+This extends the real three-node test with two temporary FUSE mounts, multi-page
+enumeration, open-handle stability during rename, cross-mount visibility,
+read-only/content-open errors, leader failover and clean unmount. It requires
+working mount permissions and fails rather than silently skipping mount checks.
 
 ### Persistence and recovery
 

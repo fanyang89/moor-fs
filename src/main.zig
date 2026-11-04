@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "status", "Inspect a node's local Raft status", &.{"endpoint"}, remoteStatus);
     try register(root, options, "lookup", "Look up a child by name", &.{ "endpoint", "parent", "name" }, remoteLookup);
     try register(root, options, "list", "List a directory page", &.{ "endpoint", "parent" }, remoteList);
+    if (@import("build_options").fuse) try register(root, options, "mount", "Mount the read-only metadata namespace in foreground", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
     try root.addCommand(serve);
     for ([_][]const u8{ "node-id", "cluster-id", "raft-listen", "api-listen", "data-dir", "peers" }) |name| {
@@ -101,6 +102,10 @@ fn remoteGet(ctx: zli.CommandContext) !void {
 
 fn remoteStatus(ctx: zli.CommandContext) !void {
     try remote(ctx, "Status", "{}");
+}
+
+fn mount(ctx: zli.CommandContext) !void {
+    try @import("fuse.zig").mount(ctx.allocator, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?);
 }
 
 fn remoteLookup(ctx: zli.CommandContext) !void {

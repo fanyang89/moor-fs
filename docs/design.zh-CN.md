@@ -450,4 +450,16 @@ apply/get/lookup/list 接受同一集群最多三个逗号分隔的 API 地址�
 
 三进程集成测试新增 follower 优先的 leader 探测、leader 被杀后的自动写入重试、重启后完整分页遍历及错误分类验证。此层为后续 FUSE 提供目录查询能力，尚未定义 FUSE 的目录句柄及跨页缓存语义。
 
+## 19. 只读 FUSE 命名空间原型
+
+通过 `python3 tools/deps.py build-fuse` 构建固定版本 libfuse，再执行 `zig build -Dfuse=true` 启用 `mount ENDPOINTS MOUNTPOINT`。默认构建无需 libfuse。mount 在前台运行，使用系统 `/dev/fuse` 和 fusermount3；SIGINT/SIGTERM 或正常卸载会释放会话与目录句柄。
+
+采用 libfuse low-level API：小型 C 桥处理 Linux stat、目录编码及会话生命周期，Zig 层调用现有元数据 RPC，复用多地址 leader 探测与重试。lookup/getattr 的 entry/attribute timeout 均为零；命名空间更新通过后续远端读取可见，不缓存负查询。稳定 inode ID 直接映射 FUSE inode。
+
+opendir 读取所有目录页并添加 `.`/`..`，为该句柄保存独立条目数组；readdir 用数组下标作下一项偏移，后续重命名不改变已打开句柄的条目与偏移。重新打开目录刷新视图。收集期间仍遵循各页独立一致的语义，不构成全局快照；检测到重复 inode 或超过容量时返回 EAGAIN，但不能检测所有遗漏。每个挂载最多保留 64 个目录句柄，每个句柄受 4096 inode 上限约束，releasedir 与会话销毁均清理资源。
+
+当前挂载为只读：目录权限 0555、普通文件 0444，UID/GID 使用挂载用户身份，大小和时间戳暂为零占位。文件 open 明确返回 EOPNOTSUPP，不能将其解释为可读空文件。挂载层拒绝写入。尚未接入 NAS 对象、实际属性、权限模型及 Samba。
+
+`zig build test-fuse -Dfuse=true` 运行三节点恢复测试并创建两个真实挂载点，验证目录与 inode、大小写名称、分页遍历、打开目录期间重命名的偏移稳定性、跨挂载更新、只读错误、文件内容不支持、leader 退出后的查询以及清理卸载。当前单线程 FUSE 循环会被远端慢请求阻塞，后续数据层和 SMB 验证需继续处理并发、取消和缓存一致性。
+
 原型暂限 4096 个存活 inode、8192 条请求记录及 8 MiB 快照；请求记录不自动淘汰，达到上限后新请求被拒绝，已有请求仍可查询原结果。名称暂采用 ASCII 大小写不敏感比较与 UTF-8 校验，尚不构成完整 SMB 名称兼容。后续需要持久化存储、去重保留协议和客户端身份域。

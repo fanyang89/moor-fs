@@ -2,14 +2,15 @@
 
 The parent repository's gitlinks are the authoritative commit locks. No floating
 branch is used during initialization. The application runs distributed metadata
-with raftz/grpc-lite and LMDB; SMB exports and a FUSE filesystem remain pending.
+with raftz/grpc-lite and LMDB, plus an optional read-only FUSE namespace adapter;
+SMB exports and NAS file contents remain pending.
 
 ## Selected projects
 
 | Project | Baseline | Role | Integration |
 | --- | --- | --- | --- |
 | Samba | samba-4.25.1 | Client-facing SMB server, VFS interfaces, CTDB evaluation | Standalone daemon; source submodule |
-| libfuse | fuse-3.18.3 | Linux userspace filesystem adapter, low-level inode API | Source submodule; local build and C ABI link probe |
+| libfuse | fuse-3.18.3 | Linux userspace filesystem adapter, low-level inode API | Local shared library; optional `-Dfuse=true` adapter |
 | cifs-utils | cifs-utils-7.9 | `mount.cifs` and backend mount tooling | Standalone tools; source submodule |
 | grpc-lite | db3c400bf70419742ebcb42fe316ba8b754b4975 | Internal RPC and Raft transport | Source submodule, aligned with raftz's dependency pin |
 | raftz | d5eba2b338cfd00f2306680cc2dcafb016add3a0 | Metadata consensus and state-machine runtime | Source submodule |

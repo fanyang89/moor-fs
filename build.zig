@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const fuse = b.option(bool, "fuse", "Build the read-only FUSE namespace adapter") orelse false;
+    const options = b.addOptions();
+    options.addOption(bool, "fuse", fuse);
     const raft = b.dependency("raftz", .{ .target = target, .optimize = optimize });
     const grpc = @import("raftz").grpcLiteDependency(raft, target, optimize);
     const zli = b.dependency("zli", .{ .target = target, .optimize = optimize });
@@ -42,6 +45,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    exe.root_module.addOptions("build_options", options);
+    if (fuse) {
+        exe.root_module.addIncludePath(b.path("third_party/libfuse/include"));
+        exe.root_module.addIncludePath(b.path(".deps-build/libfuse"));
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/fuse_bridge.c"), .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror" } });
+        exe.root_module.addLibraryPath(b.path(".deps-build/libfuse/lib"));
+        exe.root_module.addRPath(b.path(".deps-build/libfuse/lib"));
+        exe.root_module.linkSystemLibrary("fuse3", .{});
+    }
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     b.step("run", "Run nas-fs CLI").dependOn(&run.step);
@@ -52,4 +64,10 @@ pub fn build(b: *std.Build) void {
     const cluster_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
     cluster_test.addArtifactArg(exe);
     b.step("test-cluster", "Test three processes, failover, snapshots and recovery").dependOn(&cluster_test.step);
+    if (fuse) {
+        const fuse_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
+        fuse_test.addArtifactArg(exe);
+        fuse_test.addArg("--fuse");
+        b.step("test-fuse", "Test two FUSE mounts against a three-node cluster").dependOn(&fuse_test.step);
+    }
 }

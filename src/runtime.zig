@@ -326,6 +326,8 @@ fn callOne(allocator: std.mem.Allocator, address: []const u8, method: []const u8
             (result.status.code == .failed_precondition and
                 (std.mem.eql(u8, result.status.message, "NotLeader") or std.mem.eql(u8, result.status.message, "LostLeadership")))) return error.RetryableRpc;
         std.log.err("RPC {s}: {s}", .{ @tagName(result.status.code), result.status.message });
+        if (result.status.code == .not_found) return error.NotFound;
+        if (result.status.code == .failed_precondition and std.mem.eql(u8, result.status.message, "NotDirectory")) return error.NotDirectory;
         return error.RpcFailed;
     }
     return allocator.dupe(u8, try wire.decode(result.payload));
