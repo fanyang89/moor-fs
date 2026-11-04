@@ -52,8 +52,7 @@ const Client = struct {
         if (try self.getVersion(node)) |version| {
             out.size = version.size;
             for (version.backends) |backend| {
-                const root = objects.rootFor(self.mappings, backend) catch continue;
-                const store = objects.Store.open(self.io, root, false) catch continue;
+                const store = objects.openMapped(self.io, self.mappings, backend, false) catch continue;
                 defer store.close();
                 const file = store.openVerified(version) catch continue;
                 fd.* = file.handle;
@@ -68,7 +67,7 @@ const Client = struct {
         const digest = try objects.hash(self.io, file);
         const version: m.Version = .{ .id = self.randomId(), .inode = id, .size = digest.size, .sha256 = digest.sha256, .backends = self.write_backends };
         for (self.write_backends) |backend| {
-            const store = try objects.Store.open(self.io, try objects.rootFor(self.mappings, backend), false);
+            const store = try objects.openMapped(self.io, self.mappings, backend, false);
             defer store.close();
             try store.put(file, version);
         }
@@ -117,8 +116,7 @@ const Client = struct {
         out.size = version.size;
         for (version.backends) |backend| {
             if (backend == 0) continue;
-            const root = objects.rootFor(self.mappings, backend) catch continue;
-            const store = objects.Store.open(self.io, root, false) catch continue;
+            const store = objects.openMapped(self.io, self.mappings, backend, false) catch continue;
             defer store.close();
             return store.openVerified(version) catch continue;
         }
@@ -270,7 +268,7 @@ pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []
             const backend = try client.query(?m.Backend, "Backend", .{ .id = id });
             defer backend.deinit();
             domains[i] = (backend.value orelse return error.BackendNotFound).failure_domain;
-            const store = try objects.Store.open(io, try objects.rootFor(client.mappings, id), false);
+            const store = try objects.openMapped(io, client.mappings, id, false);
             defer store.close();
             paths[i] = try store.root.realPathFileAlloc(io, ".", gpa);
             count += 1;

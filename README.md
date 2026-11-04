@@ -113,8 +113,9 @@ access with reads and snapshot creation; the in-memory type has no internal lock
 1. Durable metadata storage and atomic applied-cursor persistence (implemented).
 2. Three-node Raft/RPC operation, failure recovery, and linearizable reads (implemented).
 3. SMB/FUSE operations and synchronous dual-replica publication (opt-in prototype).
-4. MVP hardening: backend mount identity, corrupt-replica recovery, deployment and
-   client acceptance. Tracker: https://kaneo.nuke.fuis.space/default/task/NASFS-1
+4. MVP hardening: deployment and client acceptance, with guarded backend mounts
+   and corrupt-replica recovery implemented.
+   Tracker: https://kaneo.nuke.fuis.space/default/task/NASFS-1
 5. Cross-node SMB locking, automatic placement/repair and coordinated GC.
 
 ## Local LMDB storage
@@ -340,8 +341,36 @@ absolute, existing directories on mounted NAS shares. Paths and mount credential
 are not replicated in Raft. For local development, ordinary directories work too:
 
 ```json
-[{"id":1,"root":"/mnt/nas-a/nas-fs"},{"id":2,"root":"/mnt/nas-b/nas-fs"}]
+[
+  {"id":1,"root":"/mnt/nas-a/nas-fs","mount":{"mountpoint":"/mnt/nas-a","source":"//192.0.2.10/data","address":"192.0.2.10"}},
+  {"id":2,"root":"/mnt/nas-b/nas-fs","mount":{"mountpoint":"/mnt/nas-b","source":"//192.0.2.11/data","address":"192.0.2.11"}}
+]
 ```
+
+Every mapping must specify either `mount` or `"allow_local":true`, never both.
+Legacy entries containing only `id`/`root` now fail with `BackendIdentityRequired`.
+For NAS deployments, copy the mountpoint, exact UNC source and `addr=` from
+`/proc/self/mountinfo` into `mount`. Only CIFS whole-share mounts are accepted;
+bind-mounted subtrees are rejected. The root must already exist. Local directory
+tests may explicitly use `{"id":1,"root":"/absolute/test-root","allow_local":true}`;
+this bypasses mount identity checks and does not establish a physical NAS replica.
+
+The adapter opens the root first and uses its descriptor's `mnt_id` to locate
+the active CIFS mount. It validates the expected mountpoint, source and address
+before initializing any directories. `staging` and `objects` must belong to the
+same mount as the root. Upload, repair, verified reads and FUSE/SMB all use this
+path; object installation rechecks the root before copying and before installing.
+Wrong/absent/detached mounts fail with `BackendMountMismatch`; reads can try the
+other replica. A fresh correct remount is accepted without changing configuration.
+Pinned descriptors cannot fall through to newly exposed local storage; in-flight
+I/O can still finish against the original filesystem if detachment races a check.
+
+Duplicate share names at the same configured server address are rejected even
+when the UNC hostname or local paths differ. Linux mountinfo does not expose the
+CIFS TCP port, so different ports do not make otherwise identical identities
+distinct. Physical NAS failure domains remain administrator declarations: aliases,
+multiple shares or addresses do not prove independent hardware. Mount identity
+validation is not NAS authentication or a distributed fencing protocol.
 
 Create the file inode and register backends first, then upload a stable source:
 
@@ -424,8 +453,7 @@ does not initialize directories or add replica
 locations. A failure after installation may leave a valid object; retrying is
 safe. Concurrent publication/deletion can make the pinned version historical,
 but repair never republishes it or recreates namespace entries. Retry after
-checking the reported version if the current file changed. Backend mount identity
-is still trusted configuration; automatic repair and coordination with future
+checking the reported version if the current file changed. Automatic repair and coordination with future
 garbage collection remain pending.
 
 To explicitly restore a checksum-invalid object on the selected backend:
@@ -470,8 +498,9 @@ binary. The fault tests simulate process death, not NAS hardware power failure.
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical
-  upload roots are rejected. Physical NAS identity and mount presence are trusted
-  configuration, not discovered: two local directories are not physical replicas.
+  upload roots are rejected. Guarded mappings verify CIFS mount presence and identity;
+  physical failure domains remain administrator-configured. Two local directories
+  are not physical replicas.
 - `staging/` and `objects/` must share a filesystem supporting atomic no-replace
   rename and file/directory fsync. Unsupported operations fail the upload. CIFS
   transport is covered by the Samba E2E below; NAS power-loss durability remains
@@ -619,8 +648,9 @@ not recognize their WAL entries.
 
 Prototype limits still apply: 64 handles per mount, 2,048 retained versions and
 8,192 request receipts, no GC, no NAS I/O deadline, and administrator-trusted mount
-identity. Per-write publication can exhaust the version limit quickly. NASFS-5
-tracks mount identity checks; this is not yet a production writable filesystem.
+physical failure domains. Per-write publication can exhaust the version limit
+quickly. Guarded mappings reject mount mismatches; `allow_local` explicitly bypasses
+that protection. This is not yet a production writable filesystem.
 
 `test-fuse` now includes writable offset/truncate, fixed old reads, writer exclusion,
 CAS conflict, second-store failure and namespace checks. `test-smb` additionally

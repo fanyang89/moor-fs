@@ -7,6 +7,7 @@ pub const objects = @import("objects.zig");
 pub const raft = @import("raftz");
 
 test {
+    _ = @import("backend_mount.zig");
     _ = @import("objects_test.zig");
     _ = @import("metadata_test.zig");
     _ = @import("machine_test.zig");

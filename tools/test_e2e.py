@@ -100,11 +100,16 @@ def worker(args):
             f"guest,username=guest,port={server['port']},vers=3.1.1,uid={args.uid},gid={args.gid},"
             "forceuid,forcegid,nosuid,nodev,noexec,cache=none,actimeo=0"
         )
-        run("mount.cifs", "//127.0.0.1/data", server["mount"], "-o", options)
+        run("mount.cifs", server["source"], server["mount"], "-o", options)
         mounted.append(server["mount"])
         lines = Path("/proc/self/mountinfo").read_text().splitlines()
         assert any(
             f" {server['mount']} " in line and " - cifs " in line for line in lines
+        )
+        server["mountinfo"] = next(
+            line
+            for line in lines
+            if f" {server['mount']} " in line and " - cifs " in line
         )
 
     def unmount_all():
@@ -146,13 +151,14 @@ log file = {base}/samba.log
 load printers = no
 printing = bsd
 printcap name = /dev/null
-[data]
+[data{i}]
 path = {export}
 read only = no
 guest ok = yes
 follow symlinks = no
 """)
             server = {
+                "source": f"//127.0.0.1/data{i}",
                 "config": config,
                 "log": base / "process.log",
                 "port": port,
@@ -244,6 +250,7 @@ follow symlinks = no
                 shutil.rmtree(directory)
             else:
                 for server in servers:
+                    print(server.get("mountinfo", "mount not reached"), file=sys.stderr)
                     if server["log"].exists():
                         print(
                             f"\n{server['log']}:\n{server['log'].read_text()[-6000:]}",

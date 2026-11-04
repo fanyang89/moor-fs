@@ -3,7 +3,6 @@ const nas = @import("nas_fs");
 const zli = @import("zli");
 const m = nas.metadata;
 const objects = nas.objects;
-const rootFor = objects.rootFor;
 const Upload = struct { request_id: u64, inode: u64, version_id: u64, expected_version: u64, backends: [2]u64 };
 
 fn query(ctx: zli.CommandContext, comptime T: type, method: []const u8, value: anytype) !std.json.Parsed(T) {
@@ -65,7 +64,7 @@ pub fn put(ctx: zli.CommandContext) !void {
     var opened: usize = 0;
     defer for (stores[0..opened]) |store| store.close();
     for (upload.backends[0..count]) |id| {
-        stores[opened] = try objects.Store.open(ctx.io, try rootFor(config.value, id), true);
+        stores[opened] = try objects.openMapped(ctx.io, config.value, id, true);
         opened += 1;
     }
     if (opened == 2) {
@@ -100,8 +99,7 @@ pub fn get(ctx: zli.CommandContext) !void {
     const version = try currentVersion(ctx, id);
     for (version.backends) |backend| {
         if (backend == 0) continue;
-        const root = rootFor(config.value, backend) catch continue;
-        const store = objects.Store.open(ctx.io, root, false) catch |err| {
+        const store = objects.openMapped(ctx.io, config.value, backend, false) catch |err| {
             std.log.warn("backend {d}: {s}", .{ backend, @errorName(err) });
             continue;
         };
@@ -133,9 +131,9 @@ pub fn repair(ctx: zli.CommandContext) !void {
     const version = try currentVersion(ctx, id);
     if (backend == 0 or std.mem.indexOfScalar(u64, &version.backends, backend) == null) return error.ReplicaNotDeclared;
     // Do not initialize an absent mount or change immutable replica declarations.
-    const target = try objects.Store.open(ctx.io, try rootFor(config.value, backend), false);
+    const target = try objects.openMapped(ctx.io, config.value, backend, false);
     defer target.close();
-    const existing: ?std.Io.File = target.openVerified(version) catch |err| switch (err) {
+    const existing: ?std.Io.File = target.openRepairTarget(version) catch |err| switch (err) {
         error.FileNotFound => null,
         error.ChecksumMismatch => if (replace_corrupt) null else return err,
         else => return err,
@@ -151,8 +149,7 @@ pub fn repair(ctx: zli.CommandContext) !void {
     }
     for (version.backends) |source_backend| {
         if (source_backend == 0 or source_backend == backend) continue;
-        const root = rootFor(config.value, source_backend) catch continue;
-        const store = objects.Store.open(ctx.io, root, false) catch continue;
+        const store = objects.openMapped(ctx.io, config.value, source_backend, false) catch continue;
         defer store.close();
         const source = store.openVerified(version) catch continue;
         defer source.close(ctx.io);
@@ -178,8 +175,8 @@ fn repairResult(ctx: zli.CommandContext, version: m.Version, backend: u64, sourc
 }
 
 fn checkReplica(io: std.Io, config: []const objects.Mapping, backend: u64, version: m.Version) ReplicaCheck {
-    const root = rootFor(config, backend) catch |err| return .{ .backend = backend, .status = .unconfigured, .reason = @errorName(err) };
-    const store = objects.Store.open(io, root, false) catch |err| return .{ .backend = backend, .status = .unavailable, .reason = @errorName(err) };
+    const mapping = objects.mappingFor(config, backend) catch |err| return .{ .backend = backend, .status = .unconfigured, .reason = @errorName(err) };
+    const store = objects.Store.openMapping(io, mapping, false) catch |err| return .{ .backend = backend, .status = .unavailable, .reason = @errorName(err) };
     defer store.close();
     const file = store.openVerified(version) catch |err| return .{
         .backend = backend,

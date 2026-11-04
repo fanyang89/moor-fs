@@ -3,6 +3,21 @@ const t = std.testing;
 const objects = @import("objects.zig");
 const m = @import("metadata.zig");
 
+test "mount mismatch refuses initialization of exposed local storage" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(path);
+    try t.expectError(error.BackendMountMismatch, objects.Store.openMapping(t.io, .{
+        .id = 1,
+        .root = path,
+        .mount = .{ .mountpoint = path, .source = "//nas/data", .address = "192.0.2.1" },
+    }, true));
+    try t.expectError(error.FileNotFound, tmp.dir.openDir(t.io, "staging", .{}));
+    try t.expectError(error.FileNotFound, tmp.dir.openDir(t.io, "objects", .{}));
+    try t.expectError(error.FileNotFound, tmp.dir.openDir(t.io, "import", .{}));
+}
+
 test "corrupt repair validates source before replacement and preserves existing handles" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();

@@ -23,9 +23,19 @@ def test_data(
     for root in roots:
         root.mkdir()
     config = directory / "backends.json"
-    config.write_text(
-        json.dumps([{"id": i + 1, "root": str(root)} for i, root in enumerate(roots)])
-    )
+    mappings = []
+    for i, root in enumerate(roots):
+        mapping = {"id": i + 1, "root": str(root)}
+        if smb_ports:
+            mapping["mount"] = {
+                "mountpoint": str(root.parent),
+                "source": f"//127.0.0.1/data{i}",
+                "address": "127.0.0.1",
+            }
+        else:
+            mapping["allow_local"] = True
+        mappings.append(mapping)
+    config.write_text(json.dumps(mappings))
     source = directory / "source.bin"
     content = bytes(range(256)) * 5000 + b"tail"
     source.write_bytes(content)
@@ -115,11 +125,25 @@ def test_data(
     assert version["sha256"] == list(hashlib.sha256(content).digest())
     assert check(200, ["healthy", "healthy"])["size"] == len(content)
     partial = directory / "partial-backends.json"
-    partial.write_text(json.dumps([{"id": 1, "root": str(roots[0])}]))
+    partial.write_text(json.dumps(mappings[:1]))
     check(200, ["healthy", "unconfigured"], partial)
     for root in roots:
         assert object_path(root, 200, content).read_bytes() == content
     if smb_ports:
+        from test_mount_identity import test_mount_identity
+
+        test_mount_identity(
+            directory,
+            roots,
+            smb_ports,
+            mappings,
+            endpoints,
+            config,
+            inode,
+            200,
+            source,
+            run,
+        )
         for i, port in enumerate(smb_ports):
             target = directory / f"smb-client-{i}.bin"
             remote = (
@@ -128,7 +152,7 @@ def test_data(
             result = subprocess.run(
                 [
                     "smbclient",
-                    "//127.0.0.1/data",
+                    f"//127.0.0.1/data{i}",
                     "-p",
                     str(port),
                     "-N",
