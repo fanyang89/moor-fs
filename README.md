@@ -526,6 +526,15 @@ restart/write checks run afterward. Both Debug (omit `-Doptimize=safe`) and Safe
 full fault suites pass. This case covers leader change before the publication RPC,
 not election during an in-flight Raft commit or a lost commit reply.
 
+Two more cases stop both metadata followers after object installation, resume the
+FUSE/SMB request, and keep quorum unavailable until the client reports failure.
+Only then are the voters restarted. Recovery accepts either the previous version
+or the exact staged version, checks the corresponding contents and two healthy
+replicas, and verifies further writes after access restart. A timed-out proposal
+may commit once quorum returns; the direct FUSE cases observed this delayed commit
+in both Debug and Safe runs. Object installation alone never warrants a successful
+client reply. The full fault matrix now contains eleven scenarios.
+
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical

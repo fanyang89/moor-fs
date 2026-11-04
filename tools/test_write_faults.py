@@ -85,11 +85,11 @@ def test_write_faults(
             assert time.monotonic() < deadline, "write checkpoint timed out"
             time.sleep(0.02)
 
-    def exercise(kind, point, failover=False):
+    def exercise(kind, point, outage=None):
         nonlocal request_id
         label = f"{kind}-{point}"
-        if failover:
-            label += "-election"
+        if outage:
+            label += f"-{outage}"
         name = f"write-crash-{label}.bin"
         request_id += 1
         inode = run(
@@ -123,8 +123,16 @@ def test_write_faults(
         old_version = request_id
         before = [set((root / "objects").iterdir()) for root in roots]
         source.write_bytes(content)
+        expected = (
+            content
+            if point == "published" or kind == "disconnect" or outage == "election"
+            else original
+            if kind == "fuse"
+            else b""
+        )
 
         def interrupt(command, access):
+            nonlocal expected
             log = directory / f"fault-client-{label}.log"
             with log.open("w") as output:
                 client = subprocess.Popen(command, stdout=output, stderr=output)
@@ -162,7 +170,40 @@ def test_write_faults(
                     assert run("file-version", endpoints, staged_version) is None
                 else:
                     assert current == staged_version
-                if failover:
+                if outage == "quorum":
+                    current_leader = leader()
+                    stopped = []
+                    try:
+                        for voter in range(3):
+                            if voter != current_leader:
+                                stop(voter)
+                                stopped.append(voter)
+                        access.send_signal(signal.SIGCONT)
+                        code = client.wait(timeout=90)
+                        output = log.read_text()
+                        if kind == "fuse":
+                            assert code != 0 and "WRITE_ACK" not in output, output
+                        else:
+                            assert code != 0 or "NT_STATUS_" in output, output
+                        assert access.poll() is None
+                    finally:
+                        for voter in stopped:
+                            start(voter)
+                    leader()
+                    recovered = run("get", endpoints, inode)["current_version"]
+                    # A timed-out proposal can still commit after quorum returns.
+                    assert recovered in (current, staged_version), recovered
+                    if recovered == staged_version:
+                        expected = content
+                    else:
+                        assert run("file-version", endpoints, staged_version) is None
+                    assert run("check-file", endpoints, config, inode)["all_healthy"]
+                    print(
+                        f"PASS: {label} client failed without quorum; recovered version {recovered}",
+                        flush=True,
+                    )
+                    return
+                if outage == "election":
                     old = leader()
                     stop(old)
                     try:
@@ -253,13 +294,6 @@ def test_write_faults(
                         access,
                     )
 
-        expected = (
-            content
-            if point == "published" or kind == "disconnect" or failover
-            else original
-            if kind == "fuse"
-            else b""
-        )
         assert (readonly / name).read_bytes() == expected
         assert run("check-file", endpoints, config, inode)["healthy_replicas"] == 2
         # A fresh access process sees the committed state and accepts a new CAS write.
@@ -278,6 +312,7 @@ def test_write_faults(
     for kind in ["fuse", "smb"] if smb else ["fuse"]:
         for point in ("first_replica", "both_replicas", "published"):
             exercise(kind, point)
-        exercise(kind, "both_replicas", failover=True)
+        exercise(kind, "both_replicas", outage="election")
+        exercise(kind, "both_replicas", outage="quorum")
     if smb:
         exercise("disconnect", "first_replica")
