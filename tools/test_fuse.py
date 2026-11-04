@@ -180,6 +180,21 @@ def test_mounts(executable, directory, endpoints, run, leader, stop, start, smb=
             test_exports(
                 directory, mounts, endpoints, config, roots, run, leader, stop, start
             )
+        from test_write import test_writes
+
+        test_writes(
+            executable,
+            directory,
+            endpoints,
+            config,
+            roots,
+            second,
+            run,
+            smb,
+            leader,
+            stop,
+            start,
+        )
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0
         assert not os.path.ismount(first)

@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const fuse = b.option(bool, "fuse", "Build the read-only FUSE namespace adapter") orelse false;
+    const fuse = b.option(bool, "fuse", "Build the FUSE namespace and file adapter") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "fuse", fuse);
     const raft = b.dependency("raftz", .{ .target = target, .optimize = optimize });

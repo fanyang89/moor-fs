@@ -48,16 +48,16 @@ The reference state machine remains in memory. The LMDB `Store` implements
 restore. A fixed three-voter Raft group now runs over grpc-lite with persistent
 WAL, automatic snapshots, leader-only proposals, and ReadIndex-protected reads.
 Real-process tests cover failover, catch-up, full restart and metadata rebuild.
-An optional read-only FUSE adapter supports lookup, attributes, directory handles
-and version-pinned file reads. Membership changes, TLS/authentication, and
+An optional FUSE adapter supports lookup, attributes, directory handles,
+version-pinned reads and opt-in synchronous dual-replica writes. Membership changes, TLS/authentication, and
 production load/partition testing remain pending. The current network service
 is a cleartext prototype for trusted development networks.
 
 The CLI can copy, verify and publish whole files on configured mounted backend
 directories, and export a verified replica. Write leases, automatic placement,
-automatic repairs and writable SMB exports remain pending. Missing declared replicas
-can be restored manually with `repair-file`. FUSE supports verified read-only
-file access, with a single-user Samba export helper.
+automatic repairs and cross-node SMB coordination remain pending. Missing declared
+replicas can be restored manually with `repair-file`. A single-user Samba helper
+supports read-only exports by default and an opt-in writable prototype.
 Metadata deletion is not a physical-object garbage collection protocol. Raw `apply` publication
 still validates metadata declarations only.
 
@@ -112,8 +112,10 @@ access with reads and snapshot creation; the in-memory type has no internal lock
 
 1. Durable metadata storage and atomic applied-cursor persistence (implemented).
 2. Three-node Raft/RPC operation, failure recovery, and linearizable reads (implemented).
-3. SMB/FUSE share-mode prototype, followed by NAS data placement and strict
-   two-replica publication.
+3. SMB/FUSE operations and synchronous dual-replica publication (opt-in prototype).
+4. MVP hardening: backend mount identity, corrupt-replica recovery, deployment and
+   client acceptance. Tracker: https://kaneo.nuke.fuis.space/default/task/NASFS-1
+5. Cross-node SMB locking, automatic placement/repair and coordinated GC.
 
 ## Local LMDB storage
 
@@ -256,7 +258,7 @@ not necessarily the version held by an older descriptor.
 
 Without `--backends`, content opens return `EOPNOTSUPP`. With a mapping, unpublished
 files return `ENODATA`, and no healthy replica returns `EIO`; a published empty file
-is readable. Mutations are rejected. Reads after open do not rehash each range or
+is readable. Mutations are rejected in the default read-only mode. Reads after open do not rehash each range or
 automatically switch replicas: backend read errors/premature EOF return `EIO`.
 Installed objects must remain immutable; same-size out-of-band changes after open
 are not detected. A read-only SMB export is available through the helper below.
@@ -508,7 +510,7 @@ local lock state; sendfile is disabled to use the verified FUSE read path. New
 connections/opens read current metadata. Tests cover fresh SMB connections, not
 arbitrary client cache behavior or change notifications. FUSE retains its fixed
 version handles and full-file verification cost. There is no CTDB coordination,
-cross-node SMB locking, durable-handle failover, writable export or complete file
+cross-node SMB locking, durable-handle failover or complete file
 timestamp/ACL model.
 
 ```sh
@@ -523,6 +525,67 @@ replacement, metadata rename/delete visibility, empty files, corrupt-replica
 fallback, all-replicas-corrupt errors and metadata leader failover. It also runs
 the existing backend restart/remount hash checks. No hardware power-loss durability
 or SMB session migration is implied.
+
+### Opt-in writable SMB prototype
+
+Use one writable access node for this prototype. Keep other SMB entrances read-only;
+there is no distributed SMB lock service or automatic writer failover. Both backend
+IDs must already be registered in distinct failure domains, mapped locally, and
+have existing `staging/` and `objects/` directories (as initialized by `put-file`).
+
+```sh
+zig-out/bin/nas-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json --write-backends 1,2
+python3 tools/serve_smb.py ./mountpoint ./smb-write-state --port 1445 --writable
+smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'mkdir photos; put photo.jpg photos/photo.jpg'
+```
+
+Creating files/directories, uploading, overwriting/truncating contents, offset
+writes, non-replacing rename/move, unlink and empty-directory removal are supported.
+The writable mount uses modes 0755/0644 and creates new entries with policy `two`;
+opening a single-replica-policy file for writing is rejected. The selected pair is
+used for each new version. Existing read-only mounts and exports remain unchanged.
+The helper refuses `--writable` on a read-only mount. DOS archive-bit mapping and
+DOS xattr storage are disabled; ownership/mode/time changes, ACLs, links, mmap,
+rename-over-existing and persistent timestamps are not implemented.
+
+Each writer uses an anonymous local temporary file (`tmpfile`, closed on handle
+release) seeded from a verified current replica. Each FUSE write or size change
+copies the **whole resulting file** to both NAS stores, verifies/syncs/readbacks
+the objects, and publishes through version CAS **before returning success**.
+Create publishes a dual-replica empty version before acknowledging success.
+`flush`/`fsync` report the handle's existing result, with no additional publication.
+This deliberately expensive path establishes synchronous correctness, not throughput:
+uploads can expose committed intermediate versions, and overwrite may first publish
+an empty truncation. It is not whole-upload atomic replacement. Read handles still
+pin their original versions.
+
+Only one writable handle per inode is allowed in a mount (`EBUSY`). External CLI
+publication or another mount can cause a CAS conflict (`EAGAIN`); this prevents
+stale overwrite, but does not implement cross-node SMB share modes. Any write I/O
+or publication failure freezes that handle: later writes/reads/flushes fail and
+close can report the error. Reopen and inspect current metadata after an uncertain
+RPC result; an error can hide a committed version. Failed create can leave an
+unpublished inode, and failed publications can leave objects; neither is reported
+as a successful write or automatically deleted. Process death closes local staging,
+and previously acknowledged writes remain published. No unacknowledged staging
+recovery or durable SMB session migration is provided.
+
+Metadata rename/remove now resolve parent/name inside the Raft-applied transaction
+(`rename_entry`/`remove_entry`), avoiding a separate lookup/mutation race. Existing
+targets are never replaced, and nonempty directories cannot be removed. Upgrade
+all metadata nodes together before using these new commands; older binaries do
+not recognize their WAL entries.
+
+Prototype limits still apply: 64 handles per mount, 2,048 retained versions and
+8,192 request receipts, no GC, no NAS I/O deadline, and administrator-trusted mount
+identity. Per-write publication can exhaust the version limit quickly. NASFS-5
+tracks mount identity checks; this is not yet a production writable filesystem.
+
+`test-fuse` now includes writable offset/truncate, fixed old reads, writer exclusion,
+CAS conflict, second-store failure and namespace checks. `test-smb` additionally
+exercises real SMB upload/overwrite/download/rename/delete/mkdir/rmdir, empty files,
+second-replica failure and writes after metadata leader recovery, alongside the
+existing read-only tests and backend restart/remount hash checks.
 
 ### Persistence and recovery
 

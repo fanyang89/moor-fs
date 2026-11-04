@@ -258,6 +258,18 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .remove_entry => |r| {
+                if (!m.validName(r.name)) return .{ .status = .invalid_name };
+                const id = (try self.find(txn, r.parent, r.name)) orelse return .{ .status = .not_found };
+                const node = (try self.readNode(txn, allocator, id)) orelse return error.CorruptStore;
+                if (node.kind != r.kind) return .{ .status = if (r.kind == .file) .not_file else .not_directory };
+                return self.execute(txn, allocator, meta, .{ .remove = .{ .id = id } });
+            },
+            .rename_entry => |r| {
+                if (!m.validName(r.name)) return .{ .status = .invalid_name };
+                const id = (try self.find(txn, r.parent, r.name)) orelse return .{ .status = .not_found };
+                return self.execute(txn, allocator, meta, .{ .rename = .{ .id = id, .parent = r.new_parent, .name = r.new_name } });
+            },
             .create => |r| {
                 if (!m.validName(r.name)) return .{ .status = .invalid_name };
                 const parent = (try self.readNode(txn, allocator, r.parent)) orelse return .{ .status = .not_found };

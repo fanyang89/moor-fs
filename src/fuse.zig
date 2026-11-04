@@ -11,6 +11,12 @@ const Api = extern struct {
     list: *const fn (*anyopaque, u64, *?[*]Entry, *usize) callconv(.c) c_int,
     free: *const fn ([*]Entry, usize) callconv(.c) void,
     open: *const fn (*anyopaque, u64, *Entry, *c_int) callconv(.c) c_int,
+    writable: c_int,
+    prepare: *const fn (*anyopaque, u64, *Entry, *c_int, *u64) callconv(.c) c_int,
+    commit: *const fn (*anyopaque, u64, c_int, *u64, *u64) callconv(.c) c_int,
+    create: *const fn (*anyopaque, u64, [*:0]const u8, c_int, *Entry) callconv(.c) c_int,
+    remove: *const fn (*anyopaque, u64, [*:0]const u8, c_int) callconv(.c) c_int,
+    rename: *const fn (*anyopaque, u64, [*:0]const u8, u64, [*:0]const u8) callconv(.c) c_int,
 };
 extern fn nas_fuse_run(path: [*:0]const u8, api: *const Api) c_int;
 
@@ -18,6 +24,58 @@ const Client = struct {
     endpoints: []const u8,
     io: std.Io,
     mappings: []const objects.Mapping,
+    write_backends: [2]u64 = .{ 0, 0 },
+
+    fn randomId(self: *Client) u64 {
+        var id: u64 = 0;
+        while (id == 0) self.io.random(std.mem.asBytes(&id));
+        return id;
+    }
+
+    fn apply(self: *Client, command: m.Command) !u64 {
+        if (self.write_backends[0] == 0) return error.ReadOnly;
+        const result = try self.query(m.Result, "Apply", m.Request{ .request_id = self.randomId(), .command = command });
+        defer result.deinit();
+        try checkStatus(result.value.status);
+        return result.value.inode;
+    }
+
+    fn prepareFile(self: *Client, id: u64, out: *Entry, fd: *c_int, expected: *u64) !void {
+        const record = try self.query(?m.Node, "Get", .{ .id = id });
+        defer record.deinit();
+        const node = record.value orelse return error.NotFound;
+        if (node.kind != .file) return error.IsDirectory;
+        if (node.replicas != .two) return error.InvalidReplicaPolicy;
+        expected.* = node.current_version;
+        out.* = try entry(node);
+        fd.* = -1;
+        if (try self.getVersion(node)) |version| {
+            out.size = version.size;
+            for (version.backends) |backend| {
+                const root = objects.rootFor(self.mappings, backend) catch continue;
+                const store = objects.Store.open(self.io, root, false) catch continue;
+                defer store.close();
+                const file = store.openVerified(version) catch continue;
+                fd.* = file.handle;
+                return;
+            }
+            return error.NoHealthyReplica;
+        }
+    }
+
+    fn publishFile(self: *Client, id: u64, fd: c_int, expected: *u64, size: *u64) !void {
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+        const digest = try objects.hash(self.io, file);
+        const version: m.Version = .{ .id = self.randomId(), .inode = id, .size = digest.size, .sha256 = digest.sha256, .backends = self.write_backends };
+        for (self.write_backends) |backend| {
+            const store = try objects.Store.open(self.io, try objects.rootFor(self.mappings, backend), false);
+            defer store.close();
+            try store.put(file, version);
+        }
+        _ = try self.apply(.{ .publish = .{ .expected_version = expected.*, .version = version } });
+        expected.* = version.id;
+        size.* = version.size;
+    }
 
     fn query(self: *Client, comptime T: type, method: []const u8, request: anytype) !std.json.Parsed(T) {
         const json = try std.json.Stringify.valueAlloc(allocator, request, .{});
@@ -115,8 +173,60 @@ fn errno(err: anyerror) c_int {
         error.IsDirectory => 21,
         error.NoPublishedVersion => 61,
         error.NoBackendConfig => 95,
+        error.ReadOnly => 30,
+        error.AlreadyExists => 17,
+        error.NotEmpty => 39,
+        error.InvalidName, error.InvalidReplicaPolicy => 22,
+        error.VersionConflict => 11,
+        error.CapacityExceeded => 28,
         else => 5,
     };
+}
+
+fn checkStatus(status: m.Status) !void {
+    return switch (status) {
+        .ok => {},
+        .not_found => error.NotFound,
+        .already_exists => error.AlreadyExists,
+        .not_directory => error.NotDirectory,
+        .not_file => error.IsDirectory,
+        .not_empty => error.NotEmpty,
+        .invalid_name, .cycle, .root_protected => error.InvalidName,
+        .version_conflict => error.VersionConflict,
+        .capacity_exceeded => error.CapacityExceeded,
+        else => error.InvalidResponse,
+    };
+}
+
+fn prepare(context: *anyopaque, id: u64, out: *Entry, fd: *c_int, expected: *u64) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    client.prepareFile(id, out, fd, expected) catch |err| return errno(err);
+    return 0;
+}
+
+fn commit(context: *anyopaque, id: u64, fd: c_int, expected: *u64, size: *u64) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    client.publishFile(id, fd, expected, size) catch |err| return errno(err);
+    return 0;
+}
+
+fn create(context: *anyopaque, parent: u64, name: [*:0]const u8, directory: c_int, out: *Entry) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    const id = client.apply(.{ .create = .{ .parent = parent, .name = std.mem.span(name), .kind = if (directory != 0) .directory else .file, .replicas = .two } }) catch |err| return errno(err);
+    out.* = client.getNode(id, null) catch |err| return errno(err);
+    return 0;
+}
+
+fn remove(context: *anyopaque, parent: u64, name: [*:0]const u8, directory: c_int) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    _ = client.apply(.{ .remove_entry = .{ .parent = parent, .name = std.mem.span(name), .kind = if (directory != 0) .directory else .file } }) catch |err| return errno(err);
+    return 0;
+}
+
+fn rename(context: *anyopaque, parent: u64, name: [*:0]const u8, new_parent: u64, new_name: [*:0]const u8) callconv(.c) c_int {
+    const client: *Client = @ptrCast(@alignCast(context));
+    _ = client.apply(.{ .rename_entry = .{ .parent = parent, .name = std.mem.span(name), .new_parent = new_parent, .new_name = std.mem.span(new_name) } }) catch |err| return errno(err);
+    return 0;
 }
 
 fn get(context: *anyopaque, id: u64, name: ?[*:0]const u8, out: *Entry) callconv(.c) c_int {
@@ -145,13 +255,32 @@ fn open(context: *anyopaque, id: u64, out: *Entry, fd: *c_int) callconv(.c) c_in
     return 0;
 }
 
-pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []const u8, config: []const u8) !void {
+pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []const u8, config: []const u8, write_config: []const u8) !void {
     const mappings = if (config.len == 0) null else try objects.loadMappings(gpa, io, config);
     defer if (mappings) |parsed| parsed.deinit();
     var client: Client = .{ .endpoints = endpoints, .io = io, .mappings = if (mappings) |parsed| parsed.value else &.{} };
+    if (write_config.len != 0) {
+        var ids = std.mem.splitScalar(u8, write_config, ',');
+        var domains: [2]u64 = undefined;
+        var paths: [2][:0]u8 = undefined;
+        var count: usize = 0;
+        defer for (paths[0..count]) |p| gpa.free(p);
+        for (0..2) |i| {
+            const id = try std.fmt.parseUnsigned(u64, ids.next() orelse return error.InvalidReplicaPolicy, 10);
+            const backend = try client.query(?m.Backend, "Backend", .{ .id = id });
+            defer backend.deinit();
+            domains[i] = (backend.value orelse return error.BackendNotFound).failure_domain;
+            const store = try objects.Store.open(io, try objects.rootFor(client.mappings, id), false);
+            defer store.close();
+            paths[i] = try store.root.realPathFileAlloc(io, ".", gpa);
+            count += 1;
+            client.write_backends[i] = id;
+        }
+        if (ids.next() != null or domains[0] == domains[1] or std.mem.eql(u8, paths[0], paths[1])) return error.InvalidReplicaPolicy;
+    }
     _ = try client.getNode(1, null);
     const mountpoint = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(mountpoint);
-    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free, .open = open };
+    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free, .open = open, .writable = @intFromBool(write_config.len != 0), .prepare = prepare, .commit = commit, .create = create, .remove = remove, .rename = rename };
     if (nas_fuse_run(mountpoint, &api) != 0) return error.FuseFailed;
 }

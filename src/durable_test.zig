@@ -30,6 +30,41 @@ fn apply(store: *Store, index: u64, request: m.Request) !m.Result {
 
 const create: m.Request = .{ .request_id = 1, .command = .{ .create = .{ .parent = 1, .name = "photos", .kind = .directory } } };
 
+test "path mutations are atomic, typed and deduplicated across name reuse and restart" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const removal: m.Request = .{ .request_id = 7, .command = .{ .remove_entry = .{ .parent = 2, .name = "MOVED", .kind = .file } } };
+    const commands = [_]m.Request{
+        create,
+        .{ .request_id = 2, .command = .{ .create = .{ .parent = 2, .name = "child", .kind = .file } } },
+        .{ .request_id = 3, .command = .{ .remove_entry = .{ .parent = 1, .name = "photos", .kind = .file } } },
+        .{ .request_id = 4, .command = .{ .remove_entry = .{ .parent = 1, .name = "photos", .kind = .directory } } },
+        .{ .request_id = 5, .command = .{ .rename_entry = .{ .parent = 2, .name = "CHILD", .new_parent = 2, .new_name = "moved" } } },
+        .{ .request_id = 6, .command = .{ .remove_entry = .{ .parent = 2, .name = "child", .kind = .file } } },
+        removal,
+        .{ .request_id = 8, .command = .{ .create = .{ .parent = 2, .name = "moved", .kind = .file } } },
+        removal,
+        .{ .request_id = 9, .command = .{ .rename_entry = .{ .parent = 1, .name = "photos", .new_parent = 2, .new_name = "cycle" } } },
+        .{ .request_id = 10, .command = .{ .remove_entry = .{ .parent = 2, .name = "../moved", .kind = .file } } },
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .not_file, .not_empty, .ok, .not_found, .ok, .ok, .ok, .cycle, .invalid_name };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqual(@as(u64, 4), memory.lookup(2, "moved").?.id);
+}
+
 test "directory pages use exclusive case-folded cursors and own their data" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

@@ -35,6 +35,8 @@ pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
     rename: struct { id: u64, parent: u64, name: []const u8 },
     remove: struct { id: u64 },
+    remove_entry: struct { parent: u64, name: []const u8, kind: Kind },
+    rename_entry: struct { parent: u64, name: []const u8, new_parent: u64, new_name: []const u8 },
     set_replicas: struct { id: u64, replicas: Replicas },
     register_backend: Backend,
     publish: Publication,
@@ -136,6 +138,17 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .remove_entry => |c| {
+                if (!validName(c.name)) return .{ .status = .invalid_name };
+                const node = self.lookup(c.parent, c.name) orelse return .{ .status = .not_found };
+                if (node.kind != c.kind) return .{ .status = if (c.kind == .file) .not_file else .not_directory };
+                return self.execute(.{ .remove = .{ .id = node.id } });
+            },
+            .rename_entry => |c| {
+                if (!validName(c.name)) return .{ .status = .invalid_name };
+                const node = self.lookup(c.parent, c.name) orelse return .{ .status = .not_found };
+                return self.execute(.{ .rename = .{ .id = node.id, .parent = c.new_parent, .name = c.new_name } });
+            },
             .create => |c| {
                 if (!validName(c.name)) return .{ .status = .invalid_name };
                 const parent = self.get(c.parent) orelse return .{ .status = .not_found };

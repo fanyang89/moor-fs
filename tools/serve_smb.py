@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export an existing nas-fs FUSE mount as a single-user, read-only SMB3 share."""
+"""Export a nas-fs FUSE mount as a single-user SMB3 share (read-only by default)."""
 
 import argparse
 from contextlib import contextmanager
@@ -15,7 +15,7 @@ import time
 
 
 @contextmanager
-def export(mountpoint, directory, port=0, listen="127.0.0.1"):
+def export(mountpoint, directory, port=0, listen="127.0.0.1", writable=False):
     mountpoint = Path(mountpoint).resolve(strict=True)
     directory = Path(directory).resolve()
     listen = str(ipaddress.IPv4Address(listen))
@@ -34,6 +34,8 @@ def export(mountpoint, directory, port=0, listen="127.0.0.1"):
             "nas-fs",
         ]:
             mounted = True
+            if writable and "rw" not in fields.split()[5].split(","):
+                raise ValueError("writable export requires a writable nas-fs mount")
     if not mounted or mountpoint.stat().st_uid != os.getuid():
         raise ValueError("run as the owner of an existing nas-fs FUSE mount")
     if not 0 <= port <= 65535:
@@ -70,7 +72,7 @@ printcap name = /dev/null
 smb2 leases = no
 [nas]
 path = {mountpoint}
-read only = yes
+read only = {"no" if writable else "yes"}
 guest ok = yes
 guest only = yes
 follow symlinks = no
@@ -78,6 +80,9 @@ oplocks = no
 level2 oplocks = no
 kernel oplocks = no
 use sendfile = no
+strict sync = yes
+map archive = no
+store dos attributes = no
 """)
     # A private configuration/state tree never modifies the system Samba service.
     subprocess.run(
@@ -146,6 +151,11 @@ def main():
     parser.add_argument(
         "--listen", default="127.0.0.1", help="local IPv4 address to bind"
     )
+    parser.add_argument(
+        "--writable",
+        action="store_true",
+        help="enable file operations on a writable nas-fs mount",
+    )
     args = parser.parse_args()
 
     def stop(signum, frame):
@@ -153,12 +163,15 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     try:
-        with export(args.mountpoint, args.state_directory, args.port, args.listen) as (
+        with export(
+            args.mountpoint, args.state_directory, args.port, args.listen, args.writable
+        ) as (
             process,
             port,
         ):
             print(
-                f"Read-only guest share: //{args.listen}/nas (TCP {port})", flush=True
+                f"{'Writable' if args.writable else 'Read-only'} guest share: //{args.listen}/nas (TCP {port})",
+                flush=True,
             )
             if process.wait() != 0:
                 raise RuntimeError(f"Samba exited; see {args.state_directory}")
