@@ -9,7 +9,17 @@ import subprocess
 import time
 
 
-def test_mounts(executable, directory, endpoints, run, leader, stop, start, smb=False):
+def test_mounts(
+    executable,
+    directory,
+    endpoints,
+    run,
+    leader,
+    stop,
+    start,
+    smb=False,
+    write_faults=False,
+):
     processes = []
     mounts = []
     logs = []
@@ -201,6 +211,12 @@ def test_mounts(executable, directory, endpoints, run, leader, stop, start, smb=
             stop,
             start,
         )
+        if write_faults:
+            from test_write_faults import test_write_faults
+
+            test_write_faults(
+                executable, directory, endpoints, config, roots, second, run, smb
+            )
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0
         assert not os.path.ismount(first)

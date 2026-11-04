@@ -111,7 +111,9 @@ store dos attributes = no
         deadline = time.monotonic() + 15
         while True:
             if process.poll() is not None:
-                raise RuntimeError(log.read_text())
+                samba_log = directory / "samba.log"
+                details = samba_log.read_text()[-6000:] if samba_log.is_file() else ""
+                raise RuntimeError(log.read_text() + details)
             try:
                 with socket.create_connection((listen, port), timeout=0.2):
                     break

@@ -214,7 +214,18 @@ follow symlinks = no
             start_new_session=True,
         )
         try:
-            if cluster.wait(timeout=600 if args.smb else 360) != 0:
+            if (
+                cluster.wait(
+                    timeout=900
+                    if args.smb and args.repair_faults
+                    else 600
+                    if args.smb
+                    else 480
+                    if args.repair_faults
+                    else 360
+                )
+                != 0
+            ):
                 raise RuntimeError("cluster E2E failed")
         finally:
             stop_group(cluster)

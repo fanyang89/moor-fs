@@ -406,6 +406,7 @@ def main():
                     stop,
                     start,
                     smb=options.smb,
+                    write_faults=options.repair_faults,
                 )
             for i in list(processes):
                 stop(i, kill=False)

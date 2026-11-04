@@ -495,6 +495,28 @@ checkpoints and ignore `NAS_FS_REPAIR_STOP`. Only test builds interpret its valu
 `before_replace`, `after_replace`, and `after_sync`; do not deploy an instrumented
 binary. The fault tests simulate process death, not NAS hardware power failure.
 
+Writable FUSE and SMB crash acceptance uses the same instrumented build:
+
+```sh
+zig build test-smb -Dfuse=true -Dfault-injection=true -Doptimize=safe
+```
+
+For both direct FUSE writes and SMB uploads, the harness kills the access process
+after the first replica, after both replicas, and after metadata publication but
+before replying. It checks the exact installed objects, committed metadata,
+client failure, read-only visibility, and successful writes after restart.
+Pre-publication crashes preserve the previous version; SMB overwrite has already
+committed its separate empty truncation, so that previous version is empty.
+Post-publication crashes expose the new contents despite client failure.
+An additional case kills `smbclient` after the first replica and resumes the access
+process: the in-flight write still commits two healthy replicas without a client
+acknowledgement. Disconnect does not cancel or roll back an accepted write;
+reopen and inspect the committed state before deciding whether to retry.
+Only instrumented builds honor `NAS_FS_WRITE_STOP` values `first_replica`,
+`both_replicas`, and `published`, and only for nonempty publications. Normal builds
+omit these checkpoints. This coverage uses Linux clients; Windows/macOS client
+acceptance and distributed SMB locking remain outstanding.
+
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical

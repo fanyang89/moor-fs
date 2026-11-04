@@ -66,12 +66,15 @@ const Client = struct {
         const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
         const digest = try objects.hash(self.io, file);
         const version: m.Version = .{ .id = self.randomId(), .inode = id, .size = digest.size, .sha256 = digest.sha256, .backends = self.write_backends };
-        for (self.write_backends) |backend| {
+        for (self.write_backends, 0..) |backend, i| {
             const store = try objects.openMapped(self.io, self.mappings, backend, false);
             defer store.close();
             try store.put(file, version);
+            if (i == 0) @import("write_fault.zig").checkpoint(.first_replica, version.size);
         }
+        @import("write_fault.zig").checkpoint(.both_replicas, version.size);
         _ = try self.apply(.{ .publish = .{ .expected_version = expected.*, .version = version } });
+        @import("write_fault.zig").checkpoint(.published, version.size);
         expected.* = version.id;
         size.* = version.size;
     }
