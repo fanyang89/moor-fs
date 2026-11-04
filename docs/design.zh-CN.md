@@ -611,3 +611,11 @@ Samba 关闭 DOS archive 位映射和 DOS xattr 存储，保留 strict sync。�
 另在第一副本完成时杀掉 smbclient，再 SIGCONT 恢复接入进程，验证在途写请求仍完成双副本发布，之后只读可见且重启可继续写入。客户端断连不是取消或回滚保证，失败/无确认不能推断未提交；应重新打开并检查实际版本后再决定重试。这些测试不提供整个上传原子替换，也不替代 Windows/macOS 客户端验收、分布式锁或 NAS 掉电测试。
 
 测试基础设施记录挂载成功状态，即使接入进程 SIGKILL 后 ismount() 返回 false 也执行卸载；Samba 使用短状态目录，并在启动失败时附带内部日志。Safe 完整 SMB 故障套件通过上述七个场景及既有修复、挂载身份、集群恢复回归。
+
+## 32. 在途写入跨元数据 leader 切换
+
+在前述故障套件中增加直接 FUSE 与 SMB 两个场景：写请求完成两个对象副本后，在发送元数据发布 RPC 前 SIGSTOP 接入进程。核验两个对象字节及版本 ID 一致、版本尚未进入元数据，然后 SIGKILL 当前元数据 leader，等待剩余两个 voter 选出不同 leader。此时再次确认 inode 的当前版本未变、暂存版本未发布，再 SIGCONT 恢复接入进程。
+
+客户端必须正常成功：直接 FUSE pwrite 返回完整长度，smbclient 成功退出且没有 NT_STATUS 错误。检查元数据当前版本恰好等于暂停前记录的对象版本，而非另一次写入产生的版本，并验证双副本健康。finally 恢复旧 voter，继续执行只读内容检查、接入进程重启和新写入验证。
+
+Debug 与 Safe 的完整 `test-smb -Dfuse=true -Dfault-injection=true` 均通过，故障矩阵现含六个接入崩溃、一个客户端断连和两个在途 leader 切换场景。该新增覆盖点是发布 RPC 发出之前的选举，不等于 Raft 提交中选举或提交回复丢失与选举的组合故障；Windows/macOS 客户端与部署恢复验收仍待完成。

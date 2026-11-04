@@ -517,6 +517,15 @@ Only instrumented builds honor `NAS_FS_WRITE_STOP` values `first_replica`,
 omit these checkpoints. This coverage uses Linux clients; Windows/macOS client
 acceptance and distributed SMB locking remain outstanding.
 
+The fault suite also pauses FUSE and SMB requests after both replicas are installed
+but before the metadata RPC, kills the current metadata leader, waits for a new
+leader, and resumes the request. It verifies that metadata remained unchanged
+during the pause, the client succeeds, and exactly the staged version becomes
+current with two healthy replicas. The old voter is restarted and the access-node
+restart/write checks run afterward. Both Debug (omit `-Doptimize=safe`) and Safe
+full fault suites pass. This case covers leader change before the publication RPC,
+not election during an in-flight Raft commit or a lost commit reply.
+
 Operational boundaries:
 - Roots and their parent paths must be administrator-controlled. Root and object
   symlinks are rejected; duplicate configured IDs/paths and identical canonical

@@ -215,7 +215,17 @@ def test_mounts(
             from test_write_faults import test_write_faults
 
             test_write_faults(
-                executable, directory, endpoints, config, roots, second, run, smb
+                executable,
+                directory,
+                endpoints,
+                config,
+                roots,
+                second,
+                run,
+                smb,
+                leader,
+                stop,
+                start,
             )
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0

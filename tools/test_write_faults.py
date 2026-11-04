@@ -1,4 +1,4 @@
-"""Kill the writable access process at known dual-replica publication boundaries."""
+"""Interrupt writable requests at known dual-replica publication boundaries."""
 
 from contextlib import contextmanager
 import hashlib
@@ -11,7 +11,17 @@ import time
 
 
 def test_write_faults(
-    executable, directory, endpoints, config, roots, readonly, run, smb
+    executable,
+    directory,
+    endpoints,
+    config,
+    roots,
+    readonly,
+    run,
+    smb,
+    leader,
+    stop,
+    start,
 ):
     original = b"old" * 1024
     content = b"new" * 1024
@@ -75,9 +85,11 @@ def test_write_faults(
             assert time.monotonic() < deadline, "write checkpoint timed out"
             time.sleep(0.02)
 
-    def exercise(kind, point):
+    def exercise(kind, point, failover=False):
         nonlocal request_id
         label = f"{kind}-{point}"
+        if failover:
+            label += "-election"
         name = f"write-crash-{label}.bin"
         request_id += 1
         inode = run(
@@ -150,6 +162,33 @@ def test_write_faults(
                     assert run("file-version", endpoints, staged_version) is None
                 else:
                     assert current == staged_version
+                if failover:
+                    old = leader()
+                    stop(old)
+                    try:
+                        assert leader() != old
+                        assert (
+                            run("get", endpoints, inode)["current_version"] == current
+                        )
+                        assert run("file-version", endpoints, staged_version) is None
+                        access.send_signal(signal.SIGCONT)
+                        code = client.wait(timeout=45)
+                        output = log.read_text()
+                        assert code == 0, output
+                        if kind == "fuse":
+                            assert f"WRITE_ACK {len(content)}" in output, output
+                        else:
+                            assert "NT_STATUS_" not in output, output
+                        assert (
+                            run("get", endpoints, inode)["current_version"]
+                            == staged_version
+                        )
+                        assert run("check-file", endpoints, config, inode)[
+                            "all_healthy"
+                        ]
+                    finally:
+                        start(old)
+                    return
                 if kind == "disconnect":
                     client.kill()
                     assert client.wait(timeout=15) == -signal.SIGKILL
@@ -216,7 +255,7 @@ def test_write_faults(
 
         expected = (
             content
-            if point == "published" or kind == "disconnect"
+            if point == "published" or kind == "disconnect" or failover
             else original
             if kind == "fuse"
             else b""
@@ -232,12 +271,13 @@ def test_write_faults(
             assert (readonly / name).read_bytes() == b"Z" + expected[1:]
             assert run("check-file", endpoints, config, inode)["all_healthy"]
         print(
-            f"PASS: {kind} interruption at {point}, exact committed state and writable restart",
+            f"PASS: {label}, exact committed state and writable restart",
             flush=True,
         )
 
     for kind in ["fuse", "smb"] if smb else ["fuse"]:
         for point in ("first_replica", "both_replicas", "published"):
             exercise(kind, point)
+        exercise(kind, "both_replicas", failover=True)
     if smb:
         exercise("disconnect", "first_replica")
