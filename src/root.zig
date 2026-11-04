@@ -3,9 +3,11 @@ pub const machine = @import("machine.zig");
 pub const Machine = machine.Machine;
 pub const Store = @import("durable.zig").Store;
 pub const runtime = @import("runtime.zig");
+pub const objects = @import("objects.zig");
 pub const raft = @import("raftz");
 
 test {
+    _ = @import("objects_test.zig");
     _ = @import("metadata_test.zig");
     _ = @import("machine_test.zig");
     _ = @import("durable_test.zig");

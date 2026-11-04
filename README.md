@@ -53,9 +53,11 @@ directory handles. Membership changes, TLS/authentication, and
 production load/partition testing remain pending. The current network service
 is a cleartext prototype for trusted development networks.
 
-Replica counts are desired metadata only. No file contents, write leases, physical
-replicas, repairs, or SMB exports are implemented yet. Metadata
-deletion is not a physical-object garbage collection protocol.
+The CLI can copy, verify and publish whole files on configured mounted backend
+directories, and export a verified replica. Write leases, automatic placement,
+repairs, FUSE file-content access and SMB exports remain pending. Metadata deletion
+is not a physical-object garbage collection protocol. Raw `apply` publication
+still validates metadata declarations only.
 
 The reference implementation uses arrays; LMDB uses indexed named databases.
 Both retain prototype bounds: 4,096 live
@@ -236,7 +238,7 @@ runtime library path. The default build does not require libfuse and omits `moun
 This is a metadata-only, read-only view. Directories have mode 0555, files 0444,
 and ownership is the mounting user's UID/GID. Sizes and timestamps are placeholders
 (zero); opening file contents fails with `EOPNOTSUPP`, while mutations are rejected
-by the read-only mount. No NAS contents or SMB export are provided yet.
+by the read-only mount. This mount does not expose CLI file contents or SMB.
 
 Lookup and getattr use the remote linearizable metadata queries with zero entry
 and attribute cache timeouts. Each opendir gathers pages into an owned list and
@@ -294,7 +296,7 @@ Publication atomically stores the version, inode pointer, receipt and applied
 cursor. Historical versions survive replacement and inode deletion; there is no
 version garbage collection yet.
 
-These checks validate metadata declarations only: no NAS copies, checksums,
+Raw `apply` checks validate metadata declarations only: no NAS copies, checksums,
 flushes or write-session fencing are performed. A successful publication is not
 proof of physical file durability, and FUSE still does not expose file contents.
 
@@ -304,6 +306,75 @@ snapshots remain readable with empty version/backend lists and zero current
 version defaults. Legacy namespace request digests remain unchanged. Downgrade
 and mixed-version cluster operation are not supported; upgrade all nodes before
 issuing the new commands.
+
+### Whole-file object I/O on mounted backends
+
+Provide an access-node-local JSON configuration mapping registered backend IDs to
+absolute, existing directories on mounted NAS shares. Paths and mount credentials
+are not replicated in Raft. For local development, ordinary directories work too:
+
+```json
+[{"id":1,"root":"/mnt/nas-a/nas-fs"},{"id":2,"root":"/mnt/nas-b/nas-fs"}]
+```
+
+Create the file inode and register backends first, then upload a stable source:
+
+```sh
+zig-out/bin/nas-fs put-file "$ENDPOINTS" backends.json \
+  '{"request_id":104,"inode":2,"version_id":11,"expected_version":0,"backends":[1,2]}' ./photo.jpg
+zig-out/bin/nas-fs get-file "$ENDPOINTS" backends.json 2 ./download.jpg
+```
+
+Adjust `expected_version` to the inode's actual current version. Use `[1,0]` for
+a file with policy `one`. New request/version IDs must be globally unique;
+retry an uncertain upload with the same JSON and unchanged source file.
+
+`put-file` hashes the source, checks metadata policy, then initializes `import/`,
+`staging/` and `objects/` under the configured roots. It copies in 256 KiB chunks
+to exclusive random staging names, checks size and SHA-256, fsyncs and reads back
+each file, and atomically renames without replacing existing objects. Object names
+are `<decimal-version-id>-<lowercase-sha256>`. Including the digest isolates
+competing uploads that accidentally reuse a version ID with different contents.
+Both rename directories are synced before the metadata CAS is submitted. Existing
+objects are verified and synced rather than overwritten. Any required replica
+failure prevents publication; there is no automatic downgrade to one replica.
+
+As with `apply`, a submitted metadata result is JSON: check `status == "ok"`.
+Local I/O/preflight failures exit nonzero; a CAS race can return a non-`ok` JSON
+result. A replay of an already-published identical version submits the original
+metadata request again; it does not repair lost replicas. After an uncertain RPC
+result, retain all installed objects and retry the same request.
+
+`get-file` pins the current version observed by a linearizable inode query,
+then tries its configured replicas in order. Missing/unreadable or checksum-invalid
+replicas are skipped during verification. Export uses a temporary file in the
+destination directory, checks the hash again, syncs and renames without replacing
+an existing destination. Source failure during the export itself fails the command;
+rerun to select a replica again. Partial exports are cleaned up on normal errors.
+
+Operational boundaries:
+- Roots and their parent paths must be administrator-controlled. Root and object
+  symlinks are rejected; duplicate configured IDs/paths and identical canonical
+  upload roots are rejected. Physical NAS identity and mount presence are trusted
+  configuration, not discovered: two local directories are not physical replicas.
+- `staging/` and `objects/` must share a filesystem supporting atomic no-replace
+  rename and file/directory fsync. Unsupported operations fail the upload. CIFS
+  mounts and NAS power-loss durability have not yet been validated; readback can
+  hit the client cache, and fsync relies on the server's persistence contract.
+- Keep source files stable during upload and protect installed objects from direct
+  modification. Size/timestamp changes and digest mismatches are detected, but
+  this is not a filesystem snapshot or a write-session fencing protocol.
+- Failed/conflicting uploads can leave unreferenced installed objects; SIGKILL can
+  also leave staging/export temporary files. No automatic cleanup or GC is safe
+  yet because an uncertain RPC may have committed.
+- I/O is synchronous, with bounded memory but no NAS-operation deadline, resume,
+  space reservation, automatic import or background repair. Existing metadata
+  client retry bounds can expire during prolonged/split elections; retry afterward.
+
+`zig build test-cluster` now also verifies real local-directory copies, failed
+second-replica publication, retries, corruption/unavailable-replica fallback,
+non-overwriting exports, empty/single-replica files, concurrent publishers and
+whole-cluster restart. These tests do not emulate NAS hardware durability.
 
 ### Persistence and recovery
 

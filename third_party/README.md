@@ -3,7 +3,8 @@
 The parent repository's gitlinks are the authoritative commit locks. No floating
 branch is used during initialization. The application runs distributed metadata
 with raftz/grpc-lite and LMDB, plus an optional read-only FUSE namespace adapter;
-SMB exports and NAS file contents remain pending.
+the CLI also supports object I/O on mounted directories. SMB exports and FUSE
+file-content access remain pending.
 
 ## Selected projects
 
