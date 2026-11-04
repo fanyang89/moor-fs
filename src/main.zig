@@ -21,6 +21,8 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "status", "Inspect a node's local Raft status", &.{"endpoint"}, remoteStatus);
     try register(root, options, "lookup", "Look up a child by name", &.{ "endpoint", "parent", "name" }, remoteLookup);
     try register(root, options, "list", "List a directory page", &.{ "endpoint", "parent" }, remoteList);
+    try register(root, options, "backend", "Read a registered NAS failure domain", &.{ "endpoint", "id" }, remoteBackend);
+    try register(root, options, "file-version", "Read an immutable file version", &.{ "endpoint", "id" }, remoteVersion);
     if (@import("build_options").fuse) try register(root, options, "mount", "Mount the read-only metadata namespace in foreground", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
     try root.addCommand(serve);
@@ -94,10 +96,22 @@ fn remoteApply(ctx: zli.CommandContext) !void {
 }
 
 fn remoteGet(ctx: zli.CommandContext) !void {
+    try remoteId(ctx, "Get");
+}
+
+fn remoteBackend(ctx: zli.CommandContext) !void {
+    try remoteId(ctx, "Backend");
+}
+
+fn remoteVersion(ctx: zli.CommandContext) !void {
+    try remoteId(ctx, "Version");
+}
+
+fn remoteId(ctx: zli.CommandContext, method: []const u8) !void {
     const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
     const data = try std.json.Stringify.valueAlloc(ctx.allocator, .{ .id = id }, .{});
     defer ctx.allocator.free(data);
-    try remote(ctx, "Get", data);
+    try remote(ctx, method, data);
 }
 
 fn remoteStatus(ctx: zli.CommandContext) !void {

@@ -2,6 +2,7 @@
 """Run three real processes through election, failover, snapshots and WAL recovery."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 import socket
@@ -110,6 +111,23 @@ def main():
                 "command": {"create": {"parent": 1, "name": name, "kind": "file"}},
             }
 
+        def publication(request_id, version_id, expected, backends=(1, 2)):
+            return {
+                "request_id": request_id,
+                "command": {
+                    "publish": {
+                        "expected_version": expected,
+                        "version": {
+                            "id": version_id,
+                            "inode": 2,
+                            "size": 123,
+                            "sha256": [7] * 32,
+                            "backends": list(backends),
+                        },
+                    }
+                },
+            }
+
         try:
             run("unknown-command", success=False)
             run("apply", success=False)
@@ -153,6 +171,38 @@ def main():
             invalid = run("list", endpoints, "2", success=False)
             assert "NotDirectory" in invalid.stderr or "NotDirectory" in invalid.stdout
             run("list", endpoints, "1", "--limit", "0", success=False)
+            for backend_id, domain in [(1, 10), (2, 20), (3, 10)]:
+                assert (
+                    apply(
+                        first,
+                        {
+                            "request_id": 100 + backend_id,
+                            "command": {
+                                "register_backend": {
+                                    "id": backend_id,
+                                    "failure_domain": domain,
+                                }
+                            },
+                        },
+                    )["status"]
+                    == "ok"
+                )
+            assert run("backend", endpoints, "2") == {"id": 2, "failure_domain": 20}
+            assert (
+                apply(first, publication(104, 10, 0, (1, 3)))["status"]
+                == "same_failure_domain"
+            )
+            assert (
+                apply(first, publication(105, 10, 0, (1, 0)))["status"]
+                == "replica_mismatch"
+            )
+            initial_publication = publication(106, 10, 0)
+            assert apply(first, initial_publication) == result
+            version = run("file-version", endpoints, "10")
+            assert version == initial_publication["command"]["publish"]["version"], (
+                version
+            )
+            assert run("get", endpoints, "2")["current_version"] == 10
             print(
                 "PASS: election, proposal, deduplication, validation, leader-only ReadIndex, store lock",
                 flush=True,
@@ -163,6 +213,25 @@ def main():
             elected = leader()
             assert elected != first
             assert apply(elected, request) == result
+            assert run("apply", endpoints, json.dumps(initial_publication)) == result
+            competing = [publication(107, 11, 10), publication(108, 12, 10)]
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                outcomes = list(
+                    workers.map(
+                        lambda request: run("apply", endpoints, json.dumps(request)),
+                        competing,
+                    )
+                )
+            assert sorted(outcome["status"] for outcome in outcomes) == [
+                "ok",
+                "version_conflict",
+            ]
+            winner = next(
+                i for i, outcome in enumerate(outcomes) if outcome["status"] == "ok"
+            )
+            assert run("get", endpoints, "2")["current_version"] == 11 + winner
+            assert run("file-version", endpoints, str(12 - winner)) is None
+            assert run("apply", endpoints, json.dumps(competing[winner])) == result
             for request_id in range(2, 30):
                 assert (
                     apply(elected, create(request_id, f"file-{request_id}"))["status"]
@@ -234,6 +303,12 @@ def main():
                 flush=True,
             )
             assert run("get", addresses[elected + 3], "2")["name"] == "original"
+            assert run("file-version", endpoints, "10") == version
+            assert run("get", endpoints, "2")["current_version"] == 11 + winner
+            print(
+                "PASS: backend domains, strict replica declarations, concurrent version CAS and retained version recovery",
+                flush=True,
+            )
             print("PASS: whole-cluster SIGKILL and WAL/LMDB restart", flush=True)
 
             follower = next(i for i in processes if i != elected)

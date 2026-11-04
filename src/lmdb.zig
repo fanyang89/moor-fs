@@ -30,7 +30,7 @@ pub const Environment = struct {
         try check(c.mdb_env_create(&handle));
         errdefer c.mdb_env_close(handle);
         try check(c.mdb_env_set_mapsize(handle, map_size));
-        try check(c.mdb_env_set_maxdbs(handle, 4));
+        try check(c.mdb_env_set_maxdbs(handle, 6));
         try check(c.mdb_env_set_maxreaders(handle, 64));
         try check(c.mdb_env_open(handle, path.ptr, c.MDB_NOTLS, 0o600));
         return .{ .handle = handle.?, .lock_fd = fd };

@@ -11,5 +11,7 @@ service Metadata {
   rpc Get(Envelope) returns (Envelope);
   rpc Lookup(Envelope) returns (Envelope);
   rpc List(Envelope) returns (Envelope);
+  rpc Backend(Envelope) returns (Envelope);
+  rpc Version(Envelope) returns (Envelope);
   rpc Status(Envelope) returns (Envelope);
 }

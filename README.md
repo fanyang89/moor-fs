@@ -59,7 +59,8 @@ deletion is not a physical-object garbage collection protocol.
 
 The reference implementation uses arrays; LMDB uses indexed named databases.
 Both retain prototype bounds: 4,096 live
-inodes (including root) and 8,192 retained request receipts. Receipts are not
+inodes (including root), 64 backends, 2,048 retained file versions, and 8,192
+retained request receipts. Receipts are not
 silently evicted; at the receipt limit new request IDs are rejected, while known
 IDs remain replayable. An explicit deduplication retention protocol and capacity
 planning must replace these prototype limits before deployment.
@@ -258,6 +259,51 @@ This extends the real three-node test with two temporary FUSE mounts, multi-page
 enumeration, open-handle stability during rename, cross-mount visibility,
 read-only/content-open errors, leader failover and clean unmount. It requires
 working mount permissions and fails rather than silently skipping mount checks.
+
+### Backend and immutable version metadata
+
+Register each backend with a nonzero numeric ID and a physical NAS failure-domain
+ID. IDs and registrations are immutable; multiple shares on one NAS must use the
+same domain. Backend records do not yet contain mount paths or credentials.
+
+```sh
+zig-out/bin/nas-fs apply "$ENDPOINTS" '{"request_id":101,"command":{"register_backend":{"id":1,"failure_domain":10}}}'
+zig-out/bin/nas-fs apply "$ENDPOINTS" '{"request_id":102,"command":{"register_backend":{"id":2,"failure_domain":20}}}'
+zig-out/bin/nas-fs backend "$ENDPOINTS" 1
+```
+
+For an existing file inode 2, publish a version with this request shape (the hash
+below is illustrative):
+
+```json
+{"request_id":103,"command":{"publish":{"expected_version":0,"version":{"id":10,"inode":2,"size":123,"sha256":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"backends":[1,2]}}}}
+```
+
+`expected_version` must equal the inode's `current_version` (initially zero).
+Version IDs are globally unique, nonzero and never reused. Size is limited to
+signed 64-bit range; SHA-256 is serialized as 32 numeric bytes. Two replicas must
+reference registered backends in distinct domains; one replica uses `[ID,0]`.
+The replica count must match the file's current policy. Changing policy does not
+rewrite existing versions or copy data.
+
+`file-version ENDPOINTS ID` and `backend ENDPOINTS ID` use ReadIndex-protected
+queries and return `null` for missing records. `get` exposes `current_version`.
+Concurrent publishers against the same old version yield one success and a
+`version_conflict`; retries must reuse the original request ID and payload.
+Publication atomically stores the version, inode pointer, receipt and applied
+cursor. Historical versions survive replacement and inode deletion; there is no
+version garbage collection yet.
+
+These checks validate metadata declarations only: no NAS copies, checksums,
+flushes or write-session fencing are performed. A successful publication is not
+proof of physical file durability, and FUSE still does not expose file contents.
+
+Opening a schema-1 LMDB store transactionally upgrades it to schema 2 with
+`backends` and `versions` databases. Snapshots now emit version 2; version-1
+snapshots remain readable with empty version/backend lists and zero current
+version defaults. Legacy namespace request digests remain unchanged. Downgrade
+and mixed-version cluster operation are not supported; upgrade all nodes before
+issuing the new commands.
 
 ### Persistence and recovery
 

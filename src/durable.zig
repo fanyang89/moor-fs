@@ -4,7 +4,7 @@ const lmdb = @import("lmdb.zig");
 const m = @import("metadata.zig");
 const protocol = @import("machine.zig");
 
-const Meta = struct { schema: u32 = 1, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
+const Meta = struct { schema: u32 = 2, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
 
 pub const ListRequest = struct { parent: u64, after: ?[]const u8 = null, limit: u8 = 16 };
 pub const Page = struct {
@@ -25,6 +25,8 @@ pub const Store = struct {
     nodes_db: lmdb.c.MDB_dbi,
     dirents_db: lmdb.c.MDB_dbi,
     requests_db: lmdb.c.MDB_dbi,
+    backends_db: lmdb.c.MDB_dbi,
+    versions_db: lmdb.c.MDB_dbi,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8, map_size: usize) !Store {
         var env = try lmdb.Environment.open(path, map_size);
@@ -38,15 +40,22 @@ pub const Store = struct {
             .nodes_db = try txn.openDatabase("inodes"),
             .dirents_db = try txn.openDatabase("dirents"),
             .requests_db = try txn.openDatabase("requests"),
+            .backends_db = try txn.openDatabase("backends"),
+            .versions_db = try txn.openDatabase("versions"),
         };
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         if (try txn.get(self.meta_db, "state")) |_| {
-            _ = try self.readMeta(&txn, arena.allocator());
+            var meta = try self.readMeta(&txn, arena.allocator());
+            if (meta.schema == 1) {
+                if (try txn.count(self.backends_db) != 0 or try txn.count(self.versions_db) != 0) return error.CorruptStore;
+                meta.schema = 2;
+                try putJson(&txn, self.meta_db, "state", arena.allocator(), meta);
+            }
             const root = (try self.readNode(&txn, arena.allocator(), m.root_id)) orelse return error.CorruptStore;
             if (root.parent != 0 or root.name.len != 0 or root.kind != .directory) return error.CorruptStore;
         } else {
-            for ([_]lmdb.c.MDB_dbi{ self.meta_db, self.nodes_db, self.dirents_db, self.requests_db }) |db| {
+            for ([_]lmdb.c.MDB_dbi{ self.meta_db, self.nodes_db, self.dirents_db, self.requests_db, self.backends_db, self.versions_db }) |db| {
                 if (try txn.count(db) != 0) return error.CorruptStore;
             }
             try self.putNode(&txn, arena.allocator(), .{ .id = 1, .parent = 0, .name = "", .kind = .directory, .replicas = .two });
@@ -113,6 +122,26 @@ pub const Store = struct {
         var txn = try self.env.begin(true);
         defer txn.abort();
         return self.find(&txn, parent, name);
+    }
+
+    pub fn getBackend(self: *Store, id: u64) !?m.Backend {
+        return self.record(m.Backend, self.backends_db, id);
+    }
+
+    pub fn getVersion(self: *Store, id: u64) !?m.Version {
+        return self.record(m.Version, self.versions_db, id);
+    }
+
+    fn record(self: *Store, comptime T: type, db: lmdb.c.MDB_dbi, id: u64) !?T {
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const key = idKey(id);
+        const data = (try txn.get(db, &key)) orelse return null;
+        const result = try parse(T, arena.allocator(), data);
+        if (result.id != id) return error.CorruptStore;
+        return result;
     }
 
     fn requireDirectory(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, id: u64) !void {
@@ -285,13 +314,43 @@ pub const Store = struct {
                 try self.putNode(txn, allocator, node);
                 return .{ .status = .ok, .inode = r.id };
             },
+            .register_backend => |backend| {
+                if (backend.id == 0 or backend.failure_domain == 0) return .{ .status = .invalid_request };
+                const key = idKey(backend.id);
+                if (try txn.get(self.backends_db, &key) != null) return .{ .status = .already_exists };
+                if (try txn.count(self.backends_db) == m.max_backends) return .{ .status = .capacity_exceeded };
+                try putJson(txn, self.backends_db, &key, allocator, backend);
+                return .{ .status = .ok };
+            },
+            .publish => |publication| {
+                const v = publication.version;
+                var node = (try self.readNode(txn, allocator, v.inode)) orelse return .{ .status = .not_found };
+                var backends: [2]m.Backend = undefined;
+                var count: usize = 0;
+                for (v.backends) |id| {
+                    const key = idKey(id);
+                    if (try txn.get(self.backends_db, &key)) |data| {
+                        backends[count] = try parse(m.Backend, allocator, data);
+                        count += 1;
+                    }
+                }
+                const status = m.publicationStatus(node, publication, backends[0..count]);
+                if (status != .ok) return .{ .status = status };
+                const key = idKey(v.id);
+                if (try txn.get(self.versions_db, &key) != null) return .{ .status = .version_conflict };
+                if (try txn.count(self.versions_db) == m.max_versions) return .{ .status = .capacity_exceeded };
+                try putJson(txn, self.versions_db, &key, allocator, v);
+                node.current_version = v.id;
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = v.inode };
+            },
         }
     }
 
     fn readMeta(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator) !Meta {
         const data = (try txn.get(self.meta_db, "state")) orelse return error.CorruptStore;
         const meta = try parse(Meta, allocator, data);
-        if (meta.schema != 1) return error.UnsupportedSchema;
+        if (meta.schema != 1 and meta.schema != 2) return error.UnsupportedSchema;
         if (meta.next_id < 2 or (meta.index == 0) != (meta.term == 0)) return error.CorruptStore;
         return meta;
     }
@@ -332,6 +391,8 @@ pub const Store = struct {
             .next_id = meta.next_id,
             .nodes = try readRecords(m.Node, &txn, self.nodes_db, temp, m.max_nodes),
             .receipts = try readRecords(m.Receipt, &txn, self.requests_db, temp, m.max_receipts),
+            .backends = try readRecords(m.Backend, &txn, self.backends_db, temp, m.max_backends),
+            .versions = try readRecords(m.Version, &txn, self.versions_db, temp, m.max_versions),
         };
         try m.validateSnapshot(state);
         const data = try std.json.Stringify.valueAlloc(allocator, protocol.Image{ .index = index, .term = term, .state = state }, .{});
@@ -346,7 +407,7 @@ pub const Store = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
         const image = try parse(protocol.Image, allocator, data);
-        if (image.version != 1 or image.index != index or image.term != term or (index == 0) != (term == 0)) return error.InvalidSnapshot;
+        if ((image.version != 1 and image.version != 2) or image.index != index or image.term != term or (index == 0) != (term == 0)) return error.InvalidSnapshot;
         try m.validateSnapshot(image.state);
         var txn = try self.env.begin(false);
         defer txn.abort();
@@ -355,10 +416,20 @@ pub const Store = struct {
         try txn.clear(self.nodes_db);
         try txn.clear(self.dirents_db);
         try txn.clear(self.requests_db);
+        try txn.clear(self.backends_db);
+        try txn.clear(self.versions_db);
         for (image.state.nodes) |n| try self.putNode(&txn, allocator, n);
         for (image.state.receipts) |r| {
             const key = idKey(r.request_id);
             try putJson(&txn, self.requests_db, &key, allocator, r);
+        }
+        for (image.state.backends) |b| {
+            const key = idKey(b.id);
+            try putJson(&txn, self.backends_db, &key, allocator, b);
+        }
+        for (image.state.versions) |v| {
+            const key = idKey(v.id);
+            try putJson(&txn, self.versions_db, &key, allocator, v);
         }
         try putJson(&txn, self.meta_db, "state", allocator, Meta{ .index = index, .term = term, .next_id = image.state.next_id });
         try txn.commit();
@@ -442,7 +513,7 @@ fn readRecords(comptime T: type, txn: *lmdb.Transaction, db: lmdb.c.MDB_dbi, all
         try lmdb.check(rc);
         if (result.items.len == limit) return error.CorruptStore;
         const record = try parse(T, allocator, lmdb.bytes(v));
-        const expected = idKey(if (T == m.Node) record.id else record.request_id);
+        const expected = idKey(if (T == m.Receipt) record.request_id else record.id);
         if (!std.mem.eql(u8, &expected, lmdb.bytes(k))) return error.CorruptStore;
         try result.append(allocator, record);
     }

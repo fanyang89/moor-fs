@@ -2,6 +2,47 @@ const std = @import("std");
 const m = @import("metadata.zig");
 const testing = std.testing;
 
+test "version hashes have a stable numeric JSON representation for arbitrary bytes" {
+    for ([_]u8{ 0, 7, 65, 128, 255 }) |byte| {
+        const version: m.Version = .{ .id = 1, .inode = 2, .size = 0, .sha256 = @splat(byte), .backends = .{ 1, 0 } };
+        const json = try std.json.Stringify.valueAlloc(testing.allocator, version, .{});
+        defer testing.allocator.free(json);
+        try testing.expect(std.mem.indexOf(u8, json, "\"sha256\":[") != null);
+        const parsed = try std.json.parseFromSlice(m.Version, testing.allocator, json, .{});
+        defer parsed.deinit();
+        try testing.expectEqualDeep(version, parsed.value);
+    }
+}
+
+test "snapshots reject dangling versions and impossible replica references" {
+    var state = try m.State.init(testing.allocator);
+    defer state.deinit();
+    _ = try create(&state, 1, 1, "file", .file);
+    _ = try state.apply(.{ .request_id = 2, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } });
+    _ = try state.apply(.{ .request_id = 3, .command = .{ .register_backend = .{ .id = 2, .failure_domain = 20 } } });
+    _ = try state.apply(.{ .request_id = 4, .command = .{ .publish = .{ .expected_version = 0, .version = .{ .id = 100, .inode = 2, .size = 3, .sha256 = @splat(1), .backends = .{ 1, 2 } } } } });
+    try m.validateSnapshot(state.snapshot());
+    state.nodes.items[1].current_version = 999;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.nodes.items[1].current_version = 100;
+    state.backends.items[1].failure_domain = 10;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.backends.items[1].failure_domain = 20;
+    state.versions.items[0].backends[1] = 99;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.versions.items[0].backends[1] = 2;
+    state.versions.items[0].size = std.math.maxInt(u64);
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.versions.items[0].size = 3;
+    state.nodes.items[1].kind = .directory;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.nodes.items[1].kind = .file;
+    try m.validateSnapshot(state.snapshot());
+    var restored = try m.State.restore(testing.allocator, state.snapshot());
+    defer restored.deinit();
+    try testing.expectEqualDeep(state.snapshot(), restored.snapshot());
+}
+
 fn create(state: *m.State, request_id: u64, parent: u64, name: []const u8, kind: m.Kind) !u64 {
     const result = try state.apply(.{ .request_id = request_id, .command = .{
         .create = .{ .parent = parent, .name = name, .kind = kind },

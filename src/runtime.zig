@@ -128,6 +128,8 @@ pub const Runtime = struct {
         try self.server.registerUnary("/nas.fs.Metadata/Get", grpc.UnaryHandler.bind(Runtime, self, get));
         try self.server.registerUnary("/nas.fs.Metadata/Lookup", grpc.UnaryHandler.bind(Runtime, self, lookup));
         try self.server.registerUnary("/nas.fs.Metadata/List", grpc.UnaryHandler.bind(Runtime, self, list));
+        try self.server.registerUnary("/nas.fs.Metadata/Backend", grpc.UnaryHandler.bind(Runtime, self, backend));
+        try self.server.registerUnary("/nas.fs.Metadata/Version", grpc.UnaryHandler.bind(Runtime, self, version));
         try self.server.registerUnary("/nas.fs.Metadata/Status", grpc.UnaryHandler.bind(Runtime, self, status));
         self.driver = try std.Thread.spawn(.{}, drive, .{self});
         errdefer {
@@ -206,6 +208,26 @@ pub const Runtime = struct {
         try self.node.readIndex("metadata-read", .{ .ctx = &pending, .function = Pending.read });
         pending.wait();
         if (pending.failure) |err| return err;
+    }
+
+    fn backend(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        return self.readRecord(allocator, request, true);
+    }
+
+    fn version(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        return self.readRecord(allocator, request, false);
+    }
+
+    fn readRecord(self: *Runtime, allocator: std.mem.Allocator, request: []const u8, comptime is_backend: bool) !grpc.UnaryResponse {
+        const data = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
+        const parsed = std.json.parseFromSlice(struct { id: u64 }, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
+        defer parsed.deinit();
+        self.readBarrier() catch |err| return fail(allocator, err);
+        const result = if (is_backend)
+            self.store.getBackend(parsed.value.id) catch |err| return fail(allocator, err)
+        else
+            self.store.getVersion(parsed.value.id) catch |err| return fail(allocator, err);
+        return reply(allocator, result);
     }
 
     fn lookup(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
