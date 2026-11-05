@@ -148,6 +148,8 @@ WAL 普通读取现在比对两侧大小和请求范围内的字节，任一侧�
 
 所有接入和维护进程应升级到支持 seal 的版本，不混用忽略基线的旧程序。这不改变 Raft 元数据格式；seal 依赖可信后端管理，包含防意外损坏的校验和，不提供防篡改签名或硬件掉电保证。
 
+修复中断验收：`zig build test-wal-smb -Dfuse=true -Dfault-injection=true -Doptimize=safe` 在真实双 CIFS 上分别对两个修复方向执行首块复制后、目标 fsync 后的 SIGKILL，验证源/摘要/检查点/WAL 保留、独占锁与原地重试。无需 CIFS 的本地版本为 `zig build test-wal-fuse -Dfuse=true -Dfault-injection=true`。这些入口自动启用 `--wal-faults`，必须配套故障注入构建；不要将该构建作为常规部署产物。正常构建忽略测试暂停环境变量。
+
 挂载点必须是现有空目录；helper 对底层目录加互斥锁并拒绝已挂载路径。状态目录必须是挂载点之外的新目录，父目录须存在，建议短路径。每次重启复用原挂载点、换一个新状态目录，保留旧日志。helper 不启动 voter、不挂载 CIFS、不自动重启子进程，也不提供跨节点 writer fencing。
 
 ### 分进程调试入口

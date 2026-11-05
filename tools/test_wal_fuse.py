@@ -11,7 +11,9 @@ import sys
 import time
 
 
-def test_wal_fuse(executable, directory, endpoints, run, smb=False, server_roots=None):
+def test_wal_fuse(
+    executable, directory, endpoints, run, smb=False, server_roots=None, faults=False
+):
     config = directory / "backends.json"
     roots = [Path(item["root"]) for item in json.loads(config.read_text())]
     processes, mounts, logs = [], [], []
@@ -384,6 +386,19 @@ os._exit(1)
             "PASS: persistent baseline repairs either replica in place, rejects identical corruption and survives write invalidation/SIGKILL",
             flush=True,
         )
+        if faults:
+            from test_mutable_repair_faults import test_mutable_repair_faults
+
+            test_mutable_repair_faults(
+                executable,
+                directory,
+                endpoints,
+                config,
+                inode,
+                recovered / "wal-file",
+                physical,
+                run,
+            )
         (recovered / "wal-file").unlink()
     finally:
         for path in reversed(mounts):

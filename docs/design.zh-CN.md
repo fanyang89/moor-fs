@@ -808,3 +808,15 @@ repair-mutable 在双侧独占锁下读取有效基线，只在至少一侧完�
 新增 8 项单测，Debug/Safe 各 81 项通过：任一侧修复、长度缩减和 inode 保留、双侧相同损坏拒绝修复/重新封存、写入与 truncate 双侧失效、单侧发布/失效的中断状态、失效失败无 WAL/data 修改、无摘要/摘要损坏/身份和序号冲突/元数据领先/待回放 WAL 拒绝，以及部分修复状态重试和 Access 巡检冻结。本地 Debug WAL FUSE、Safe 双 CIFS/SMB E2E 通过：实际命令建立基线、任一 NAS 原地修复、两侧同损拒绝、写前删除基线后 SIGKILL 并按 WAL 恢复；原 SMB/supervisor 回归也通过。单侧发布/失效与修复中断采用构造磁盘中间状态验证，尚未进行修复复制中的真实 SIGKILL 或硬件掉电验收。
 
 此协议提供显式静止文件保护，不是持续更新内容的可信校验体系。活跃写期间基线为空，仍需后续设计增量内容证据与 WAL 的关联，才能在任意写入阶段可靠自动修复。所有访问程序须支持写前基线失效，不混用旧版；跨节点 fencing、外部管理员并发修改隔离和独立机器验收仍未完成。
+
+## 47. 静止文件修复过程的真实进程中断验收
+
+复用既有 `-Dfault-injection=true` 和 `repair_fault`，新增 `mutable_first_chunk`、`mutable_synced` 两个确定性暂停点：前者在首个 256 KiB 已写入目标后，后者在完整复制、设置目标长度并 fsync 后、最终双侧摘要读回前。暂停点只在测试构建读取 `NAS_FS_REPAIR_STOP` 并 SIGSTOP；普通构建直接返回。修复算法和格式没有改变。
+
+WAL FUSE/SMB 构建入口在启用故障注入时自动传 `--wal-faults`，测试使用超过三个复制缓冲长度的内容，把目标改为更长的损坏文件；分别以两侧作为目标，运行四种方向/时点组合。父进程通过 waitpid(WUNTRACED) 确认精确暂停位置，检查部分目标内容或已同步的完整内容，再 SIGKILL 并等待退出，避免以时间猜测复制进度。
+
+每种组合验证：源数据始终完整；两侧 seal/checkpoint/各 WAL 的文件集合和字节保持；元数据绑定、序号和大小不变；暂停时竞争 scrub/repair 返回 FileBusy，FUSE 打开返回 EBUSY。首块后中断的目标仍不能通过正常巡检，目标同步后中断的文件可以通过巡检但命令没有向调用者报告成功；两种状态都可重跑 repair，并读回完整内容、保持两侧 data inode。
+
+本地 Debug 与真实双 CIFS Safe 的四场景矩阵均通过，既有 WAL/SMB/supervisor 回归同时通过。启用故障注入的 Debug/Safe 单测各 81 项通过。另以正常 Safe 构建设置 `NAS_FS_REPAIR_STOP=mutable_first_chunk` 运行 WAL FUSE 套件，确认生产构建不会被测试环境变量暂停。fmt/diff 检查通过。
+
+本节补齐第46节遗留的修复复制中真实 SIGKILL 验证；底层 NAS 和操作系统仍持续运行，因此不把该结果视为硬件掉电、控制器缓存丢失或断网 fencing 验收。seal 发布/失效窗口仍主要由构造磁盘中间状态的单测覆盖。

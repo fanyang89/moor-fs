@@ -5,7 +5,7 @@ const enabled = @import("build_options").fault_injection;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn raise(signal: c_int) c_int;
 
-pub fn checkpoint(comptime point: enum { before_replace, after_replace, after_sync }) void {
+pub fn checkpoint(comptime point: enum { before_replace, after_replace, after_sync, mutable_first_chunk, mutable_synced }) void {
     if (!enabled) return;
     const selected = getenv("NAS_FS_REPAIR_STOP") orelse return;
     if (std.mem.eql(u8, std.mem.span(selected), @tagName(point))) {

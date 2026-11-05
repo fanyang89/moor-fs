@@ -208,6 +208,8 @@ follow symlinks = no
             command.extend(["--mutable-access", args.mutable_access])
         if args.wal_smb:
             command.append("--wal-smb")
+        if args.wal_faults:
+            command.append("--wal-faults")
         if args.file_store:
             command = [
                 sys.executable,
@@ -230,7 +232,7 @@ follow symlinks = no
                     timeout=900
                     if args.smb and args.repair_faults
                     else 600
-                    if args.smb
+                    if args.smb or args.wal_smb
                     else 480
                     if args.repair_faults
                     else 360
@@ -309,11 +311,14 @@ def main():
     parser.add_argument("--file-store", action="store_true")
     parser.add_argument("--mutable-access")
     parser.add_argument("--wal-smb", action="store_true")
+    parser.add_argument("--wal-faults", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--gid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.wal_faults and not args.wal_smb:
+        parser.error("--wal-faults requires --wal-smb")
     if args.file_store and args.mutable_access:
         parser.error("--file-store and --mutable-access select different test drivers")
     if args.worker:
@@ -329,7 +334,7 @@ def main():
     for name in ("smbd", "smbclient", "mount.cifs", "umount", "unshare", "sudo"):
         if shutil.which(name) is None:
             parser.error(f"required executable not found: {name}")
-    if args.smb:
+    if args.smb or args.wal_smb:
         for name in ("testparm", "fusermount3"):
             if shutil.which(name) is None:
                 parser.error(f"required executable not found: {name}")
@@ -363,6 +368,8 @@ def main():
         command.append("--smb")
     if args.wal_smb:
         command.append("--wal-smb")
+    if args.wal_faults:
+        command.append("--wal-faults")
     if args.repair_faults:
         command.append("--repair-faults")
     if args.file_store:

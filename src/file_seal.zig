@@ -76,9 +76,11 @@ pub const Seal = struct {
             if (try source.readPositionalAll(io, bytes, offset) != bytes.len) return error.SourceChanged;
             try target.writePositionalAll(io, bytes, offset);
             offset += bytes.len;
+            if (offset == bytes.len) @import("repair_fault.zig").checkpoint(.mutable_first_chunk);
         }
         try target.setLength(io, self.size);
         try target.sync(io);
+        @import("repair_fault.zig").checkpoint(.mutable_synced);
         if (!try self.matches(io, source) or !try self.matches(io, target)) return error.SealedContentMismatch;
     }
 };

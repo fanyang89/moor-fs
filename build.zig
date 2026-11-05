@@ -55,10 +55,12 @@ pub fn build(b: *std.Build) void {
         const wal_fuse = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
         wal_fuse.addArtifactArg(exe);
         wal_fuse.addArg("--wal-fuse");
+        if (fault_injection) wal_fuse.addArg("--wal-faults");
         b.step("test-wal-fuse", "Test shared WAL FUSE sessions and crash recovery").dependOn(&wal_fuse.step);
         const wal_smb = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
         wal_smb.addArtifactArg(exe);
         wal_smb.addArg("--wal-smb");
+        if (fault_injection) wal_smb.addArg("--wal-faults");
         b.step("test-wal-smb", "Test WAL FUSE/SMB on two CIFS backends (requires sudo)").dependOn(&wal_smb.step);
         exe.root_module.addIncludePath(b.path("third_party/libfuse/include"));
         exe.root_module.addIncludePath(b.path(".deps-build/libfuse"));

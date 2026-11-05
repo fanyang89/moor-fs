@@ -870,6 +870,20 @@ data, and cannot discover damage already identical on both replicas at first
 sealing. All access processes must use a seal-aware build. See design section 46
 and the operations guide for lifecycle and recovery limits.
 
+To exercise real process death during sealed repair, use the test-only build:
+
+```sh
+zig build test-wal-fuse -Dfuse=true -Dfault-injection=true
+zig build test-wal-smb -Dfuse=true -Dfault-injection=true -Doptimize=safe
+```
+
+Both targets kill repair after its first 256 KiB copy and after destination
+fsync, with each NAS serving as the damaged target. They check exclusive
+ownership, retained source/seal/WAL/checkpoint bytes and successful in-place
+retry. Normal builds ignore these stop points even if their environment
+variable is set. Process-death coverage does not establish hardware-power-loss
+durability.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive
