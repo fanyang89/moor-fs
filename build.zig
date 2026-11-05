@@ -69,6 +69,19 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run nas-fs CLI").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = mod });
     b.step("test", "Test metadata and Raft state-machine integration").dependOn(&b.addRunArtifact(tests).step);
+    const file_store_test = b.addExecutable(.{
+        .name = "file-store-e2e",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/file_store_e2e.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "nas_fs", .module = mod }},
+        }),
+    });
+    const wal_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+    wal_test.addArtifactArg(file_store_test);
+    wal_test.addArg("--file-store");
+    b.step("test-file-store", "Test mutable WAL files and process death on real CIFS backends (requires sudo)").dependOn(&wal_test.step);
     const deps = b.addSystemCommand(&.{ "python3", "tools/deps.py", "check" });
     b.step("deps-check", "Check pinned dependency sources").dependOn(&deps.step);
     const cluster_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });

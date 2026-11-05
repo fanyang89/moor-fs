@@ -204,6 +204,13 @@ follow symlinks = no
             command.append("--smb")
         if args.repair_faults:
             command.append("--repair-faults")
+        if args.file_store:
+            command = [
+                sys.executable,
+                str(REPO / "tools/test_file_store.py"),
+                args.executable,
+                *(str(s["mount"] / "mutable-file") for s in servers),
+            ]
         environment = dict(os.environ, HOME=account.pw_dir, TMPDIR=str(directory))
         # Metadata processes and file operations run as the original ordinary user.
         cluster = subprocess.Popen(
@@ -236,6 +243,8 @@ follow symlinks = no
             stop(server)
             start(server)
             mount(server)
+            if args.file_store:
+                continue
             paths = list((server["mount"] / "nas-fs/objects").iterdir())
             assert len(paths) >= 3, paths
             for path in paths:
@@ -243,10 +252,22 @@ follow symlinks = no
                     hashlib.sha256(path.read_bytes()).hexdigest()
                     == path.name.split("-", 1)[1]
                 )
-        print(
-            "PASS: Samba restart and cold CIFS remount preserve all object hashes",
-            flush=True,
-        )
+        if args.file_store:
+            run(
+                args.executable,
+                "verify",
+                *(s["mount"] / "mutable-file" for s in servers),
+                preexec_fn=drop_privileges,
+            )
+            print(
+                "PASS: mutable WAL file survives Samba restart and cold CIFS remount",
+                flush=True,
+            )
+        else:
+            print(
+                "PASS: Samba restart and cold CIFS remount preserve all object hashes",
+                flush=True,
+            )
         success = True
     finally:
         try:
@@ -276,6 +297,7 @@ def main():
     parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
+    parser.add_argument("--file-store", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
@@ -328,6 +350,8 @@ def main():
         command.append("--smb")
     if args.repair_faults:
         command.append("--repair-faults")
+    if args.file_store:
+        command.append("--file-store")
     result = subprocess.run(command)
     if result.returncode:
         print(f"E2E failed; workspace: {directory}", file=sys.stderr)

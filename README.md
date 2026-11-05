@@ -793,6 +793,18 @@ existing read-only tests and backend restart/remount hash checks.
 
 ### Persistence and recovery
 
+The separate mutable-file WAL prototype now has durable checkpoints, WAL rotation,
+explicit old-log collection and exclusive file ownership. It is not yet connected
+to the SMB/FUSE path above. Run its real dual-CIFS process-death acceptance with:
+
+```sh
+zig build test-file-store -Doptimize=safe
+```
+
+This tests recovery after write, checkpoint and collection SIGKILL, competing
+openers, stable data inodes and cold CIFS remount. See design sections 39–41 for
+the planned transition and remaining metadata/read-coordination work.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -61,10 +61,11 @@ fn decode(bytes: []const u8, start: usize, identity: Identity, sequence: u64) !?
     return .{ .operation = operation, .offset = offset, .payload = payload, .end = start + header_size + size };
 }
 
-fn scan(bytes: []const u8, identity: Identity) !struct { end: usize, next: u64 } {
+fn scan(bytes: []const u8, identity: Identity, first: u64) !struct { end: usize, next: u64 } {
     var end: usize = 0;
-    var next: u64 = 1;
+    var next: u64 = first;
     while (try decode(bytes, end, identity, next)) |record| {
+        if (next == std.math.maxInt(u64)) return error.WalSequenceExhausted;
         end = record.end;
         next += 1;
     }
@@ -127,20 +128,25 @@ pub const Session = struct {
     /// operation. Conflicting records or complete corruption require intervention.
     /// All validation precedes mutation; both WALs become durable before any replay.
     pub fn recover(gpa: Allocator, io: Io, identity: Identity, replicas: [2]Replica) !Session {
-        if (identity.inode == 0 or identity.generation == 0) return error.InvalidIdentity;
+        return recoverFrom(gpa, io, identity, replicas, 1);
+    }
+
+    /// The enclosing durable checkpoint establishes this WAL's first sequence.
+    pub fn recoverFrom(gpa: Allocator, io: Io, identity: Identity, replicas: [2]Replica, first: u64) !Session {
+        if (identity.inode == 0 or identity.generation == 0 or first == 0 or first == std.math.maxInt(u64)) return error.InvalidIdentity;
         const a = try readLog(gpa, io, replicas[0].log);
         defer gpa.free(a);
         const b = try readLog(gpa, io, replicas[1].log);
         defer gpa.free(b);
-        const sa = try scan(a, identity);
-        const sb = try scan(b, identity);
+        const sa = try scan(a, identity, first);
+        const sb = try scan(b, identity, first);
         const common = @min(a.len, b.len);
         if (!std.mem.eql(u8, a[0..common], b[0..common])) return error.WalDiverged;
         const selected = if (sa.end >= sb.end) sa else sb;
         const bytes = if (sa.end >= sb.end) a[0..sa.end] else b[0..sb.end];
         try pair(io, replicas, restoreLog, .{bytes});
         var offset: usize = 0;
-        var sequence: u64 = 1;
+        var sequence: u64 = first;
         while (try decode(bytes, offset, identity, sequence)) |record| {
             try pair(io, replicas, apply, .{record});
             offset = record.end;
@@ -162,6 +168,8 @@ pub const Session = struct {
 
     fn mutate(self: *Session, operation: Operation, offset: u64, payload: []const u8) !void {
         if (self.failed) return error.WalSessionFailed;
+        // Reserve a representable, reopenable first sequence for the next epoch.
+        if (self.next >= std.math.maxInt(u64) - 1) return error.WalSequenceExhausted;
         const bytes = try encode(self.allocator, self.identity, self.next, operation, offset, payload);
         defer self.allocator.free(bytes);
         if (self.end + bytes.len > max_log) return error.WalCapacityExceeded;
