@@ -3,6 +3,7 @@ const t = std.testing;
 const files = @import("file_store.zig");
 const wal = @import("file_wal.zig");
 const identity: wal.Identity = .{ .inode = 42, .generation = 9 };
+const Seal = @import("file_seal.zig").Seal;
 
 const Fixture = struct {
     tmp: t.TmpDir,
@@ -63,6 +64,136 @@ test "checkpoint rotation preserves data inode and reopens after old WAL collect
     try store.sync();
     try t.expectEqual(sequence, store.session.next);
     try store.collect();
+}
+
+test "sealed baseline repairs either replica in place and preserves the source" {
+    for (0..2) |bad| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        const next = store.checkpoint.next;
+        const inode = (try store.session.replicas[bad].data.stat(t.io)).inode;
+        try store.session.replicas[bad].data.writePositionalAll(t.io, "broken-longer", 0);
+        store.close();
+        try t.expectError(error.SealedContentMismatch, f.open());
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, next);
+        defer store.close();
+        try f.expect("baseline");
+        try t.expectEqual(inode, (try store.session.replicas[bad].data.stat(t.io)).inode);
+        try t.expectEqual(next, store.checkpoint.next);
+        try t.expect(store.seal != null);
+    }
+}
+
+test "sealed identical corruption is rejected and cannot be resealed or repaired" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    try store.write("baseline", 0);
+    try store.establishSeal();
+    for (store.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 0);
+    try t.expectError(error.SealedContentMismatch, store.establishSeal());
+    store.close();
+    try t.expectError(error.SealedContentMismatch, f.open());
+    try t.expectError(error.NoVerifiedReplica, files.Store.openMode(t.allocator, t.io, identity, f.dirs, 1));
+    try f.expect("Xaseline");
+}
+
+test "write and truncate invalidate both seals before redo and survive reopen" {
+    for ([_]bool{ false, true }) |truncate| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        if (truncate) try store.truncate(2) else try store.write("X", 0);
+        for (f.dirs) |dir| try t.expect(try Seal.read(t.io, dir, identity) == null);
+        store.close();
+        store = try f.open();
+        defer store.close();
+        try t.expect(store.seal == null);
+        try f.expect(if (truncate) "ba" else "Xaseline");
+    }
+}
+
+test "partial seal publication or invalidation leaves a usable baseline" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    try store.write("baseline", 0);
+    try store.establishSeal();
+    store.close();
+    // The same on-disk state occurs after first publication or first unlink.
+    try f.dirs[0].deleteFile(t.io, "seal");
+    store = try f.open();
+    try t.expect(store.seal != null);
+    try store.write("X", 0);
+    store.close();
+    for (f.dirs) |dir| try t.expect(try Seal.read(t.io, dir, identity) == null);
+    store = try f.open();
+    defer store.close();
+    try f.expect("Xaseline");
+}
+
+test "failed seal invalidation does not append WAL or modify either data file" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    try store.write("baseline", 0);
+    try store.establishSeal();
+    try f.dirs[1].rename("seal", f.dirs[1], "saved-seal", t.io);
+    try f.dirs[1].createDir(t.io, "seal", .default_dir);
+    if (store.write("X", 0)) |_| return error.ExpectedFailure else |_| {}
+    try t.expect(store.session.failed);
+    for (store.session.replicas) |replica| try t.expectEqual(@as(u64, 0), (try replica.log.stat(t.io)).size);
+    try f.expect("baseline");
+}
+
+test "repair requires a valid seal, matching identity and nonstale sequence" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    store.close();
+    try t.expectError(error.MissingSeal, files.Store.openMode(t.allocator, t.io, identity, f.dirs, 1));
+    store = try f.open();
+    try store.establishSeal();
+    const baseline = store.seal.?;
+    store.close();
+    try t.expectError(error.StaleFileState, files.Store.openMode(t.allocator, t.io, identity, f.dirs, baseline.next + 1));
+    try baseline.publish(t.io, f.dirs[0], .{ .inode = identity.inode, .generation = identity.generation + 1 });
+    try t.expectError(error.SealIdentityMismatch, f.open());
+    var stale = baseline;
+    stale.next += 1;
+    for (f.dirs) |dir| try stale.publish(t.io, dir, identity);
+    try t.expectError(error.StaleSeal, f.open());
+    try baseline.publish(t.io, f.dirs[0], identity);
+    try t.expectError(error.SealDiverged, f.open());
+    const seal = try f.dirs[0].openFile(t.io, "seal", .{ .mode = .read_write });
+    defer seal.close(t.io);
+    try seal.writePositionalAll(t.io, "X", 40);
+    try t.expectError(error.CorruptSeal, f.open());
+}
+
+test "pending WAL cannot coexist with a valid seal and partial repairs are retryable" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    try store.write("baseline", 0);
+    try store.establishSeal();
+    const baseline = store.seal.?;
+    // Simulate an interrupted in-place repair: the source and seal are intact.
+    try store.session.replicas[1].data.setLength(t.io, 3);
+    store.close();
+    store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, baseline.next);
+    try f.expect("baseline");
+    try store.write("X", 0);
+    store.close();
+    // An obsolete writer or external restore must not silently reactivate a seal.
+    for (f.dirs) |dir| try baseline.publish(t.io, dir, identity);
+    try t.expectError(error.SealWithPendingWal, f.open());
 }
 
 test "checkpoint recovery adopts one published higher checkpoint without replaying old truncates" {

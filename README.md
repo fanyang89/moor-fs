@@ -855,6 +855,21 @@ verification against a trusted content digest; identical corruption remains
 undetectable. Opening for maintenance may replay WAL and reconcile checkpoints.
 The command never migrates immutable files or selects a repair source.
 
+For idle files, `seal-mutable ENDPOINTS CONFIG INODE` explicitly persists a
+generation/sequence-bound SHA-256 baseline after both replicas agree. Later
+opens and scrubs validate it, detecting even identical subsequent corruption.
+`repair-mutable ENDPOINTS CONFIG INODE` can restore an existing damaged replica
+in place only when the other replica matches that valid baseline. Both data
+locks remain held; an interrupted copy can be retried. Neither matching source
+nor valid baseline means repair is refused.
+
+Before the next write/truncate, both seal files are durably removed; ordinary
+fsync does not rescan or reseal entire files. Re-establish the baseline explicitly
+after updates. This protects idle sealed contents, not continuously changing
+data, and cannot discover damage already identical on both replicas at first
+sealing. All access processes must use a seal-aware build. See design section 46
+and the operations guide for lifecycle and recovery limits.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -44,9 +44,14 @@ pub const Access = struct {
     /// Existing bindings choose their recorded pair. Migration uses the supplied
     /// pair and leaves old immutable objects intact, even after uncertain RPCs.
     pub fn open(gpa: std.mem.Allocator, io: Io, metadata: Metadata, config: []const objects.Mapping, inode: u64, migration_pair: [2]u64) !Access {
+        return openMode(gpa, io, metadata, config, inode, migration_pair, false);
+    }
+
+    pub fn openMode(gpa: std.mem.Allocator, io: Io, metadata: Metadata, config: []const objects.Mapping, inode: u64, migration_pair: [2]u64, repair: bool) !Access {
         const head = try metadata.get(metadata.context, inode);
         if (head.id != inode or head.kind != .file) return error.NotFile;
         if (head.replicas != .two) return error.InvalidReplicaPolicy;
+        if (repair and head.mutable_file == null) return error.MissingSeal;
         const pair = if (head.mutable_file) |file| file.backends else migration_pair;
         if (pair[0] == 0 or pair[1] == 0 or pair[0] == pair[1]) return error.InvalidReplicaPolicy;
         const first = try metadata.backend(metadata.context, pair[0]);
@@ -108,7 +113,7 @@ pub const Access = struct {
         self.data = if (head.mutable_file == null)
             try files.Store.create(gpa, io, identity, self.dirs)
         else
-            try files.Store.open(gpa, io, identity, self.dirs);
+            try files.Store.openMode(gpa, io, identity, self.dirs, if (repair) head.mutable_file.?.next_sequence else null);
         errdefer self.data.close();
         if (head.mutable_file == null) {
             if (head.current_version != 0) try self.seed(head.current_version, config);
@@ -271,7 +276,19 @@ pub const Access = struct {
         _ = try self.current();
         var result: Scrub = .{ .size = length, .next_sequence = self.data.session.next, .sha256 = undefined };
         hasher.final(&result.sha256);
+        if (self.data.seal) |baseline| {
+            if (result.size != baseline.size or !std.mem.eql(u8, &result.sha256, &baseline.sha256)) return error.SealedContentMismatch;
+        }
         return result;
+    }
+
+    pub fn seal(self: *Access) !void {
+        errdefer self.failed = true;
+        try self.validate();
+        _ = try self.current();
+        try self.data.establishSeal();
+        try self.validate();
+        try self.sync();
     }
 
     pub fn size(self: *Access) !u64 {

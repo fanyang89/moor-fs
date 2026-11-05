@@ -322,3 +322,19 @@ test "mutable replica agreement is not proof against identical corruption" {
     const result = try session.scrub();
     try t.expectEqualSlices(u8, &expected, &result.sha256);
 }
+
+test "mutable seal binds metadata checkpoint and detects identical damage during scrub" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    try session.write("original", 0);
+    try session.seal();
+    const baseline = session.data.seal.?;
+    const head = f.meta.state.get(2).?.mutable_file.?;
+    try t.expectEqual(head.next_sequence, baseline.next);
+    try t.expectEqual(head.size, baseline.size);
+    for (session.data.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 0);
+    try t.expectError(error.SealedContentMismatch, session.scrub());
+    try t.expectError(error.WalSessionFailed, session.write("new", 0));
+}

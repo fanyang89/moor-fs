@@ -4,6 +4,7 @@
 const std = @import("std");
 const wal = @import("file_wal.zig");
 const objects = @import("objects.zig");
+const Seal = @import("file_seal.zig").Seal;
 const Io = std.Io;
 const File = Io.File;
 const Dir = Io.Dir;
@@ -117,6 +118,7 @@ pub const Store = struct {
     session: wal.Session,
     dirs: [2]Dir,
     checkpoint: Checkpoint,
+    seal: ?Seal = null,
 
     /// Fresh files only; interrupted initialization is not silently retried.
     pub fn create(gpa: Allocator, io: Io, identity: wal.Identity, dirs: [2]Dir) !Store {
@@ -139,6 +141,10 @@ pub const Store = struct {
     }
 
     pub fn open(gpa: Allocator, io: Io, identity: wal.Identity, dirs: [2]Dir) !Store {
+        return openMode(gpa, io, identity, dirs, null);
+    }
+
+    pub fn openMode(gpa: Allocator, io: Io, identity: wal.Identity, dirs: [2]Dir, repair_sequence: ?u64) !Store {
         // Acquire both data locks before inspecting or repairing checkpoint state.
         const a = try openData(io, dirs[0], false);
         errdefer a.close(io);
@@ -148,6 +154,7 @@ pub const Store = struct {
         const cb = try Checkpoint.read(io, dirs[1], identity);
         if (ca == null and cb == null) return error.MissingCheckpoint;
         const checkpoint = if (ca == null) cb.? else if (cb == null or ca.?.next >= cb.?.next) ca.? else cb.?;
+        if (repair_sequence) |minimum| if (checkpoint.next < minimum) return error.StaleFileState;
         if (ca != null and cb != null and ca.?.next == cb.?.next and ca.?.size != cb.?.size) return error.CheckpointDiverged;
         // The higher checkpoint proves both data files were synced and both new
         // logs were persisted before its publication. Never recreate missing logs.
@@ -158,12 +165,20 @@ pub const Store = struct {
         const lb = try dirs[1].openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false });
         errdefer lb.close(io);
         const replicas: [2]wal.Replica = .{ .{ .data = a, .log = la }, .{ .data = b, .log = lb } };
+        const seal = try Seal.load(io, dirs, identity, checkpoint.next, checkpoint.size);
+        if (repair_sequence != null and seal == null) return error.MissingSeal;
+        if (seal) |baseline| {
+            // A valid baseline is published only after rotation; writes must
+            // durably invalidate both copies before appending any redo record.
+            if ((try la.stat(io)).size != 0 or (try lb.stat(io)).size != 0) return error.SealWithPendingWal;
+            try baseline.verify(io, .{ a, b }, repair_sequence != null);
+        }
         const session = try wal.Session.recoverFrom(gpa, io, identity, replicas, checkpoint.next);
         if (session.end == 0) {
             for (replicas) |replica| if ((try replica.data.stat(io)).size != checkpoint.size) return error.ReplicaSizeMismatch;
         }
         try publishBoth(io, dirs, checkpoint, identity);
-        return .{ .session = session, .dirs = dirs, .checkpoint = checkpoint };
+        return .{ .session = session, .dirs = dirs, .checkpoint = checkpoint, .seal = seal };
     }
 
     pub fn close(self: *Store) void {
@@ -175,6 +190,7 @@ pub const Store = struct {
         if (self.session.failed) return error.WalSessionFailed;
         if (bytes.len > wal.max_write or offset > std.math.maxInt(i64) - bytes.len) return error.InvalidRange;
         if (bytes.len == 0) return;
+        try self.invalidateSeal();
         if (self.session.end + bytes.len + 112 > wal.max_log) try self.sync();
         try self.session.write(bytes, offset);
     }
@@ -182,8 +198,36 @@ pub const Store = struct {
     pub fn truncate(self: *Store, size: u64) !void {
         if (self.session.failed) return error.WalSessionFailed;
         if (size > std.math.maxInt(i64)) return error.InvalidRange;
+        try self.invalidateSeal();
         if (self.session.end + 112 > wal.max_log) try self.sync();
         try self.session.truncate(size);
+    }
+
+    fn invalidateSeal(self: *Store) !void {
+        if (self.seal == null) return;
+        errdefer self.session.failed = true;
+        for (self.dirs) |dir| {
+            dir.deleteFile(self.session.io, "seal") catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+            try objects.syncDir(self.session.io, dir);
+        }
+        self.seal = null;
+    }
+
+    /// Explicit full-file baseline: no whole-file hashing on ordinary fsync.
+    pub fn establishSeal(self: *Store) !void {
+        if (self.session.failed) return error.WalSessionFailed;
+        errdefer self.session.failed = true;
+        if (self.seal) |baseline| try baseline.verify(self.session.io, .{ self.session.replicas[0].data, self.session.replicas[1].data }, false);
+        try self.sync();
+        const a = try objects.hash(self.session.io, self.session.replicas[0].data);
+        const b = try objects.hash(self.session.io, self.session.replicas[1].data);
+        if (a.size != self.checkpoint.size or !std.meta.eql(a, b)) return error.ReplicaContentMismatch;
+        const baseline: Seal = .{ .next = self.checkpoint.next, .size = a.size, .sha256 = a.sha256 };
+        for (self.dirs) |dir| try baseline.publish(self.session.io, dir, self.session.identity);
+        self.seal = baseline;
     }
 
     /// A successful sync establishes a new data baseline and switches WALs.

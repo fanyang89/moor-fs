@@ -167,6 +167,7 @@ def test_wal_fuse(executable, directory, endpoints, run, smb=False, server_roots
 
         # No descriptor is inherited by the parent; the child pauses only after
         # write acknowledgement, without flush/fsync/close checkpointing.
+        assert run("seal-mutable", endpoints, config, inode)["sealed"]
         child = subprocess.Popen(
             [
                 sys.executable,
@@ -197,6 +198,7 @@ os._exit(1)
                     break
                 assert time.monotonic() < deadline
                 time.sleep(0.05)
+            assert all(not (leaf / "seal").exists() for leaf in leaves)
             process.kill()
             process.wait(timeout=15)
             child.send_signal(signal.SIGCONT)
@@ -342,6 +344,44 @@ os._exit(1)
             assert (recovered / "wal-file").read_bytes() == b"acknowledged"
         print(
             "PASS: corruption on either NAS fails shared reads and scrub without repairing from an untrusted peer",
+            flush=True,
+        )
+        missing = run("repair-mutable", endpoints, config, inode, success=False)
+        assert "MissingSeal" in missing.stdout + missing.stderr, missing
+        sealed = run("seal-mutable", endpoints, config, inode)
+        assert sealed["sealed"] and sealed["sha256"] == report["sha256"]
+        physical = [
+            root / "mutable" / leaf.name / "data"
+            for root, leaf in zip(physical_roots, leaves)
+        ]
+        stable_inodes = [data.stat().st_ino for data in physical]
+        for bad in range(2):
+            with open(physical[bad], "r+b", buffering=0) as corrupt:
+                corrupt.write(b"damaged-and-longer")
+                os.fsync(corrupt.fileno())
+            failed = run("scrub-mutable", endpoints, config, inode, success=False)
+            assert "SealedContentMismatch" in failed.stdout + failed.stderr, failed
+            repaired = run("repair-mutable", endpoints, config, inode)
+            assert repaired["sealed"] and repaired["sha256"] == sealed["sha256"]
+            assert all(data.read_bytes() == b"acknowledged" for data in physical)
+            assert [data.stat().st_ino for data in physical] == stable_inodes
+        for data in physical:
+            with open(data, "r+b", buffering=0) as corrupt:
+                corrupt.write(b"X")
+                os.fsync(corrupt.fileno())
+        failed = run("repair-mutable", endpoints, config, inode, success=False)
+        assert "NoVerifiedReplica" in failed.stdout + failed.stderr, failed
+        failed = run("seal-mutable", endpoints, config, inode, success=False)
+        assert "SealedContentMismatch" in failed.stdout + failed.stderr, failed
+        assert all(data.read_bytes() == b"Xcknowledged" for data in physical)
+        # The fixture restores the original source; production needs an actual
+        # verified backup when neither replica matches the persistent baseline.
+        with open(physical[0], "r+b", buffering=0) as restored:
+            restored.write(b"a")
+            os.fsync(restored.fileno())
+        assert run("repair-mutable", endpoints, config, inode)["sealed"]
+        print(
+            "PASS: persistent baseline repairs either replica in place, rejects identical corruption and survives write invalidation/SIGKILL",
             flush=True,
         )
         (recovered / "wal-file").unlink()
