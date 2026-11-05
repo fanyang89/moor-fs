@@ -229,6 +229,10 @@ def test_mounts(
                 start,
                 drop_publish_reply,
             )
+        if smb:
+            from test_access import test_access
+
+            test_access(executable, directory, endpoints, config, run)
         subprocess.run(["fusermount3", "-u", str(first)], check=True, timeout=10)
         assert processes[0].wait(timeout=15) == 0
         assert not os.path.ismount(first)

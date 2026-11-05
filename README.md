@@ -624,6 +624,39 @@ not a client-facing unified SMB export or physical NAS power-loss durability.
 With `-Dfuse=true`, the suite also runs two real FUSE mounts over these CIFS-backed
 objects, including version-pinned reads; build libfuse and enable `/dev/fuse` first.
 
+### Supervised access-node startup and shutdown
+
+After mounting CIFS shares, registering/initializing backends and starting the
+metadata cluster, one foreground helper can own both FUSE and Samba:
+
+```sh
+mkdir -p mountpoint
+python3 tools/serve_access.py "$EP" "$PWD/mountpoint" "$PWD/access-state-01" \
+  --backends "$PWD/backends.json" --port 1445
+```
+
+The default is read-only. Add `--write-backends 1,2` to enable both writable FUSE
+and writable SMB; use only one writable entrance. `--executable` selects a nas-fs
+binary (default `zig-out/bin/nas-fs`), and `--listen` selects the local IPv4 address
+(default loopback). The mountpoint must be an existing empty directory. The helper
+locks its underlying directory and refuses mounted/busy paths. The state directory
+must be new and outside the mountpoint; use a short path with an existing parent.
+
+Startup waits for FUSE before launching Samba and prints one JSON readiness record
+with the child PIDs, SMB port and writable mode. This signals service startup, not
+a full backend/metadata health check. SIGINT/SIGTERM stops Samba first, unmounts
+FUSE and waits for the child. Either child's unexpected exit shuts down the other
+and returns nonzero. The helper uses mountinfo even for disconnected FUSE mounts;
+it does not automatically lazy-unmount a busy mount. Logs remain in `fuse.log` and
+`s/process.log`, `s/samba.log` beneath the state directory.
+
+Restart with the same empty mountpoint and a new state directory. The helper does
+not manage metadata voters or CIFS mounts, automatically restart children, or
+provide writer fencing. Killing the helper itself with SIGKILL cannot run its
+cleanup; stop remaining Samba processes and unmount FUSE before restarting.
+The SMB E2E covers normal stop, each child's SIGKILL, repeated mountpoint reuse,
+persisted file downloads, default read-only mode and startup rejection/cleanup.
+
 ### Read-only SMB access-node prototype
 
 Start the FUSE mount with `--backends` as above. As the same ordinary user, run:

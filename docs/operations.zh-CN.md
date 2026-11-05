@@ -94,7 +94,21 @@ findmnt -M /mnt/nas-b
 
 ## 4. 启动 FUSE 和 SMB，验证首个文件
 
-在接入机以普通用户启动 FUSE，另开终端启动 Samba，二者必须是同一用户。下面各命令在相应终端前台运行；将路径改为自己的仓库绝对路径或先进入仓库并设置第 2 节变量。
+推荐在接入机以普通用户运行统一前台入口，设置第 2 节的 BIN/EP 变量后执行：
+
+```sh
+mkdir -p mountpoint
+python3 tools/serve_access.py "$EP" "$PWD/mountpoint" "$PWD/access-state-01" \
+  --executable "$BIN" --backends "$PWD/backends.json" --write-backends 1,2 --port 1445
+```
+
+helper 先启动并等待 FUSE，再启动 Samba；标准输出的 ready JSON 包含两个子进程 PID、端口和可写模式，表示服务启动完成，不替代 get/check-file 健康检查。默认只读，其他接入机省略 `--write-backends`。默认监听 loopback，局域网试用显式增加 `--listen 接入机IPv4`。
+
+挂载点必须是现有空目录；helper 对底层目录加互斥锁并拒绝已挂载路径。状态目录必须是挂载点之外的新目录，父目录须存在，建议短路径。每次重启复用原挂载点、换一个新状态目录，保留旧日志。helper 不启动 voter、不挂载 CIFS、不自动重启子进程，也不提供跨节点 writer fencing。
+
+### 分进程调试入口
+
+若需要分别调试，可改用以下两个前台命令，不要与统一入口同时占用一个挂载点。FUSE 与 Samba 必须是同一普通用户。
 
 ```sh
 mkdir -p mountpoint
@@ -132,6 +146,10 @@ INODE=2
 SMB 每次 write/truncate 都同步发布整个结果文件；大上传会出现已提交中间版本，覆盖可能先提交空截断，不提供整个上传的原子替换。当前上限为 4096 inode、2048 保留版本、8192 请求回执，频繁写入会很快耗尽版本；尚无 GC。
 
 ## 5. 正常停止与重启顺序
+
+使用统一入口时，先停止客户端写入并关闭文件，再向 serve_access.py 发 SIGTERM 或 Ctrl-C；它依次停止 Samba 进程组、卸载 FUSE 并等待子进程退出。正常停止返回零，任一子进程意外退出时清理另一侧并返回非零。不要向 helper 本身发 SIGKILL 后期待自动清理；这种情况下需先停残留 Samba，再卸载 FUSE。若挂载仍被其他进程占用，卸载失败会报告错误，不会自动 lazy-unmount。
+
+使用分进程入口时按下面顺序停止；两种方式都需最后处理 CIFS 和 voter：
 
 1. 停止客户端写入，关闭 SMB 文件。
 2. 在 Samba helper 终端按 Ctrl-C，或由服务管理器向 helper 发 SIGTERM，等待 Samba 子进程退出。
@@ -171,8 +189,9 @@ SMB 每次 write/truncate 都同步发布整个结果文件；大上传会出现
 
 ## 7. 日志与验收记录
 
-- voter/FUSE：前台标准错误，交给终端重定向或已有服务管理器保存。发布失败包含 inode、expected_version 和错误名。
+- voter/FUSE：分进程运行时为前台标准错误；统一入口将 FUSE 日志写到状态目录的 fuse.log。发布失败包含 inode、expected_version 和错误名。
 - Samba：每次指定的状态目录内 process.log、samba.log、smb.conf；启动失败会附加内部日志。
+- 统一入口的 Samba 日志与配置位于状态目录的 s/ 子目录。helper 自身在标准错误报告失败及日志路径。
 - E2E：`zig build test-smb -Dfuse=true -Doptimize=safe`；故障套件再加 `-Dfault-injection=true`。需要 sudo -n、私有 mount namespace 和实际 CIFS/FUSE 支持。
 
 | 范围 | 已有证据 / 状态 |
@@ -181,7 +200,8 @@ SMB 每次 write/truncate 都同步发布整个结果文件；大上传会出现
 | 文件与副本恢复 | Linux smbclient 上传/覆盖/下载/目录操作，check-file、缺失/损坏修复，后端 Samba 重启与冷重挂后全对象哈希检查。 |
 | 元数据/接入崩溃 | 三 voter 重选、全进程重启、LMDB 重建；十三个写入故障场景见设计文档第 31–34 节。 |
 | 真实多机首次部署 | 本手册是操作入口；尚未完成独立干净机器按手册部署的签收。 |
-| 服务托管与发布包 | 当前前台入口；自动依赖编排、可安装发布包和完整备份恢复尚未完成。 |
+| 接入启停编排 | serve_access.py 已通过实际 FUSE/SMB 的正常停止、子进程 SIGKILL、同挂载点重启与数据校验、只读默认、目录互斥与启动失败清理。 |
+| 服务托管与发布包 | 已有接入前台编排；系统服务集成、voter/CIFS 全链路编排、可安装发布包和完整备份恢复尚未完成。 |
 | Windows/macOS、硬件掉电 | 尚未验收，不以 Linux smbclient 或进程 SIGKILL 结果代替。 |
 
 登记本轮实际版本、内核/Samba 版本、机器与物理故障域、操作日志和结果。全部部署项完成前，NASFS-8 保持进行中。

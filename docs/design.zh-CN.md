@@ -645,3 +645,13 @@ Debug 与 Safe 完整 SMB 故障套件通过，矩阵增至十三例；35 项单
 本地目录集群测试与真实 CIFS 的 Safe 完整 SMB E2E 覆盖空库初始化、重复调用、已有损坏对象保持原样，以及未登记后端在写目录前拒绝；挂载身份故障套件同时验证 init-backend 拒绝本地回落、错误共享及跨挂载 staging。35 项单测、Debug 集群 E2E 与 Safe SMB E2E 通过。
 
 新增 `docs/operations.zh-CN.md`，提供依赖与权限检查、三 voter 身份/地址、NAS CIFS 挂载与后端登记、初始化、单可写 FUSE/Samba 入口、首文件下载与副本检查、按依赖顺序停止/重启，以及挂载故障、不确定写入、缺失/损坏副本和元数据本地重建的恢复说明。明确日志位置、guest/明文范围、容量上限、构建 RPATH 与发布包限制，并区分 E2E 已有证据和未完成的真实多机部署签收；NASFS-8 仍进行中。
+
+## 36. 接入节点 FUSE/Samba 生命周期编排
+
+新增前台 helper `tools/serve_access.py`，默认只读，显式 `--write-backends 1,2` 同时启用可写 FUSE 和 Samba。要求预先存在的空挂载点和挂载点之外的新状态目录；通过底层目录描述符 flock 避免多个 helper 并发抢占同一路径，拒绝现有挂载或非空目录。它管理当前接入机的两个子进程，不管理 voter/CIFS 或跨机可写入口。
+
+启动时等待 mountinfo 确认 nas-fs FUSE 挂载，再复用 serve_smb.export 启动 Samba，输出含 PID/端口/模式的 ready JSON。停止顺序为 Samba 进程组、FUSE 卸载、等待/终止残留 FUSE；任一子进程意外退出都会关闭另一侧并返回失败。mountinfo 检查可识别 SIGKILL 后的断开挂载，避免 ismount() 误判。日志保存在状态目录的 fuse.log 与 s/ 子目录，重启使用新状态目录，保留诊断。
+
+Debug/Safe 实际 CIFS/FUSE/SMB E2E 验证首次可写上传、正常 SIGTERM 停止、分别 SIGKILL FUSE 和 Samba、同挂载点重复启动后原文件内容与双副本健康、只读默认拒绝上传，以及非空/已占用目录拒绝、启动失败清理；Debug 另验证持有底层目录锁时第二个 helper 在启动前失败。验证停止后无 FUSE 挂载、两个主子进程退出且 SMB 端口关闭。
+
+ready 只表示服务启动，不等于完整数据健康；helper 自身 SIGKILL 不能执行清理，忙挂载不自动 lazy-unmount。没有子进程自动重启、系统服务单元或发布打包；完整机器部署签收仍待完成。中文操作手册现以统一入口为推荐路径，保留分进程调试入口和完整依赖顺序。
