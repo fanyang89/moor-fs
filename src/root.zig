@@ -6,6 +6,8 @@ pub const runtime = @import("runtime.zig");
 pub const objects = @import("objects.zig");
 pub const file_wal = @import("file_wal.zig");
 pub const file_store = @import("file_store.zig");
+pub const mutable_access = @import("mutable_access.zig");
+pub const mutable_rpc = @import("mutable_rpc.zig");
 pub const raft = @import("raftz");
 
 test {
@@ -13,6 +15,7 @@ test {
     _ = @import("objects_test.zig");
     _ = @import("file_wal_test.zig");
     _ = @import("file_store_test.zig");
+    _ = @import("mutable_access_test.zig");
     _ = @import("metadata_test.zig");
     _ = @import("machine_test.zig");
     _ = @import("durable_test.zig");

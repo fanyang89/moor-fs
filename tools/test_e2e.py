@@ -204,6 +204,8 @@ follow symlinks = no
             command.append("--smb")
         if args.repair_faults:
             command.append("--repair-faults")
+        if args.mutable_access:
+            command.extend(["--mutable-access", args.mutable_access])
         if args.file_store:
             command = [
                 sys.executable,
@@ -252,6 +254,11 @@ follow symlinks = no
                     hashlib.sha256(path.read_bytes()).hexdigest()
                     == path.name.split("-", 1)[1]
                 )
+            if args.mutable_access:
+                leaves = list((server["mount"] / "nas-fs/mutable").iterdir())
+                assert len(leaves) == 1, leaves
+                assert (leaves[0] / "data").read_bytes() == b"baseXYne"
+                assert len(list(leaves[0].glob("wal-*"))) == 1
         if args.file_store:
             run(
                 args.executable,
@@ -298,11 +305,14 @@ def main():
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--file-store", action="store_true")
+    parser.add_argument("--mutable-access")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--gid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.file_store and args.mutable_access:
+        parser.error("--file-store and --mutable-access select different test drivers")
     if args.worker:
         if (
             os.geteuid() != 0
@@ -352,6 +362,10 @@ def main():
         command.append("--repair-faults")
     if args.file_store:
         command.append("--file-store")
+    if args.mutable_access:
+        command.extend(
+            ["--mutable-access", str(Path(args.mutable_access).resolve(strict=True))]
+        )
     result = subprocess.run(command)
     if result.returncode:
         print(f"E2E failed; workspace: {directory}", file=sys.stderr)

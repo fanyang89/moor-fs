@@ -82,6 +82,20 @@ pub fn build(b: *std.Build) void {
     wal_test.addArtifactArg(file_store_test);
     wal_test.addArg("--file-store");
     b.step("test-file-store", "Test mutable WAL files and process death on real CIFS backends (requires sudo)").dependOn(&wal_test.step);
+    const mutable_driver = b.addExecutable(.{
+        .name = "mutable-access-e2e",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mutable_access_e2e.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "nas_fs", .module = mod }},
+        }),
+    });
+    const mutable_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+    mutable_test.addArtifactArg(exe);
+    mutable_test.addArg("--mutable-access");
+    mutable_test.addArtifactArg(mutable_driver);
+    b.step("test-mutable-access", "Test guarded WAL migration and Raft reconciliation on CIFS (requires sudo)").dependOn(&mutable_test.step);
     const deps = b.addSystemCommand(&.{ "python3", "tools/deps.py", "check" });
     b.step("deps-check", "Check pinned dependency sources").dependOn(&deps.step);
     const cluster_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });

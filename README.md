@@ -819,6 +819,19 @@ This tests recovery after write, checkpoint and collection SIGKILL, competing
 openers, stable data inodes and cold CIFS remount. See design sections 39–41 for
 the planned transition and remaining metadata/read-coordination work.
 
+The guarded access-session layer additionally migrates immutable contents into a
+WAL-backed complete file, binds it through live Raft metadata, and reconciles
+recovered data checkpoints before serving reads. Its integration test is:
+
+```sh
+zig build test-mutable-access -Doptimize=safe
+```
+
+This combines three voters and two CIFS backends, tests process death and leader
+change, and retains historical objects. The session currently requires exclusive
+ownership of both replicas and serialized local callers; FUSE handle sharing and
+the user-facing SMB WAL path are still pending. See design section 43.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -132,10 +132,7 @@ pub const Store = struct {
         const current = try Store.openMapping(self.io, mapping, false);
         defer current.close();
         for ([_]Dir{ self.root, self.staging, self.objects }, [_]Dir{ current.root, current.staging, current.objects }) |pinned, fresh| {
-            const a: File = .{ .handle = pinned.handle, .flags = .{ .nonblocking = false } };
-            const b: File = .{ .handle = fresh.handle, .flags = .{ .nonblocking = false } };
-            if (try mount.mountId(self.io, pinned) != try mount.mountId(self.io, fresh) or
-                (try a.stat(self.io)).inode != (try b.stat(self.io)).inode) return error.BackendMountMismatch;
+            try validateDirectory(self.io, pinned, fresh);
         }
     }
 
@@ -204,6 +201,13 @@ pub const Store = struct {
         if (replace_corrupt) @import("repair_fault.zig").checkpoint(.after_sync);
     }
 };
+
+pub fn validateDirectory(io: Io, pinned: Dir, fresh: Dir) !void {
+    const a: File = .{ .handle = pinned.handle, .flags = .{ .nonblocking = false } };
+    const b: File = .{ .handle = fresh.handle, .flags = .{ .nonblocking = false } };
+    if (try mount.mountId(io, pinned) != try mount.mountId(io, fresh) or
+        (try a.stat(io)).inode != (try b.stat(io)).inode) return error.BackendMountMismatch;
+}
 
 /// A backend-resident mutable file. Installation consumes its writable descriptor.
 pub const Stage = struct {
