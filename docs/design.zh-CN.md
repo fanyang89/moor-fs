@@ -820,3 +820,15 @@ WAL FUSE/SMB 构建入口在启用故障注入时自动传 `--wal-faults`，测�
 本地 Debug 与真实双 CIFS Safe 的四场景矩阵均通过，既有 WAL/SMB/supervisor 回归同时通过。启用故障注入的 Debug/Safe 单测各 81 项通过。另以正常 Safe 构建设置 `NAS_FS_REPAIR_STOP=mutable_first_chunk` 运行 WAL FUSE 套件，确认生产构建不会被测试环境变量暂停。fmt/diff 检查通过。
 
 本节补齐第46节遗留的修复复制中真实 SIGKILL 验证；底层 NAS 和操作系统仍持续运行，因此不把该结果视为硬件掉电、控制器缓存丢失或断网 fencing 验收。seal 发布/失效窗口仍主要由构造磁盘中间状态的单测覆盖。
+
+## 48. 基线发布与写前失效的真实进程中断验收
+
+继续复用故障注入构建，在 seal 第一侧 publish 返回后、双侧 publish 返回后，以及第一侧删除并同步目录后、双侧删除并同步目录后增加确定性暂停点。后两处仍位于任何 redo 追加和 data 修改之前。正常构建直接跳过暂停，不改变发布与失效顺序。
+
+新增 test_seal_faults，由已有 `--wal-faults` 驱动。两项发布场景暂停 seal-mutable 后 SIGKILL，验证 data/checkpoint/WAL 文件集合与字节、元数据及 data inode 不变，剩余一份或两份基线都能在重开时验证当前内容，重新封存成功。测试从已同步且未封存的文件开始，不混淆数据检查点推进与基线发布窗口。
+
+四项失效场景分别对 write/truncate，在单侧或双侧目录同步完成后暂停并杀死专用 FUSE 进程。独立子进程执行系统调用，父进程确认调用尚未返回，同时从后端检查数据和 WAL 均未变化。进程被杀后调用必须失败；实际内核返回 ECONNABORTED，测试同样接受 EIO/ENOTCONN。单侧失效后残余摘要字节保持、重开仍是 sealed；双侧失效后重开是 unsealed，repair-mutable 返回 MissingSeal。之后从正常挂载重试修改，验证双侧内容、无遗留 seal、inode 保持，再显式建立新的匹配基线。
+
+本地 Debug 和真实双 CIFS Safe 的六项场景通过，既有四项修复 SIGKILL、WAL/SMB/supervisor 套件继续通过。故障注入 Debug/Safe 各 81 项单测通过；正常 Safe 构建带 `NAS_FS_REPAIR_STOP=seal_first_invalidated` 运行 WAL FUSE 也通过，验证部署构建不受暂停变量影响。fmt/diff 检查通过。
+
+本节补齐基线发布/失效关键持久边界的真实进程中断验证；没有模拟 NAS 同时断电、控制器丢缓存或目录 fsync 尚未完成时的硬件故障。活跃修改期间的持续内容证据和跨节点 fencing 仍未实现。

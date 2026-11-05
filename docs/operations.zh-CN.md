@@ -150,6 +150,8 @@ WAL 普通读取现在比对两侧大小和请求范围内的字节，任一侧�
 
 修复中断验收：`zig build test-wal-smb -Dfuse=true -Dfault-injection=true -Doptimize=safe` 在真实双 CIFS 上分别对两个修复方向执行首块复制后、目标 fsync 后的 SIGKILL，验证源/摘要/检查点/WAL 保留、独占锁与原地重试。无需 CIFS 的本地版本为 `zig build test-wal-fuse -Dfuse=true -Dfault-injection=true`。这些入口自动启用 `--wal-faults`，必须配套故障注入构建；不要将该构建作为常规部署产物。正常构建忽略测试暂停环境变量。
 
+同一套件还覆盖 seal 单侧/双侧发布后的 SIGKILL，以及 write、truncate 在单侧/双侧摘要持久失效后的 SIGKILL，共六个基线生命周期场景。中断时数据和 WAL 尚未修改；仅删除一侧时重开仍可用剩余基线验证，两侧已删除时以未封存状态恢复，修复命令必须返回 `MissingSeal`。调用者看到未完成的 FUSE 写入失败后，可在重开会话后重试，再显式建立新基线；Linux 可能将该失败报告为 `EIO`、`ENOTCONN` 或 `ECONNABORTED`，不能据错误名推断数据是否已经写入。
+
 挂载点必须是现有空目录；helper 对底层目录加互斥锁并拒绝已挂载路径。状态目录必须是挂载点之外的新目录，父目录须存在，建议短路径。每次重启复用原挂载点、换一个新状态目录，保留旧日志。helper 不启动 voter、不挂载 CIFS、不自动重启子进程，也不提供跨节点 writer fencing。
 
 ### 分进程调试入口

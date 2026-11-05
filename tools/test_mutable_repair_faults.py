@@ -8,6 +8,20 @@ import subprocess
 import time
 
 
+def wait_stopped(process, point, log):
+    deadline = time.monotonic() + 60
+    while True:
+        pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+        if pid:
+            if os.WIFSTOPPED(status):
+                assert os.WSTOPSIG(status) == signal.SIGSTOP, status
+                return
+            process.returncode = os.waitstatus_to_exitcode(status)
+            raise AssertionError(f"process missed {point}: {log.read_text()}")
+        assert time.monotonic() < deadline, f"checkpoint timed out: {point}"
+        time.sleep(0.02)
+
+
 def test_mutable_repair_faults(
     executable, directory, endpoints, config, inode, path, data, run
 ):
@@ -53,21 +67,7 @@ def test_mutable_repair_faults(
                     env={**os.environ, "NAS_FS_REPAIR_STOP": point},
                 )
             try:
-                deadline = time.monotonic() + 60
-                while True:
-                    pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
-                    if pid:
-                        if os.WIFSTOPPED(status):
-                            assert os.WSTOPSIG(status) == signal.SIGSTOP, status
-                            break
-                        process.returncode = os.waitstatus_to_exitcode(status)
-                        raise AssertionError(
-                            f"repair missed {point}: {log.read_text()}"
-                        )
-                    assert time.monotonic() < deadline, (
-                        f"repair checkpoint timed out: {point}"
-                    )
-                    time.sleep(0.02)
+                wait_stopped(process, point, log)
                 expected = (
                     content[:chunk] + damaged[chunk:]
                     if point == "mutable_first_chunk"

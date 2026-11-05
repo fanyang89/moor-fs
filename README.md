@@ -884,6 +884,12 @@ retry. Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.
 
+The same fault-enabled targets also kill seal publication after one or both
+copies are durable, and kill FUSE during one-sided or completed seal
+invalidation before both write and truncate. They verify unchanged data/WAL,
+failure of the interrupted syscall, recovery with a remaining valid seal or
+without a seal, and successful mutation retry followed by resealing.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -388,8 +388,19 @@ os._exit(1)
         )
         if faults:
             from test_mutable_repair_faults import test_mutable_repair_faults
+            from test_seal_faults import test_seal_faults
 
             test_mutable_repair_faults(
+                executable,
+                directory,
+                endpoints,
+                config,
+                inode,
+                recovered / "wal-file",
+                physical,
+                run,
+            )
+            test_seal_faults(
                 executable,
                 directory,
                 endpoints,

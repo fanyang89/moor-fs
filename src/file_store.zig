@@ -206,13 +206,15 @@ pub const Store = struct {
     fn invalidateSeal(self: *Store) !void {
         if (self.seal == null) return;
         errdefer self.session.failed = true;
-        for (self.dirs) |dir| {
+        for (self.dirs, 0..) |dir, index| {
             dir.deleteFile(self.session.io, "seal") catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
             try objects.syncDir(self.session.io, dir);
+            if (index == 0) @import("repair_fault.zig").checkpoint(.seal_first_invalidated);
         }
+        @import("repair_fault.zig").checkpoint(.seal_invalidated);
         self.seal = null;
     }
 
@@ -226,7 +228,11 @@ pub const Store = struct {
         const b = try objects.hash(self.session.io, self.session.replicas[1].data);
         if (a.size != self.checkpoint.size or !std.meta.eql(a, b)) return error.ReplicaContentMismatch;
         const baseline: Seal = .{ .next = self.checkpoint.next, .size = a.size, .sha256 = a.sha256 };
-        for (self.dirs) |dir| try baseline.publish(self.session.io, dir, self.session.identity);
+        for (self.dirs, 0..) |dir, index| {
+            try baseline.publish(self.session.io, dir, self.session.identity);
+            if (index == 0) @import("repair_fault.zig").checkpoint(.seal_first_published);
+        }
+        @import("repair_fault.zig").checkpoint(.seal_published);
         self.seal = baseline;
     }
 
