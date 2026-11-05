@@ -81,6 +81,7 @@ const Client = struct {
     }
 
     fn getVersion(self: *Client, node: m.Node) !?m.Version {
+        if (node.mutable_file != null) return error.MutableFileUnsupported;
         if (node.kind == .directory or node.current_version == 0) return null;
         const record = try self.query(?m.Version, "Version", .{ .id = node.current_version });
         defer record.deinit();
@@ -248,12 +249,12 @@ fn errno(err: anyerror) c_int {
         error.DirectoryChanged => 11,
         error.IsDirectory => 21,
         error.NoPublishedVersion => 61,
-        error.NoBackendConfig => 95,
+        error.NoBackendConfig, error.MutableFileUnsupported => 95,
         error.ReadOnly => 30,
         error.AlreadyExists => 17,
         error.NotEmpty => 39,
         error.InvalidName, error.InvalidReplicaPolicy => 22,
-        error.VersionConflict => 11,
+        error.VersionConflict, error.StorageConflict, error.SequenceConflict => 11,
         error.CapacityExceeded => 28,
         else => 5,
     };
@@ -269,6 +270,8 @@ fn checkStatus(status: m.Status) !void {
         .not_empty => error.NotEmpty,
         .invalid_name, .cycle, .root_protected => error.InvalidName,
         .version_conflict => error.VersionConflict,
+        .storage_conflict => error.StorageConflict,
+        .sequence_conflict => error.SequenceConflict,
         .capacity_exceeded => error.CapacityExceeded,
         else => error.InvalidResponse,
     };

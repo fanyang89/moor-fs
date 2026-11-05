@@ -405,7 +405,7 @@ test "schema one databases and snapshots upgrade without changing legacy request
     {
         var txn = try store.env.begin(true);
         defer txn.abort();
-        try t.expect(std.mem.indexOf(u8, (try txn.get(store.meta_db, "state")).?, "\"schema\":2") != null);
+        try t.expect(std.mem.indexOf(u8, (try txn.get(store.meta_db, "state")).?, "\"schema\":3") != null);
         try t.expectEqual(@as(usize, 0), try txn.count(store.backends_db));
     }
     const legacy = "{\"version\":1,\"index\":3,\"term\":1,\"state\":{\"next_id\":2,\"nodes\":[{\"id\":1,\"parent\":0,\"name\":\"\",\"kind\":\"directory\",\"replicas\":\"two\"}],\"receipts\":[]}}";
@@ -436,4 +436,162 @@ test "publication map-full leaves previous version and deduplication state intac
         current = index;
     }
     return error.ExpectedMapFull;
+}
+
+test "mutable checkpoint CAS agrees with memory and survives restart snapshot and receipt replay" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var restored_fixture = try Fixture.init();
+    defer restored_fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const attachment: m.Request = .{ .request_id = 5, .command = .{ .mutable_file = .{ .attach = .{
+        .inode = 2,
+        .expected_version = 100,
+        .file = .{ .generation = 7, .next_sequence = 1, .size = 3, .backends = .{ 1, 2 } },
+    } } } };
+    const checkpoint: m.Request = .{ .request_id = 6, .command = .{ .mutable_file = .{ .checkpoint = .{
+        .inode = 2,
+        .generation = 7,
+        .expected_sequence = 1,
+        .next_sequence = 4,
+        .size = 11,
+    } } } };
+    const Case = struct { request: m.Request, status: m.Status };
+    const cases = [_]Case{
+        .{ .request = .{ .request_id = 1, .command = .{ .create = .{ .parent = 1, .name = "mutable", .kind = .file } } }, .status = .ok },
+        .{ .request = .{ .request_id = 2, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } }, .status = .ok },
+        .{ .request = .{ .request_id = 3, .command = .{ .register_backend = .{ .id = 2, .failure_domain = 20 } } }, .status = .ok },
+        .{ .request = .{ .request_id = 4, .command = publishCommand(100, 2, 0, .{ 1, 2 }) }, .status = .ok },
+        .{ .request = attachment, .status = .ok },
+        .{ .request = checkpoint, .status = .ok },
+        .{ .request = .{ .request_id = 7, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 7, .expected_sequence = 1, .next_sequence = 5, .size = 20 } } } }, .status = .sequence_conflict },
+        .{ .request = .{ .request_id = 8, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 8, .expected_sequence = 4, .next_sequence = 5, .size = 20 } } } }, .status = .storage_conflict },
+        .{ .request = .{ .request_id = 9, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 7, .expected_sequence = 4, .next_sequence = 3, .size = 20 } } } }, .status = .sequence_conflict },
+        .{ .request = .{ .request_id = 10, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 7, .expected_sequence = 4, .next_sequence = 4, .size = 20 } } } }, .status = .sequence_conflict },
+        .{ .request = .{ .request_id = 11, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 7, .expected_sequence = 4, .next_sequence = 7, .size = 2 } } } }, .status = .ok },
+        .{ .request = checkpoint, .status = .ok },
+        .{ .request = attachment, .status = .ok },
+        .{ .request = .{ .request_id = 12, .command = .{ .set_replicas = .{ .id = 2, .replicas = .one } } }, .status = .replica_mismatch },
+        .{ .request = .{ .request_id = 13, .command = publishCommand(101, 2, 0, .{ 1, 2 }) }, .status = .storage_conflict },
+        .{ .request = .{ .request_id = 14, .command = attachment.command }, .status = .storage_conflict },
+        .{ .request = .{ .request_id = 15, .command = .{ .rename = .{ .id = 2, .parent = 1, .name = "renamed" } } }, .status = .ok },
+    };
+    for (cases, 1..) |case, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(case.request);
+        try t.expectEqual(case.status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, case.request));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const image = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer image.deinit();
+        try t.expectEqual(@as(u32, 3), image.value.version);
+        try t.expectEqualDeep(memory.snapshot(), image.value.state);
+        var restored = try Store.open(t.allocator, restored_fixture.path, 16 * 1024 * 1024);
+        defer restored.close();
+        try restored.restore(index, 1, bytes);
+        const snapshot = try restored.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(snapshot);
+        try t.expectEqualStrings(bytes, snapshot);
+    }
+    try t.expectEqual(@as(u64, 0), memory.get(2).?.current_version);
+    try t.expectEqual(@as(u64, 7), memory.get(2).?.mutable_file.?.next_sequence);
+    try t.expectEqual(@as(u64, 2), memory.get(2).?.mutable_file.?.size);
+    try t.expectEqual(@as(usize, 1), memory.versions.items.len);
+}
+
+test "schema two upgrades preserve published objects and legacy publish receipts" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const publication: m.Request = .{ .request_id = 3, .command = publishCommand(100, 2, 0, .{ 1, 0 }) };
+    {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        _ = try apply(&store, 1, .{ .request_id = 1, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } });
+        _ = try apply(&store, 2, .{ .request_id = 2, .command = .{ .create = .{ .parent = 1, .name = "legacy", .kind = .file, .replicas = .one } } });
+        _ = try apply(&store, 3, publication);
+        var txn = try store.env.begin(false);
+        defer txn.abort();
+        try txn.put(store.meta_db, "state", "{\"schema\":2,\"index\":3,\"term\":1,\"next_id\":3}");
+        try txn.put(store.nodes_db, &.{ 0, 0, 0, 0, 0, 0, 0, 2 }, "{\"id\":2,\"parent\":1,\"name\":\"legacy\",\"kind\":\"file\",\"replicas\":\"one\",\"current_version\":100}");
+        try txn.commit();
+    }
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const node = (try store.get(t.allocator, 2)).?;
+    defer t.allocator.free(node.name);
+    try t.expect(node.mutable_file == null);
+    try t.expectEqual(@as(u64, 100), node.current_version);
+    try t.expectEqualDeep(publication.command.publish.version, (try store.getVersion(100)).?);
+    try t.expectEqual(m.Status.ok, (try apply(&store, 4, publication)).status);
+    const bytes = try store.snapshot(t.allocator, 4, 1);
+    defer t.allocator.free(bytes);
+    const image = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+    defer image.deinit();
+    var legacy = image.value;
+    legacy.version = 2;
+    legacy.index = 5;
+    const old_snapshot = try std.json.Stringify.valueAlloc(t.allocator, legacy, .{});
+    defer t.allocator.free(old_snapshot);
+    try store.restore(5, 1, old_snapshot);
+    try t.expectEqual(m.Status.ok, (try apply(&store, 6, publication)).status);
+}
+
+test "data checkpoint ahead of metadata is reconciled after restart without allocating versions" {
+    const files = @import("file_store.zig");
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var backend = t.tmpDir(.{});
+    defer backend.cleanup();
+    try backend.dir.createDir(t.io, "a", .default_dir);
+    try backend.dir.createDir(t.io, "b", .default_dir);
+    const a = try backend.dir.openDir(t.io, "a", .{ .iterate = true });
+    defer a.close(t.io);
+    const b = try backend.dir.openDir(t.io, "b", .{ .iterate = true });
+    defer b.close(t.io);
+    const identity: @import("file_wal.zig").Identity = .{ .inode = 2, .generation = 7 };
+    {
+        var data = try files.Store.create(t.allocator, t.io, identity, .{ a, b });
+        defer data.close();
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        _ = try apply(&store, 1, .{ .request_id = 1, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } });
+        _ = try apply(&store, 2, .{ .request_id = 2, .command = .{ .register_backend = .{ .id = 2, .failure_domain = 20 } } });
+        _ = try apply(&store, 3, .{ .request_id = 3, .command = .{ .create = .{ .parent = 1, .name = "mutable", .kind = .file } } });
+        try t.expectEqual(m.Status.ok, (try apply(&store, 4, .{ .request_id = 4, .command = .{ .mutable_file = .{ .attach = .{
+            .inode = 2,
+            .expected_version = 0,
+            .file = .{ .generation = 7, .next_sequence = 1, .size = 0, .backends = .{ 1, 2 } },
+        } } } })).status);
+        try data.write("durable", 0);
+        try data.sync();
+        // Restart before metadata learns the new checkpoint.
+    }
+    var data = try files.Store.open(t.allocator, t.io, identity, .{ a, b });
+    defer data.close();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const node = (try store.get(t.allocator, 2)).?;
+    defer t.allocator.free(node.name);
+    try t.expectEqual(@as(u64, 1), node.mutable_file.?.next_sequence);
+    try t.expectEqual(@as(u64, 2), data.checkpoint.next);
+    const request: m.Request = .{ .request_id = 5, .command = .{ .mutable_file = .{ .checkpoint = .{
+        .inode = 2,
+        .generation = identity.generation,
+        .expected_sequence = node.mutable_file.?.next_sequence,
+        .next_sequence = data.checkpoint.next,
+        .size = data.checkpoint.size,
+    } } } };
+    try t.expectEqual(m.Status.ok, (try apply(&store, 5, request)).status);
+    try data.collect();
+    try t.expectEqual(m.Status.ok, (try apply(&store, 6, request)).status);
+    const current = (try store.get(t.allocator, 2)).?;
+    defer t.allocator.free(current.name);
+    try t.expectEqual(@as(u64, 7), current.mutable_file.?.size);
+    try t.expectEqual(@as(u64, 0), current.current_version);
+    var txn = try store.env.begin(true);
+    defer txn.abort();
+    try t.expectEqual(@as(usize, 0), try txn.count(store.versions_db));
 }

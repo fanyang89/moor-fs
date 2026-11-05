@@ -2,6 +2,37 @@ const std = @import("std");
 const m = @import("metadata.zig");
 const testing = std.testing;
 
+test "mutable binding validates CAS replicas identity and snapshot invariants" {
+    var state = try m.State.init(testing.allocator);
+    defer state.deinit();
+    _ = try create(&state, 1, 1, "file", .file);
+    _ = try state.apply(.{ .request_id = 2, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } });
+    _ = try state.apply(.{ .request_id = 3, .command = .{ .register_backend = .{ .id = 2, .failure_domain = 20 } } });
+    var file: m.MutableFile = .{ .generation = 7, .next_sequence = 1, .size = 0, .backends = .{ 1, 2 } };
+    var node = state.get(2).?;
+    try testing.expectEqual(m.Status.version_conflict, m.updateMutable(&node, .{ .attach = .{ .inode = 2, .expected_version = 100, .file = file } }, state.backends.items));
+    for ([_][2]u64{ .{ 1, 0 }, .{ 1, 1 }, .{ 1, 99 } }, [_]m.Status{ .replica_mismatch, .same_failure_domain, .backend_not_found }) |backends, expected| {
+        file.backends = backends;
+        try testing.expectEqual(expected, m.updateMutable(&node, .{ .attach = .{ .inode = 2, .expected_version = 0, .file = file } }, state.backends.items));
+        try testing.expect(node.mutable_file == null);
+    }
+    file.backends = .{ 1, 2 };
+    file.generation = 0;
+    try testing.expectEqual(m.Status.invalid_request, m.updateMutable(&node, .{ .attach = .{ .inode = 2, .expected_version = 0, .file = file } }, state.backends.items));
+    file.generation = 7;
+    try testing.expectEqual(m.Status.ok, m.updateMutable(&node, .{ .attach = .{ .inode = 2, .expected_version = 0, .file = file } }, state.backends.items));
+    state.nodes.items[1] = node;
+    try m.validateSnapshot(state.snapshot());
+    state.nodes.items[1].current_version = 9;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.nodes.items[1].current_version = 0;
+    state.nodes.items[1].mutable_file.?.next_sequence = 0;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+    state.nodes.items[1].mutable_file.?.next_sequence = 1;
+    state.nodes.items[1].replicas = .one;
+    try testing.expectError(error.InvalidSnapshot, m.validateSnapshot(state.snapshot()));
+}
+
 test "version hashes have a stable numeric JSON representation for arbitrary bytes" {
     for ([_]u8{ 0, 7, 65, 128, 255 }) |byte| {
         const version: m.Version = .{ .id = 1, .inode = 2, .size = 0, .sha256 = @splat(byte), .backends = .{ 1, 0 } };

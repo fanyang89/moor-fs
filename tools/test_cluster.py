@@ -265,6 +265,45 @@ def main():
                 version
             )
             assert run("get", endpoints, "2")["current_version"] == 10
+            mutable_inode = apply(first, create(200, "wal-metadata"))["inode"]
+            binding = {
+                "request_id": 201,
+                "command": {
+                    "mutable_file": {
+                        "attach": {
+                            "inode": mutable_inode,
+                            "expected_version": 0,
+                            "file": {
+                                "generation": 7,
+                                "next_sequence": 1,
+                                "size": 0,
+                                "backends": [1, 2],
+                            },
+                        }
+                    }
+                },
+            }
+
+            def mutable_checkpoint(request_id, expected, next_sequence, size):
+                return {
+                    "request_id": request_id,
+                    "command": {
+                        "mutable_file": {
+                            "checkpoint": {
+                                "inode": mutable_inode,
+                                "generation": 7,
+                                "expected_sequence": expected,
+                                "next_sequence": next_sequence,
+                                "size": size,
+                            }
+                        }
+                    },
+                }
+
+            checkpoint_request = mutable_checkpoint(202, 1, 4, 123)
+            mutable_result = {"status": "ok", "inode": mutable_inode}
+            assert apply(first, binding) == mutable_result
+            assert apply(first, checkpoint_request) == mutable_result
             print(
                 "PASS: election, proposal, deduplication, validation, leader-only ReadIndex, store lock",
                 flush=True,
@@ -294,6 +333,31 @@ def main():
             assert run("apply", endpoints, json.dumps(request)) == result
             assert apply(elected, request) == result
             assert run("apply", endpoints, json.dumps(initial_publication)) == result
+            assert run("apply", endpoints, json.dumps(binding)) == mutable_result
+            assert (
+                run("apply", endpoints, json.dumps(checkpoint_request))
+                == mutable_result
+            )
+            checkpoints = [
+                mutable_checkpoint(203, 4, 5, 20),
+                mutable_checkpoint(204, 4, 6, 30),
+            ]
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                results = list(
+                    workers.map(
+                        lambda value: run("apply", endpoints, json.dumps(value)),
+                        checkpoints,
+                    )
+                )
+            assert sorted(value["status"] for value in results) == [
+                "ok",
+                "sequence_conflict",
+            ]
+            mutable_winner = next(
+                i for i, value in enumerate(results) if value["status"] == "ok"
+            )
+            mutable_state = run("get", endpoints, mutable_inode)["mutable_file"]
+            assert mutable_state["next_sequence"] == 5 + mutable_winner
             competing = [publication(107, 11, 10), publication(108, 12, 10)]
             with ThreadPoolExecutor(max_workers=2) as workers:
                 outcomes = list(
@@ -349,7 +413,7 @@ def main():
                 for i in range(3)
             ]
             assert states[0] == states[1] == states[2]
-            assert len(states[0]["nodes"]) == 30
+            assert len(states[0]["nodes"]) == 31
             assert (
                 "applying snapshot at index"
                 in (directory / f"node-{first}.log").read_text()
@@ -377,7 +441,19 @@ def main():
                 after = page["next"]
                 if after is None:
                     break
-            assert names == sorted(["original"] + [f"file-{i}" for i in range(2, 30)])
+            assert names == sorted(
+                ["original", "wal-metadata"] + [f"file-{i}" for i in range(2, 30)]
+            )
+            assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
+            assert (
+                run("apply", endpoints, json.dumps(checkpoint_request))
+                == mutable_result
+            )
+            assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
+            print(
+                "PASS: mutable checkpoint CAS, original receipt replay across leader change, snapshot and whole-cluster restart",
+                flush=True,
+            )
             print(
                 "PASS: leader discovery, automatic write retry, lookup and paginated directory reads",
                 flush=True,
@@ -429,6 +505,20 @@ def main():
                 flush=True,
             )
             from test_data import test_data
+
+            assert (
+                run(
+                    "apply",
+                    endpoints,
+                    json.dumps(
+                        {
+                            "request_id": 205,
+                            "command": {"remove": {"id": mutable_inode}},
+                        }
+                    ),
+                )
+                == mutable_result
+            )
 
             test_data(
                 executable,

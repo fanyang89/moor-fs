@@ -21,6 +21,17 @@ pub const Version = struct {
     }
 };
 pub const Publication = struct { expected_version: u64, version: Version };
+/// The last checkpoint recorded in Raft, not a live view of in-flight writes.
+pub const MutableFile = struct {
+    generation: u64,
+    next_sequence: u64,
+    size: u64,
+    backends: [2]u64,
+};
+pub const MutableUpdate = union(enum) {
+    attach: struct { inode: u64, expected_version: u64, file: MutableFile },
+    checkpoint: struct { inode: u64, generation: u64, expected_sequence: u64, next_sequence: u64, size: u64 },
+};
 pub const Replicas = enum { one, two };
 pub const Kind = enum { directory, file };
 pub const Node = struct {
@@ -30,6 +41,7 @@ pub const Node = struct {
     kind: Kind,
     replicas: Replicas,
     current_version: u64 = 0,
+    mutable_file: ?MutableFile = null,
 };
 pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
@@ -40,6 +52,7 @@ pub const Command = union(enum) {
     set_replicas: struct { id: u64, replicas: Replicas },
     register_backend: Backend,
     publish: Publication,
+    mutable_file: MutableUpdate,
 };
 pub const Request = struct { version: u32 = 1, request_id: u64, command: Command };
 pub const Status = enum(u8) {
@@ -61,6 +74,8 @@ pub const Status = enum(u8) {
     replica_mismatch = 15,
     backend_not_found = 16,
     same_failure_domain = 17,
+    storage_conflict = 18,
+    sequence_conflict = 19,
 };
 pub const Result = struct { status: Status, inode: u64 = 0 };
 pub const Receipt = struct { request_id: u64, digest: [32]u8, result: Result };
@@ -202,6 +217,7 @@ pub const State = struct {
             },
             .set_replicas => |c| {
                 const i = self.find(c.id) orelse return .{ .status = .not_found };
+                if (self.nodes.items[i].mutable_file != null and c.replicas != .two) return .{ .status = .replica_mismatch };
                 self.nodes.items[i].replicas = c.replicas;
                 return .{ .status = .ok, .inode = c.id };
             },
@@ -221,6 +237,12 @@ pub const State = struct {
                 try self.versions.append(self.allocator, publication.version);
                 self.nodes.items[i].current_version = publication.version.id;
                 return .{ .status = .ok, .inode = publication.version.inode };
+            },
+            .mutable_file => |update| {
+                const id = mutableInode(update);
+                const i = self.find(id) orelse return .{ .status = .not_found };
+                const status = updateMutable(&self.nodes.items[i], update, self.backends.items);
+                return .{ .status = status, .inode = if (status == .ok) id else 0 };
             },
         }
     }
@@ -283,6 +305,9 @@ pub fn validateSnapshot(data: Snapshot) !void {
     if (root.id != root_id or root.parent != 0 or root.name.len != 0 or root.kind != .directory) return error.InvalidSnapshot;
     for (data.nodes, 0..) |node, i| {
         if (node.id == 0 or node.id >= data.next_id) return error.InvalidSnapshot;
+        if (node.mutable_file) |file| {
+            if (node.kind != .file or node.current_version != 0 or node.replicas != .two or mutableStatus(file, data.backends) != .ok) return error.InvalidSnapshot;
+        }
         if (node.current_version != 0) {
             if (node.kind != .file) return error.InvalidSnapshot;
             const version = for (data.versions) |v| {
@@ -316,6 +341,7 @@ pub fn validateSnapshot(data: Snapshot) !void {
 
 pub fn publicationStatus(node: Node, publication: Publication, backends: []const Backend) Status {
     if (node.kind != .file) return .not_file;
+    if (node.mutable_file != null) return .storage_conflict;
     if (node.current_version != publication.expected_version) return .version_conflict;
     const status = versionStatus(publication.version, backends);
     if (status != .ok) return status;
@@ -325,14 +351,58 @@ pub fn publicationStatus(node: Node, publication: Publication, backends: []const
 
 fn versionStatus(version: Version, backends: []const Backend) Status {
     if (version.id == 0 or version.inode <= root_id or version.size > std.math.maxInt(i64) or version.backends[0] == 0) return .invalid_version;
+    return replicaStatus(version.backends, backends);
+}
+
+fn replicaStatus(ids: [2]u64, backends: []const Backend) Status {
     const first = for (backends) |backend| {
-        if (backend.id == version.backends[0]) break backend;
+        if (backend.id == ids[0]) break backend;
     } else return .backend_not_found;
-    if (version.backends[1] != 0) {
+    if (ids[1] != 0) {
         const second = for (backends) |backend| {
-            if (backend.id == version.backends[1]) break backend;
+            if (backend.id == ids[1]) break backend;
         } else return .backend_not_found;
         if (first.failure_domain == second.failure_domain) return .same_failure_domain;
+    }
+    return .ok;
+}
+
+pub fn mutableInode(update: MutableUpdate) u64 {
+    return switch (update) {
+        inline else => |c| c.inode,
+    };
+}
+
+fn mutableStatus(file: MutableFile, backends: []const Backend) Status {
+    if (file.generation == 0 or file.next_sequence == 0 or file.size > std.math.maxInt(i64)) return .invalid_request;
+    if (file.backends[0] == 0 or file.backends[1] == 0) return .replica_mismatch;
+    return replicaStatus(file.backends, backends);
+}
+
+/// Shared deterministic transition for the in-memory and transactional stores.
+/// Data durability and exclusive ownership must be established by the caller.
+pub fn updateMutable(node: *Node, update: MutableUpdate, backends: []const Backend) Status {
+    if (node.id != mutableInode(update)) return .not_found;
+    if (node.kind != .file) return .not_file;
+    switch (update) {
+        .attach => |c| {
+            if (node.mutable_file != null) return .storage_conflict;
+            if (node.current_version != c.expected_version) return .version_conflict;
+            if (node.replicas != .two) return .replica_mismatch;
+            const status = mutableStatus(c.file, backends);
+            if (status != .ok) return status;
+            node.mutable_file = c.file;
+            node.current_version = 0;
+        },
+        .checkpoint => |c| {
+            const file = node.mutable_file orelse return .storage_conflict;
+            if (c.generation != file.generation) return .storage_conflict;
+            if (c.size > std.math.maxInt(i64) or c.next_sequence == 0) return .invalid_request;
+            if (c.expected_sequence != file.next_sequence or c.next_sequence < file.next_sequence) return .sequence_conflict;
+            if (c.next_sequence == file.next_sequence and c.size != file.size) return .sequence_conflict;
+            node.mutable_file.?.next_sequence = c.next_sequence;
+            node.mutable_file.?.size = c.size;
+        },
     }
     return .ok;
 }

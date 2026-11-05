@@ -7,7 +7,7 @@ pub const max_snapshot_bytes = 8 * 1024 * 1024;
 pub const response_size = 10;
 
 pub const Image = struct {
-    version: u32 = 2,
+    version: u32 = 3,
     index: u64,
     term: u64,
     state: metadata.Snapshot,
@@ -92,7 +92,7 @@ pub const Machine = struct {
         };
         defer parsed.deinit();
         const image = parsed.value;
-        if ((image.version != 1 and image.version != 2) or image.index != snapshot.index or image.term != snapshot.term or
+        if ((image.version < 1 or image.version > 3) or image.index != snapshot.index or image.term != snapshot.term or
             (image.index == 0) != (image.term == 0)) return error.EntryParseError;
         const replacement = metadata.State.restore(self.allocator, image.state) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

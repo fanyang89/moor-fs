@@ -4,7 +4,7 @@ const lmdb = @import("lmdb.zig");
 const m = @import("metadata.zig");
 const protocol = @import("machine.zig");
 
-const Meta = struct { schema: u32 = 2, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
+const Meta = struct { schema: u32 = 3, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
 
 pub const ListRequest = struct { parent: u64, after: ?[]const u8 = null, limit: u8 = 16 };
 pub const Page = struct {
@@ -50,6 +50,9 @@ pub const Store = struct {
             if (meta.schema == 1) {
                 if (try txn.count(self.backends_db) != 0 or try txn.count(self.versions_db) != 0) return error.CorruptStore;
                 meta.schema = 2;
+            }
+            if (meta.schema == 2) {
+                meta.schema = 3;
                 try putJson(&txn, self.meta_db, "state", arena.allocator(), meta);
             }
             const root = (try self.readNode(&txn, arena.allocator(), m.root_id)) orelse return error.CorruptStore;
@@ -322,6 +325,7 @@ pub const Store = struct {
             },
             .set_replicas => |r| {
                 var node = (try self.readNode(txn, allocator, r.id)) orelse return .{ .status = .not_found };
+                if (node.mutable_file != null and r.replicas != .two) return .{ .status = .replica_mismatch };
                 node.replicas = r.replicas;
                 try self.putNode(txn, allocator, node);
                 return .{ .status = .ok, .inode = r.id };
@@ -356,13 +360,30 @@ pub const Store = struct {
                 try self.putNode(txn, allocator, node);
                 return .{ .status = .ok, .inode = v.inode };
             },
+            .mutable_file => |update| {
+                const id = m.mutableInode(update);
+                var node = (try self.readNode(txn, allocator, id)) orelse return .{ .status = .not_found };
+                var backends: [2]m.Backend = undefined;
+                var count: usize = 0;
+                if (update == .attach) for (update.attach.file.backends) |backend_id| {
+                    const key = idKey(backend_id);
+                    if (try txn.get(self.backends_db, &key)) |data| {
+                        backends[count] = try parse(m.Backend, allocator, data);
+                        count += 1;
+                    }
+                };
+                const status = m.updateMutable(&node, update, backends[0..count]);
+                if (status != .ok) return .{ .status = status };
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = id };
+            },
         }
     }
 
     fn readMeta(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator) !Meta {
         const data = (try txn.get(self.meta_db, "state")) orelse return error.CorruptStore;
         const meta = try parse(Meta, allocator, data);
-        if (meta.schema != 1 and meta.schema != 2) return error.UnsupportedSchema;
+        if (meta.schema < 1 or meta.schema > 3) return error.UnsupportedSchema;
         if (meta.next_id < 2 or (meta.index == 0) != (meta.term == 0)) return error.CorruptStore;
         return meta;
     }
@@ -419,7 +440,7 @@ pub const Store = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
         const image = try parse(protocol.Image, allocator, data);
-        if ((image.version != 1 and image.version != 2) or image.index != index or image.term != term or (index == 0) != (term == 0)) return error.InvalidSnapshot;
+        if ((image.version < 1 or image.version > 3) or image.index != index or image.term != term or (index == 0) != (term == 0)) return error.InvalidSnapshot;
         try m.validateSnapshot(image.state);
         var txn = try self.env.begin(false);
         defer txn.abort();

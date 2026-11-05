@@ -342,12 +342,26 @@ Raw `apply` checks validate metadata declarations only: no NAS copies, checksums
 flushes or write-session fencing are performed. A successful publication is not
 proof of physical file durability. FUSE content opens independently verify a replica.
 
-Opening a schema-1 LMDB store transactionally upgrades it to schema 2 with
-`backends` and `versions` databases. Snapshots now emit version 2; version-1
-snapshots remain readable with empty version/backend lists and zero current
-version defaults. Legacy namespace request digests remain unchanged. Downgrade
+Opening a schema-1/2 LMDB store transactionally upgrades it to schema 3, preserving
+`backends`, `versions` and existing receipts. Snapshots now emit version 3;
+version-1/2 snapshots remain readable, with absent `mutable_file` defaulting to
+null. Legacy namespace/publication request digests remain unchanged. Downgrade
 and mixed-version cluster operation are not supported; upgrade all nodes before
 issuing the new commands.
+
+The new `mutable_file.attach` metadata transition binds a prepared WAL-backed file
+generation and its two backends using `expected_version` CAS. It clears the current
+immutable-version pointer but retains historical objects/versions. Subsequent
+`mutable_file.checkpoint` requests compare generation and `expected_sequence`,
+then record the durable `next_sequence` and size without allocating an immutable
+version. Sequence rollback and changing size without advancing the sequence are
+rejected. Original request IDs still replay their original receipts.
+
+These are metadata declarations, not migration or data-recovery commands. The
+caller must establish exclusive ownership and durable backend checkpoints first.
+Existing FUSE/object commands reject mutable-file content access until the new
+access path is integrated; raw attachment therefore does not make a file usable
+through SMB. See design section 42 for the protocol and validation evidence.
 
 ### Whole-file object I/O on mounted backends
 

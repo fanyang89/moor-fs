@@ -103,6 +103,7 @@ fn currentVersion(ctx: zli.CommandContext, id: u64) !m.Version {
     defer node.deinit();
     const file = node.value orelse return error.NotFound;
     if (file.kind != .file) return error.NotFile;
+    if (file.mutable_file != null) return error.MutableFileUnsupported;
     if (file.current_version == 0) return error.NoPublishedVersion;
     const record = try query(ctx, ?m.Version, "Version", .{ .id = file.current_version });
     defer record.deinit();
