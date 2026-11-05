@@ -213,16 +213,72 @@ pub const Access = struct {
         errdefer self.failed = true;
         try self.validate();
         _ = try self.current();
-        const count = try self.data.session.replicas[0].data.readPositionalAll(self.io, bytes, offset);
+        _ = try self.replicaSize();
+        const count = try self.readCompared(bytes, offset);
         try self.validate();
         return count;
+    }
+
+    // Bounded scratch space even when the caller supplies a large read buffer.
+    // Agreement detects divergence, not identical corruption on both replicas.
+    fn readCompared(self: *Access, bytes: []u8, offset: u64) !usize {
+        var other: [64 * 1024]u8 = undefined;
+        var used: usize = 0;
+        while (used < bytes.len) {
+            const chunk = bytes[used..][0..@min(other.len, bytes.len - used)];
+            const position = std.math.add(u64, offset, used) catch return error.InvalidRange;
+            const a = try self.data.session.replicas[0].data.readPositionalAll(self.io, chunk, position);
+            const b = try self.data.session.replicas[1].data.readPositionalAll(self.io, other[0..chunk.len], position);
+            if (a != b or !std.mem.eql(u8, chunk[0..a], other[0..b])) return error.ReplicaContentMismatch;
+            used += a;
+            if (a != chunk.len) break;
+        }
+        return used;
+    }
+
+    fn replicaSize(self: *Access) !u64 {
+        const a = (try self.data.session.replicas[0].data.stat(self.io)).size;
+        const b = (try self.data.session.replicas[1].data.stat(self.io)).size;
+        if (a != b) return error.ReplicaSizeMismatch;
+        return a;
+    }
+
+    pub const Scrub = struct {
+        size: u64,
+        next_sequence: u64,
+        sha256: [32]u8,
+    };
+
+    /// Serialized with other access operations, under both exclusive data locks.
+    /// Does not checkpoint, collect logs, or choose a repair source on divergence.
+    pub fn scrub(self: *Access) !Scrub {
+        errdefer self.failed = true;
+        try self.validate();
+        _ = try self.current();
+        const length = try self.replicaSize();
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var buffer: [64 * 1024]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < length) {
+            try self.validate();
+            const bytes = buffer[0..@min(buffer.len, length - offset)];
+            if (try self.readCompared(bytes, offset) != bytes.len) return error.SourceChanged;
+            hasher.update(bytes);
+            offset += bytes.len;
+        }
+        if (try self.replicaSize() != length) return error.SourceChanged;
+        try self.validate();
+        _ = try self.current();
+        var result: Scrub = .{ .size = length, .next_sequence = self.data.session.next, .sha256 = undefined };
+        hasher.final(&result.sha256);
+        return result;
     }
 
     pub fn size(self: *Access) !u64 {
         errdefer self.failed = true;
         try self.validate();
         _ = try self.current();
-        return (try self.data.session.replicas[0].data.stat(self.io)).size;
+        return self.replicaSize();
     }
 
     pub fn sync(self: *Access) !void {

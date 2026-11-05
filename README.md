@@ -846,6 +846,15 @@ zig build test-wal-fuse -Dfuse=true -Doptimize=safe
 zig build test-wal-smb -Dfuse=true -Doptimize=safe # real dual CIFS + SMB; sudo
 ```
 
+WAL reads compare both replicas and fail/freeze the shared session on divergent
+bytes or lengths. For an existing mutable file with no active access handles,
+run `nas-fs scrub-mutable ENDPOINTS CONFIG INODE` to recover it and compare its
+entire contents using bounded buffers. JSON reports `replicas_equal`, size,
+generation, sequence and the observed SHA-256. This is replica agreement, not
+verification against a trusted content digest; identical corruption remains
+undetectable. Opening for maintenance may replay WAL and reconcile checkpoints.
+The command never migrates immutable files or selects a repair source.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

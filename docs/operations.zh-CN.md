@@ -116,6 +116,18 @@ helper 先启动并等待 FUSE，再启动 Samba；标准输出的 ready JSON �
 
 验收入口：`zig build test-wal-fuse -Dfuse=true`（本地后端）和 `zig build test-wal-smb -Dfuse=true -Doptimize=safe`（三 voter、双 CIFS、真实 SMB 与 supervisor）。
 
+### 可变副本一致性巡检
+
+WAL 普通读取现在比对两侧大小和请求范围内的字节，任一侧不一致会返回 I/O 错误并冻结共享会话。未读取的区域须用全文件巡检检查。先关闭目标 inode 在所有入口的句柄，再执行：
+
+```sh
+"$BIN" scrub-mutable "$EP" "$PWD/backends.json" INODE
+```
+
+命令仅接受已绑定的可变文件，持有双侧独占锁；有活动会话时返回 `FileBusy`。进入会话时会执行正常 WAL 恢复、数据检查点同步和元数据补报，因此它不是只读取证工具；需要保留故障原始状态时先保存后端与元数据现场。巡检本身不推进检查点、不回收旧 WAL、不复制或覆盖副本。
+
+成功 JSON 的 `replicas_equal:true` 代表当前两份完整文件相同；`sha256` 是现场计算结果，不是此前持久化的可信摘要。双侧相同损坏无法据此发现。发现 `ReplicaContentMismatch` 或 `ReplicaSizeMismatch` 时保留两份数据和日志，不从任意一侧自动修复；当前没有足够的内容证据判定正确来源。`repair-file` 仍只适用于不可变对象，不能用于可变代次。
+
 挂载点必须是现有空目录；helper 对底层目录加互斥锁并拒绝已挂载路径。状态目录必须是挂载点之外的新目录，父目录须存在，建议短路径。每次重启复用原挂载点、换一个新状态目录，保留旧日志。helper 不启动 voter、不挂载 CIFS、不自动重启子进程，也不提供跨节点 writer fencing。
 
 ### 分进程调试入口

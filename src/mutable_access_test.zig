@@ -245,3 +245,80 @@ test "mutable access freezes on metadata outage and replacement of the data file
     try t.expectError(error.BackendMountMismatch, session.write("bad", 0));
     try t.expectError(error.WalSessionFailed, session.read(&bytes, 0));
 }
+
+test "mutable reads detect either replica corruption and retain WAL evidence" {
+    for (0..2) |bad| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var session = try f.open();
+        defer session.close();
+        try session.write("original", 0);
+        const sequence = session.data.checkpoint.next;
+        const log_size = (try session.data.session.replicas[0].log.stat(t.io)).size;
+        try session.data.session.replicas[bad].data.writePositionalAll(t.io, "X", 3);
+        var bytes: [8]u8 = undefined;
+        try t.expectError(error.ReplicaContentMismatch, session.read(&bytes, 0));
+        try t.expectError(error.WalSessionFailed, session.collect());
+        try t.expectError(error.WalSessionFailed, session.write("bad", 0));
+        try t.expectEqual(sequence, session.data.checkpoint.next);
+        try t.expectEqual(log_size, (try session.data.session.replicas[0].log.stat(t.io)).size);
+        try t.expectEqual(@as(u64, 0), f.meta.state.get(2).?.mutable_file.?.size);
+        try t.expectEqual(@as(usize, 8), try session.data.session.replicas[1 - bad].data.readPositionalAll(t.io, &bytes, 0));
+        try t.expectEqualStrings("original", &bytes);
+    }
+}
+
+test "mutable size mismatch freezes even reads outside the damaged range" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    try session.write("original", 0);
+    try session.data.session.replicas[1].data.writePositionalAll(t.io, "extra", 8);
+    try t.expectError(error.ReplicaSizeMismatch, session.size());
+    var bytes: [1]u8 = undefined;
+    try t.expectError(error.WalSessionFailed, session.read(&bytes, 0));
+}
+
+test "mutable scrub compares chunk boundaries and sparse tails without checkpointing" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    const empty = try session.scrub();
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("", &expected, .{});
+    try t.expectEqualSlices(u8, &expected, &empty.sha256);
+    var bytes: [128 * 1024 + 7]u8 = @splat(0);
+    bytes[65535] = 42;
+    bytes[65536] = 43;
+    bytes[bytes.len - 1] = 44;
+    try session.write(bytes[65535..65537], 65535);
+    try session.write(bytes[bytes.len - 1 ..], bytes.len - 1);
+    const result = try session.scrub();
+    std.crypto.hash.sha2.Sha256.hash(&bytes, &expected, .{});
+    try t.expectEqualSlices(u8, &expected, &result.sha256);
+    try t.expectEqual(bytes.len, result.size);
+    try t.expectEqual(session.data.session.next, result.next_sequence);
+    try t.expectEqual(@as(u64, 1), session.data.checkpoint.next);
+    var output: [bytes.len + 20]u8 = undefined;
+    try t.expectEqual(bytes.len, try session.read(&output, 0));
+    try t.expectEqualSlices(u8, &bytes, output[0..bytes.len]);
+    try t.expectEqual(@as(usize, 0), try session.read(&output, bytes.len));
+    try session.data.session.replicas[1].data.writePositionalAll(t.io, "X", bytes.len - 1);
+    try t.expectError(error.ReplicaContentMismatch, session.scrub());
+    try t.expectError(error.WalSessionFailed, session.sync());
+}
+
+test "mutable replica agreement is not proof against identical corruption" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    try session.write("original", 0);
+    for (session.data.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 0);
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("Xriginal", &expected, .{});
+    const result = try session.scrub();
+    try t.expectEqualSlices(u8, &expected, &result.sha256);
+}

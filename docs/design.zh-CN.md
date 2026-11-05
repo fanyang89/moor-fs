@@ -780,3 +780,15 @@ WAL read/write/truncate 直接委托 Access；read/getattr 刷新大小，禁用
 新增 test-wal-fuse/test-wal-smb：覆盖首次迁移、读写共享、stat/fstat 实时大小、稀疏写、ftruncate/O_TRUNC、重复 fsync、O_DSYNC、历史对象保留与 data inode 不变；验证第二写者、竞争挂载、活动句柄删除被拒绝。后端路径替换使所有共享句柄冻结，恢复后必须重开。独立子进程 write 成功后 SIGSTOP，杀死 FUSE 再恢复子进程，其 fsync 必须失败；新挂载重放 WAL，检查内容和 Raft 大小补报。
 
 真实 SMB 测试覆盖上传、覆盖、下载、空文件、目录、rename/delete；supervisor WAL 参数转发、ready 状态及干净退出亦有覆盖。Debug/Safe 各 69 项单测通过；本地 WAL FUSE、双 CIFS WAL SMB 均有 Debug/Safe 验证，最终 Safe 包含 supervisor 验证；默认 staging 的完整 Safe SMB 回归通过。仍待后续完成可变内容校验/修复、跨节点 fencing、孤立迁移目录 GC，以及独立机器和 Windows/macOS 客户端验收。
+
+## 45. 可变副本读取比对与全文件巡检
+
+Access.read 不再只读取第一副本：先比对双侧长度，再用固定 64 KiB 辅助缓冲比对请求范围内的字节；大请求逐段处理，调用方只有在整个请求成功后才能使用返回数据。任意一侧读取失败、长度不等或字节不同都冻结 Access，FUSE 将错误映射为 EIO，后续共享句柄不能继续读写、同步或回收日志。Access.size 也比对双侧长度，避免 FUSE 根据第一副本的 EOF 提前返回空读而漏掉另一侧的扩展。成本是每次读访问两侧 NAS；不增加整文件 COW 或数据分块布局。
+
+Access.scrub 在现有双侧独占锁和调用方串行化约束下，使用两个固定 64 KiB 缓冲比对完整文件并流式计算 SHA-256，检查大小、路径和元数据身份。巡检本身不 checkpoint、不 collect、不选择修复来源。返回 size、next_sequence 和观察到的摘要；SHA-256 未写入检查点或 Raft，不能作为未来自动修复的权威依据。
+
+新增产品命令 `scrub-mutable ENDPOINTS CONFIG INODE`，只接受已有绑定，不迁移不可变 inode；复用 Access.open 的正常恢复流程后执行全文件比对。打开阶段可能重放 WAL、同步数据和补报元数据，因此不宣称整个 CLI 只读。输出 generation、序号、大小、replicas_equal 和十六进制摘要，失败非零退出；其他访问进程持锁时返回 FileBusy。普通读取只检测请求范围；显式巡检负责其余区域。
+
+新增四项单测覆盖任一副本损坏时冻结和保留 WAL/元数据、长度不一致、空文件/跨 64 KiB 边界/稀疏尾部/EOF、大请求、巡检不推进检查点，以及明确记录“双侧相同损坏仍会一致”的能力边界。Debug/Safe 各 73 项通过。扩展 WAL E2E：本地 Debug FUSE 和 Safe 双 CIFS/真实 SMB 均通过，校验巡检 JSON 摘要、拒绝不可变文件迁移和竞争所有者；分别直接篡改两台 NAS 的 data，验证两个共享读句柄失败、CLI 报错且损坏与未损坏副本均保留，仅测试夹具恢复注入字节后重开。
+
+自动修复仍需要新的持久内容证据协议：可信摘要必须与 generation/sequence 绑定，并处理原地写入期间摘要与数据非原子更新、WAL 重放和截断后的有效范围；恢复不能把两个当前不一致的副本任意选一个当正确源。仅把现有 checkpoint 的头部校验和当内容校验，或在 fsync 时给当下字节重新计算摘要，都不能补足这项保证。后续在保留完整 NAS 文件布局的前提下实现该协议及中断修复恢复测试。

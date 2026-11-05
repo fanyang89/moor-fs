@@ -552,7 +552,12 @@ def main():
                 from test_wal_fuse import test_wal_fuse
 
                 test_wal_fuse(
-                    executable, directory, endpoints, run, smb=options.wal_smb
+                    executable,
+                    directory,
+                    endpoints,
+                    run,
+                    smb=options.wal_smb,
+                    server_roots=options.backend_server_roots,
                 )
             if options.fuse or options.smb:
                 from test_fuse import test_mounts

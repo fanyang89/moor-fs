@@ -1,6 +1,7 @@
 """WAL FUSE sessions, in-place updates and acknowledged-write crash recovery."""
 
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import sys
 import time
 
 
-def test_wal_fuse(executable, directory, endpoints, run, smb=False):
+def test_wal_fuse(executable, directory, endpoints, run, smb=False, server_roots=None):
     config = directory / "backends.json"
     roots = [Path(item["root"]) for item in json.loads(config.read_text())]
     processes, mounts, logs = [], [], []
@@ -87,6 +88,8 @@ def test_wal_fuse(executable, directory, endpoints, run, smb=False):
             == "ok"
         )
         historical = [set((root / "objects").iterdir()) for root in roots]
+        run("scrub-mutable", endpoints, config, inode, success=False)
+        assert run("get", endpoints, inode)["mutable_file"] is None
         first, process = mount()
         second, _ = mount()
         path = first / "wal-file"
@@ -305,6 +308,42 @@ os._exit(1)
                 "PASS: supervisor forwards WAL mode, serves SMB and shuts down cleanly",
                 flush=True,
             )
+        report = run("scrub-mutable", endpoints, config, inode)
+        assert report["replicas_equal"] and report["size"] == 12
+        assert report["sha256"] == hashlib.sha256(b"acknowledged").hexdigest()
+        physical_roots = server_roots or roots
+        for bad in range(2):
+            reader = os.open(recovered / "wal-file", os.O_RDONLY)
+            other = os.open(recovered / "wal-file", os.O_RDONLY)
+            busy = run("scrub-mutable", endpoints, config, inode, success=False)
+            assert "FileBusy" in busy.stdout + busy.stderr, busy
+            data = physical_roots[bad] / "mutable" / leaves[bad].name / "data"
+            with open(data, "r+b", buffering=0) as corrupt:
+                corrupt.write(b"X")
+                os.fsync(corrupt.fileno())
+            error(lambda: os.pread(reader, 12, 0), {errno.EIO})
+            error(lambda: os.pread(other, 12, 0), {errno.EIO})
+            for fd in (reader, other):
+                try:
+                    os.close(fd)
+                except OSError as exc:
+                    assert exc.errno == errno.EIO
+            failed = run("scrub-mutable", endpoints, config, inode, success=False)
+            assert "ReplicaContentMismatch" in failed.stdout + failed.stderr, failed
+            assert data.read_bytes() == b"Xcknowledged"
+            assert (
+                physical_roots[1 - bad] / "mutable" / leaves[1 - bad].name / "data"
+            ).read_bytes() == b"acknowledged"
+            # Restore the injected byte from the test fixture, not by electing
+            # an unverified replica as an automatic repair source.
+            with open(data, "r+b", buffering=0) as restored:
+                restored.write(b"a")
+                os.fsync(restored.fileno())
+            assert (recovered / "wal-file").read_bytes() == b"acknowledged"
+        print(
+            "PASS: corruption on either NAS fails shared reads and scrub without repairing from an untrusted peer",
+            flush=True,
+        )
         (recovered / "wal-file").unlink()
     finally:
         for path in reversed(mounts):

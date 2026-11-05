@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "put-file", "Copy, verify and publish a file version", &.{ "endpoint", "config", "json", "source" }, @import("data_cli.zig").put);
     try register(root, options, "get-file", "Read a verified replica into a new local file", &.{ "endpoint", "config", "id", "destination" }, @import("data_cli.zig").get);
     try register(root, options, "check-file", "Verify every declared replica of the current file version", &.{ "endpoint", "config", "id" }, @import("data_cli.zig").check);
+    try register(root, options, "scrub-mutable", "Recover an existing mutable file and compare both complete replicas", &.{ "endpoint", "config", "id" }, scrubMutable);
     try register(root, options, "repair-file", "Restore a declared replica from a verified copy", &.{ "endpoint", "config", "id", "backend" }, @import("data_cli.zig").repair);
     if (@import("build_options").fuse) try register(root, options, "mount", "Mount the namespace with optional verified reads and dual-replica writes", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
@@ -133,6 +134,28 @@ fn remoteStatus(ctx: zli.CommandContext) !void {
 
 fn mount(ctx: zli.CommandContext) !void {
     try @import("fuse.zig").mount(ctx.allocator, ctx.io, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?, ctx.flag("backends", []const u8), ctx.flag("write-backends", []const u8), ctx.flag("write-mode", []const u8));
+}
+
+fn scrubMutable(ctx: zli.CommandContext) !void {
+    const mappings = try nas.objects.loadMappings(ctx.allocator, ctx.io, ctx.getArg("config").?);
+    defer mappings.deinit();
+    var client: nas.mutable_rpc.Client = .{ .allocator = ctx.allocator, .endpoints = ctx.getArg("endpoint").? };
+    const inode = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    // No migration pair: this maintenance command only accepts existing bindings.
+    var access = try nas.mutable_access.Access.open(ctx.allocator, ctx.io, client.api(), mappings.value, inode, .{ 0, 0 });
+    defer access.close();
+    const result = try access.scrub();
+    const digest = std.fmt.bytesToHex(result.sha256, .lower);
+    const json = try std.json.Stringify.valueAlloc(ctx.allocator, .{
+        .inode = inode,
+        .generation = access.data.session.identity.generation,
+        .next_sequence = result.next_sequence,
+        .size = result.size,
+        .replicas_equal = true,
+        .sha256 = @as([]const u8, &digest),
+    }, .{});
+    defer ctx.allocator.free(json);
+    try ctx.writer.print("{s}\n", .{json});
 }
 
 fn remoteLookup(ctx: zli.CommandContext) !void {
