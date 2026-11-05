@@ -18,7 +18,7 @@ command -v smbd testparm smbclient mount.cifs fusermount3
 test -r /dev/fuse && test -w /dev/fuse
 ```
 
-构建产物使用构建目录中 libfuse 的 RPATH；目前不能仅复制一个二进制就视为完成打包。先在各目标机器构建或保持相同依赖布局。不要部署 `-Dfault-injection=true` 构建。
+普通构建产物使用构建目录中 libfuse 的 RPATH，不能仅复制该二进制。可在各目标机按上面步骤构建，或使用 `python3 tools/package.py 新目录` 生成带相对库路径的运行目录包，详见 `docs/package.zh-CN.md`。使用包时将后续 BIN 设为包内 bin/nas-fs，统一接入入口使用 bin/nas-fs-access。不要部署 `-Dfault-injection=true` 构建。
 
 示例地址：元数据节点 `192.0.2.21`、`.22`、`.23`，Raft 端口 9001，API 端口 8001；NAS 为 `192.0.2.10` 和 `.11`，共享均为 `data`。这些是文档地址，执行前全部替换成实际地址。元数据是明文、无认证原型；部署在受控网络。SMB helper 是 guest 单用户入口，所有客户端以挂载用户身份操作，不提供账号隔离。
 
@@ -201,7 +201,7 @@ SMB 每次 write/truncate 都同步发布整个结果文件；大上传会出现
 | 元数据/接入崩溃 | 三 voter 重选、全进程重启、LMDB 重建；十三个写入故障场景见设计文档第 31–34 节。 |
 | 真实多机首次部署 | 本手册是操作入口；尚未完成独立干净机器按手册部署的签收。 |
 | 接入启停编排 | serve_access.py 已通过实际 FUSE/SMB 的正常停止、子进程 SIGKILL、同挂载点重启与数据校验、只读默认、目录互斥与启动失败清理。 |
-| 服务托管与发布包 | 已有接入前台编排；系统服务集成、voter/CIFS 全链路编排、可安装发布包和完整备份恢复尚未完成。 |
+| 服务托管与发布包 | 已有接入前台编排和原生 Linux 运行目录包；系统服务集成、voter/CIFS 全链路编排、跨机 ABI 验收和完整备份恢复尚未完成。 |
 | Windows/macOS、硬件掉电 | 尚未验收，不以 Linux smbclient 或进程 SIGKILL 结果代替。 |
 
 登记本轮实际版本、内核/Samba 版本、机器与物理故障域、操作日志和结果。全部部署项完成前，NASFS-8 保持进行中。

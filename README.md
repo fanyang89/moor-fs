@@ -3,6 +3,7 @@
 A distributed SMB file-service prototype for pooling heterogeneous NAS devices.
 The design is documented in Chinese in `docs/design.zh-CN.md`.
 Deployment and recovery commands are in `docs/operations.zh-CN.md`.
+Native relocatable runtime bundles are described in `docs/package.zh-CN.md`.
 
 ## Build and run
 
@@ -26,6 +27,19 @@ their upstream manifest hashes into its normal package directory (`zig-pkg/`).
 There is no ZooKeeper dependency.
 
 For the native FUSE build/link probe, see `third_party/README.md`.
+
+To build a standalone runtime directory with the matching libfuse, helpers,
+documentation, E2E scripts and SHA-256 manifest:
+
+```sh
+python3 tools/package.py /absolute/new/nas-fs-runtime
+```
+
+The parent directory must exist. Packaging uses a native Safe build with fault
+injection disabled and a `$ORIGIN/../lib` library path. It does not install system
+services or bundle system libraries such as glibc, liburing and libnuma. Use
+`bin/nas-fs` and `bin/nas-fs-access` from the resulting directory on ABI-compatible
+Linux hosts; see the package guide for relocation checks and required OS tools.
 
 ## Implemented foundation
 

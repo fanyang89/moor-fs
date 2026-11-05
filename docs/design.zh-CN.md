@@ -655,3 +655,11 @@ Debug 与 Safe 完整 SMB 故障套件通过，矩阵增至十三例；35 项单
 Debug/Safe 实际 CIFS/FUSE/SMB E2E 验证首次可写上传、正常 SIGTERM 停止、分别 SIGKILL FUSE 和 Samba、同挂载点重复启动后原文件内容与双副本健康、只读默认拒绝上传，以及非空/已占用目录拒绝、启动失败清理；Debug 另验证持有底层目录锁时第二个 helper 在启动前失败。验证停止后无 FUSE 挂载、两个主子进程退出且 SMB 端口关闭。
 
 ready 只表示服务启动，不等于完整数据健康；helper 自身 SIGKILL 不能执行清理，忙挂载不自动 lazy-unmount。没有子进程自动重启、系统服务单元或发布打包；完整机器部署签收仍待完成。中文操作手册现以统一入口为推荐路径，保留分进程调试入口和完整依赖顺序。
+
+## 37. 原生 Linux 可迁移运行目录包
+
+新增 `tools/package.py 新目录`，核对固定子模块并重建 libfuse，以 Safe、关闭故障注入的配置生成独立运行目录。`-Drelocatable=true` 关闭 Zig 自动加入库搜索路径的 RUNPATH 行为，仅保留 `$ORIGIN/../lib`；普通源码构建仍使用原有开发库路径。运行包按实际 SONAME 携带 libfuse 普通文件，包含 CLI、相对路径接入 launcher、Python helpers/E2E、中文文档、依赖许可证副本和 SHA256SUMS。
+
+manifest.json 记录提交、工作树 dirty 状态、子模块版本、工具链、架构、libc 和外部共享库；脚本在包外目录检查库解析及 CLI/launcher help，并验证校验清单。输出目录必须新建，不覆盖已有产物；失败保留诊断。launcher 用 python3 -B，避免构建自检把路径相关 pycache 混入交付清单。
+
+验证将包整体移动后，在包外工作目录运行包内 test_e2e.py 与 bin/nas-fs 的真实 SMB 套件，包含接入 supervisor 的启停与故障恢复。它证明程序、库、helpers 和测试不依赖源码树所在目录，不等于独立机器或跨发行版 ABI 验收。目标机仍需兼容 glibc/加载器、liburing/libnuma、Samba/cifs-utils/fusermount3、Python 和内核支持；不提供静态/跨架构镜像、签名、系统服务或完整备份恢复。操作入口见 `docs/package.zh-CN.md`。

@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse = b.option(bool, "fuse", "Build the FUSE namespace and file adapter") orelse false;
+    const relocatable = b.option(bool, "relocatable", "Use a sibling lib directory for the packaged FUSE library") orelse false;
     const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair, write and metadata reply SIGSTOP checkpoints") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "fuse", fuse);
@@ -55,7 +56,12 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addIncludePath(b.path(".deps-build/libfuse"));
         exe.root_module.addCSourceFile(.{ .file = b.path("src/fuse_bridge.c"), .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror" } });
         exe.root_module.addLibraryPath(b.path(".deps-build/libfuse/lib"));
-        exe.root_module.addRPath(b.path(".deps-build/libfuse/lib"));
+        if (relocatable) {
+            exe.each_lib_rpath = false;
+            exe.root_module.addRPathSpecial("$ORIGIN/../lib");
+        } else {
+            exe.root_module.addRPath(b.path(".deps-build/libfuse/lib"));
+        }
         exe.root_module.linkSystemLibrary("fuse3", .{});
     }
     const run = b.addRunArtifact(exe);
