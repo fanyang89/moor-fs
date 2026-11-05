@@ -206,6 +206,8 @@ follow symlinks = no
             command.append("--repair-faults")
         if args.mutable_access:
             command.extend(["--mutable-access", args.mutable_access])
+        if args.wal_smb:
+            command.append("--wal-smb")
         if args.file_store:
             command = [
                 sys.executable,
@@ -306,6 +308,7 @@ def main():
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--file-store", action="store_true")
     parser.add_argument("--mutable-access")
+    parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
@@ -358,6 +361,8 @@ def main():
         command.append("--fuse")
     if args.smb:
         command.append("--smb")
+    if args.wal_smb:
+        command.append("--wal-smb")
     if args.repair_faults:
         command.append("--repair-faults")
     if args.file_store:

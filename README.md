@@ -829,8 +829,22 @@ zig build test-mutable-access -Doptimize=safe
 
 This combines three voters and two CIFS backends, tests process death and leader
 change, and retains historical objects. The session currently requires exclusive
-ownership of both replicas and serialized local callers; FUSE handle sharing and
-the user-facing SMB WAL path are still pending. See design section 43.
+ownership of both replicas and serialized local callers. See design section 43.
+
+FUSE and the access supervisor now support opt-in `--write-mode wal`, together
+with `--write-backends 1,2`. Local handles share one mutable session and observe
+current contents and size; first open (including a read-only open) migrates old
+immutable data. Flush/fsync/close checkpoints both replicas and Raft metadata.
+The default remains `staging`. Mutable files cannot be read through staging
+mounts or the immutable-object CLI. Keep one WAL access process per active file;
+competing mounts are rejected, only one local writable handle is supported, and
+unlink while local handles remain open returns `EBUSY`. See design section 44
+and the operations guide before enabling this mode.
+
+```sh
+zig build test-wal-fuse -Dfuse=true -Doptimize=safe
+zig build test-wal-smb -Dfuse=true -Doptimize=safe # real dual CIFS + SMB; sudo
+```
 
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to

@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--mutable-access")
+    parser.add_argument("--wal-fuse", action="store_true")
+    parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--backend-roots", nargs=2, type=Path)
     parser.add_argument("--backend-server-roots", nargs=2, type=Path)
     parser.add_argument("--smb-ports", nargs=2, type=int)
@@ -545,6 +547,12 @@ def main():
                     leader,
                     stop,
                     start,
+                )
+            if options.wal_fuse or options.wal_smb:
+                from test_wal_fuse import test_wal_fuse
+
+                test_wal_fuse(
+                    executable, directory, endpoints, run, smb=options.wal_smb
                 )
             if options.fuse or options.smb:
                 from test_fuse import test_mounts

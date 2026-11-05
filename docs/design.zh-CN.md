@@ -768,3 +768,15 @@ LMDB schema 与快照输出升级到 3；可读取 schema 1/2 和版本 1/2 快�
 独立 `zig build test-mutable-access [-Doptimize=safe]` 同时启动真实三 voter 与双 CIFS，使用产品 RPC 进行迁移绑定和检查点补报，分别在 write/checkpoint/collect 后 SIGKILL，验证竞争访问拒绝、恢复内容和大小、数据 inode 不变以及旧对象集合保留；write 场景还杀死当前 leader 后恢复访问。Debug/Safe 均通过；Debug 增加冷 CIFS 重挂后读取可变 data 内容和检查已回收日志数量。测试 driver 不安装到产品 CLI。
 
 SMB/FUSE 尚未切换到此访问会话。下一步需要接入多句柄共享、可变文件实时大小、关闭/flush 错误传播及兼容的显式启用入口，随后验证实际 SMB 写路径。
+
+## 44. 显式 WAL FUSE/SMB 入口与共享句柄
+
+`mount --write-mode staging|wal` 和 `serve_access.py --write-mode` 提供显式选择，默认 staging；WAL 要求同时配置双 write-backends。FUSE Client 按 inode 保存引用计数 Shared，每个文件句柄包装同一个 Access，最后释放时关闭双侧锁。首次只读打开也执行迁移；已绑定文件的 lookup/getattr 会临时获取会话以恢复数据并查询实时大小。默认 staging 挂载仍拒绝可变内容，不将其误读为空文件。
+
+WAL read/write/truncate 直接委托 Access；read/getattr 刷新大小，禁用文件页缓存以避免旧字节或旧长度。flush/fsync/release 调用 collect，先同步数据和元数据再删除旧日志；只读句柄也参与同步，后端错误冻结所有共享句柄。CIFS 目录缓存可能重复返回已删除旧日志，collect 对确认属于旧序号的 FileNotFound 容忍，其他错误仍失败。只读 O_TRUNC 在创建会话前拒绝，避免拒绝打开时已经截断内容。
+
+本轮保留每 inode 一个可写句柄限制，多个只读句柄可与它共享；本挂载仍有会话时 unlink 返回 EBUSY，避免删除后 Access 身份检查失败。其他进程/挂载不共享该表，仍通过双侧独占锁拒绝竞争访问；这不构成跨节点 fencing，外部元数据删除也不受本地 unlink 检查保护。每次 I/O 查询元数据和验证路径的保守策略保持不变。
+
+新增 test-wal-fuse/test-wal-smb：覆盖首次迁移、读写共享、stat/fstat 实时大小、稀疏写、ftruncate/O_TRUNC、重复 fsync、O_DSYNC、历史对象保留与 data inode 不变；验证第二写者、竞争挂载、活动句柄删除被拒绝。后端路径替换使所有共享句柄冻结，恢复后必须重开。独立子进程 write 成功后 SIGSTOP，杀死 FUSE 再恢复子进程，其 fsync 必须失败；新挂载重放 WAL，检查内容和 Raft 大小补报。
+
+真实 SMB 测试覆盖上传、覆盖、下载、空文件、目录、rename/delete；supervisor WAL 参数转发、ready 状态及干净退出亦有覆盖。Debug/Safe 各 69 项单测通过；本地 WAL FUSE、双 CIFS WAL SMB 均有 Debug/Safe 验证，最终 Safe 包含 supervisor 验证；默认 staging 的完整 Safe SMB 回归通过。仍待后续完成可变内容校验/修复、跨节点 fencing、孤立迁移目录 GC，以及独立机器和 Windows/macOS 客户端验收。

@@ -17,12 +17,14 @@ struct api {
     void (*free)(struct entry *, size_t);
     int (*open)(void *, uint64_t, struct entry *, int *);
     int writable;
+    int wal;
     int (*prepare)(void *, uint64_t, int, struct entry *, void **);
     int (*commit)(void *);
     int (*write)(void *, const char *, size_t, uint64_t, uint64_t *);
     int (*truncate)(void *, uint64_t);
     int (*read)(void *, char *, size_t, uint64_t);
     void (*close_writer)(void *);
+    int (*size)(void *, uint64_t *);
     int (*create)(void *, uint64_t, const char *, int, struct entry *);
     int (*remove)(void *, uint64_t, const char *, int);
     int (*rename)(void *, uint64_t, const char *, uint64_t, const char *);
@@ -64,7 +66,11 @@ static void getattr_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
     struct state *s = fuse_req_userdata(req);
     struct entry node;
     struct handle *h = fi ? (void *)(uintptr_t)fi->fh : NULL;
-    if (h && (h->fd >= 0 || h->writable)) {
+    if (h && (h->fd >= 0 || h->writer)) {
+        if (s->api->wal && h->writer) {
+            int err = s->api->size(h->writer, &h->node.size);
+            if (err) { h->failed = err; fuse_reply_err(req, err); return; }
+        }
         node = h->node;
     } else {
         int err = s->api->get(s->api->context, ino, NULL, &node);
@@ -80,7 +86,7 @@ static void release_handle(struct state *s, struct handle *h) {
     while (*p && *p != h) p = &(*p)->next;
     if (!*p) return;
     *p = h->next;
-    if (h->writable) s->api->close_writer(h->writer);
+    if (h->writer) s->api->close_writer(h->writer);
     else if (h->fd >= 0) close(h->fd);
     else s->api->free(h->entries, h->count);
     free(h);
@@ -130,7 +136,7 @@ static void releasedir_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info 
 
 static int save(struct state *s, struct handle *h) {
     if (h->failed) return h->failed;
-    if (h->writable) h->failed = s->api->commit(h->writer);
+    if (h->writer) h->failed = s->api->commit(h->writer);
     // An uncertain publication freezes the handle. Never mutate or republish it.
     return h->failed;
 }
@@ -145,7 +151,7 @@ static int make_handle(struct state *s, fuse_ino_t ino, int writable, int trunca
     h->fd = -1;
     h->writable = writable;
     int err;
-    if (writable) {
+    if (writable || s->api->wal) {
         err = s->api->prepare(s->api->context, ino, truncate, &h->node, &h->writer);
     } else {
         err = s->api->open(s->api->context, ino, &h->node, &h->fd);
@@ -160,6 +166,9 @@ static int make_handle(struct state *s, fuse_ino_t ino, int writable, int trunca
 
 static void open_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
     struct state *s = fuse_req_userdata(req);
+    if ((fi->flags & O_TRUNC) && (fi->flags & O_ACCMODE) == O_RDONLY) {
+        fuse_reply_err(req, EACCES); return;
+    }
     struct handle *h;
     int err = make_handle(s, ino, (fi->flags & O_ACCMODE) != O_RDONLY, !!(fi->flags & O_TRUNC), &h);
     if (err) { fuse_reply_err(req, err); return; }
@@ -180,13 +189,17 @@ static void read_cb(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
     struct handle *h = (void *)(uintptr_t)fi->fh;
     if (h->failed) { fuse_reply_err(req, h->failed); return; }
     if (off < 0) { fuse_reply_err(req, EINVAL); return; }
+    struct state *s = fuse_req_userdata(req);
+    if (s->api->wal && h->writer) {
+        int err = s->api->size(h->writer, &h->node.size);
+        if (err) { h->failed = err; fuse_reply_err(req, err); return; }
+    }
     if ((uint64_t)off >= h->node.size || size == 0) { fuse_reply_buf(req, NULL, 0); return; }
     if (size > 1024 * 1024) size = 1024 * 1024;
     if (size > h->node.size - (uint64_t)off) size = h->node.size - (uint64_t)off;
     char *buffer = malloc(size);
     if (!buffer) { fuse_reply_err(req, ENOMEM); return; }
-    if (h->writable) {
-        struct state *s = fuse_req_userdata(req);
+    if (h->writer) {
         int err = s->api->read(h->writer, buffer, size, (uint64_t)off);
         if (err) { h->failed = err; fuse_reply_err(req, err); }
         else fuse_reply_buf(req, buffer, size);

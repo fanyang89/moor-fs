@@ -225,7 +225,12 @@ pub const Store = struct {
                 const sequence = std.fmt.parseInt(u64, entry.name[4..], 10) catch continue;
                 var buffer: [32]u8 = undefined;
                 if (sequence >= self.checkpoint.next or !std.mem.eql(u8, entry.name, try logName(&buffer, sequence))) continue;
-                try dir.deleteFile(self.session.io, entry.name);
+                // CIFS may return a recently deleted entry from its directory
+                // cache when collection is repeated on the same open directory.
+                dir.deleteFile(self.session.io, entry.name) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => return err,
+                };
             }
             try objects.syncDir(self.session.io, dir);
         }

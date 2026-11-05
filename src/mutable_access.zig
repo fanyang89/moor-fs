@@ -201,11 +201,11 @@ pub const Access = struct {
         try self.validate();
     }
 
-    pub fn truncate(self: *Access, size: u64) !void {
+    pub fn truncate(self: *Access, length: u64) !void {
         errdefer self.failed = true;
         try self.validate();
         _ = try self.current();
-        try self.data.truncate(size);
+        try self.data.truncate(length);
         try self.validate();
     }
 
@@ -216,6 +216,13 @@ pub const Access = struct {
         const count = try self.data.session.replicas[0].data.readPositionalAll(self.io, bytes, offset);
         try self.validate();
         return count;
+    }
+
+    pub fn size(self: *Access) !u64 {
+        errdefer self.failed = true;
+        try self.validate();
+        _ = try self.current();
+        return (try self.data.session.replicas[0].data.stat(self.io)).size;
     }
 
     pub fn sync(self: *Access) !void {

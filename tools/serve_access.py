@@ -30,6 +30,8 @@ def mount_record(path):
 
 
 def serve(args):
+    if args.write_mode == "wal" and not args.write_backends:
+        raise ValueError("wal mode requires --write-backends")
     mountpoint = args.mountpoint.resolve(strict=True)
     state = args.state_directory.resolve()
     executable = args.executable.resolve(strict=True)
@@ -55,6 +57,7 @@ def serve(args):
         ]
         if args.write_backends:
             command += ["--write-backends", args.write_backends]
+        command += ["--write-mode", args.write_mode]
         log = state / "fuse.log"
         with log.open("w") as output:
             fuse = subprocess.Popen(
@@ -86,6 +89,7 @@ def serve(args):
                             "smb_pid": smb.pid,
                             "port": port,
                             "writable": bool(args.write_backends),
+                            "write_mode": args.write_mode,
                         }
                     ),
                     flush=True,
@@ -131,6 +135,7 @@ def main():
         "--write-backends", help="opt in to writes using two backend IDs, e.g. 1,2"
     )
     parser.add_argument("--port", type=int, default=1445)
+    parser.add_argument("--write-mode", choices=("staging", "wal"), default="staging")
     parser.add_argument("--listen", default="127.0.0.1")
     args = parser.parse_args()
     stopping = False

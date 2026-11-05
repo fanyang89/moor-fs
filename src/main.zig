@@ -52,6 +52,7 @@ fn register(root: *zli.Command, options: zli.InitOptions, name: []const u8, desc
     if (std.mem.eql(u8, name, "mount")) {
         try command.addFlag(.{ .name = "backends", .description = "Backend mapping JSON for verified file reads", .type = .String, .default_value = .{ .String = "" } });
         try command.addFlag(.{ .name = "write-backends", .description = "Enable writes using two backend IDs, e.g. 1,2", .type = .String, .default_value = .{ .String = "" } });
+        try command.addFlag(.{ .name = "write-mode", .description = "Write protocol: staging (default) or opt-in wal", .type = .String, .default_value = .{ .String = "staging" } });
     }
     if (std.mem.eql(u8, name, "repair-file")) {
         try command.addFlag(.{ .name = "replace-corrupt", .description = "Atomically replace a checksum-invalid replica after verified copying", .type = .Bool, .default_value = .{ .Bool = false } });
@@ -131,7 +132,7 @@ fn remoteStatus(ctx: zli.CommandContext) !void {
 }
 
 fn mount(ctx: zli.CommandContext) !void {
-    try @import("fuse.zig").mount(ctx.allocator, ctx.io, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?, ctx.flag("backends", []const u8), ctx.flag("write-backends", []const u8));
+    try @import("fuse.zig").mount(ctx.allocator, ctx.io, ctx.getArg("endpoint").?, ctx.getArg("mountpoint").?, ctx.flag("backends", []const u8), ctx.flag("write-backends", []const u8), ctx.flag("write-mode", []const u8));
 }
 
 fn remoteLookup(ctx: zli.CommandContext) !void {

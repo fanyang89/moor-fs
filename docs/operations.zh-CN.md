@@ -102,7 +102,19 @@ python3 tools/serve_access.py "$EP" "$PWD/mountpoint" "$PWD/access-state-01" \
   --executable "$BIN" --backends "$PWD/backends.json" --write-backends 1,2 --port 1445
 ```
 
-helper 先启动并等待 FUSE，再启动 Samba；标准输出的 ready JSON 包含两个子进程 PID、端口和可写模式，表示服务启动完成，不替代 get/check-file 健康检查。默认只读，其他接入机省略 `--write-backends`。默认监听 loopback，局域网试用显式增加 `--listen 接入机IPv4`。
+helper 先启动并等待 FUSE，再启动 Samba；标准输出的 ready JSON 包含两个子进程 PID、端口、可写模式和 `write_mode`，表示服务启动完成，不替代数据健康检查。默认只读，默认 staging 模式下其他接入机省略 `--write-backends`。默认监听 loopback，局域网试用显式增加 `--listen 接入机IPv4`。
+
+### 显式启用双副本 WAL 原地写入
+
+给上述 supervisor 命令或直接 `mount` 命令增加 `--write-mode wal`，必须同时传 `--write-backends 1,2`。默认 `staging` 继续使用不可变版本发布；WAL 模式首次打开文件（包括只读打开）会把旧内容复制、校验到新可变代次并 CAS 绑定，历史对象保留。之后修改两侧完整 data 文件，不再每次复制整个文件。
+
+普通写成功表示双侧 redo WAL 已持久化；`fsync`/flush/关闭推进数据检查点和 Raft 大小。同一挂载的读写句柄共享当前内容和实时大小；不再保证旧句柄读取旧版本。只读句柄关闭也可能同步共享会话。单 inode 暂限一个可写句柄，打开期间 unlink 返回 `EBUSY`，请先关闭相关句柄再删除。
+
+同一文件只安排一个 WAL 接入进程：读也持有双侧独占锁，竞争挂载返回忙；默认 staging 只读入口和 `get-file`/`check-file` 等不可变对象工具不能用于已绑定可变文件。元数据 `get` 可查看 generation、backends 和检查点大小，但检查点大小可能落后于尚未 fsync 的写入，且不代表内容完整性验证。暂不支持将绑定改回 staging。
+
+后端路径丢失/替换或同步失败会冻结整个共享会话；恢复原映射后关闭全部句柄并重新打开，恢复 WAL 并补报检查点。接入进程被杀后先确认旧进程退出，再重启 WAL 入口。不要用清空 WAL、删除可变目录或强行解除锁代替恢复；此路径尚无跨节点 fencing、自动接管和可变副本内容修复。
+
+验收入口：`zig build test-wal-fuse -Dfuse=true`（本地后端）和 `zig build test-wal-smb -Dfuse=true -Doptimize=safe`（三 voter、双 CIFS、真实 SMB 与 supervisor）。
 
 挂载点必须是现有空目录；helper 对底层目录加互斥锁并拒绝已挂载路径。状态目录必须是挂载点之外的新目录，父目录须存在，建议短路径。每次重启复用原挂载点、换一个新状态目录，保留旧日志。helper 不启动 voter、不挂载 CIFS、不自动重启子进程，也不提供跨节点 writer fencing。
 
