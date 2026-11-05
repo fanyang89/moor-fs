@@ -79,6 +79,25 @@ pub fn put(ctx: zli.CommandContext) !void {
     try publish(ctx, request);
 }
 
+pub fn initialize(ctx: zli.CommandContext) !void {
+    const id = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
+    if (id == 0) return error.InvalidRequest;
+    const config = try mappings(ctx);
+    defer config.deinit();
+    const backend = try query(ctx, ?m.Backend, "Backend", .{ .id = id });
+    defer backend.deinit();
+    const registered = backend.value orelse return error.BackendNotFound;
+    const store = try objects.openMapped(ctx.io, config.value, id, true);
+    defer store.close();
+    const import = try store.root.openDir(ctx.io, "import", .{ .follow_symlinks = false, .iterate = true });
+    defer import.close(ctx.io);
+    try objects.syncDir(ctx.io, import);
+    try objects.syncDir(ctx.io, store.staging);
+    try objects.syncDir(ctx.io, store.objects);
+    try objects.syncDir(ctx.io, store.root);
+    try ctx.writer.print("{{\"backend\":{d},\"failure_domain\":{d},\"initialized\":true}}\n", .{ id, registered.failure_domain });
+}
+
 fn currentVersion(ctx: zli.CommandContext, id: u64) !m.Version {
     const node = try query(ctx, ?m.Node, "Get", .{ .id = id });
     defer node.deinit();

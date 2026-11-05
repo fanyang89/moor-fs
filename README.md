@@ -2,6 +2,7 @@
 
 A distributed SMB file-service prototype for pooling heterogeneous NAS devices.
 The design is documented in Chinese in `docs/design.zh-CN.md`.
+Deployment and recovery commands are in `docs/operations.zh-CN.md`.
 
 ## Build and run
 
@@ -336,6 +337,20 @@ issuing the new commands.
 
 ### Whole-file object I/O on mounted backends
 
+After registering backend IDs and configuring mappings, initialize each existing
+backend root without uploading a placeholder file:
+
+```sh
+zig-out/bin/nas-fs init-backend "$EP" backends.json 1
+zig-out/bin/nas-fs init-backend "$EP" backends.json 2
+```
+
+The command checks registration and mount identity, creates and syncs `import`,
+`staging`, and `objects`, and returns the registered failure domain. Repeating it
+preserves existing objects and metadata. The root must already exist; failure can
+leave partially created directories and retry is supported. This is initialization,
+not a complete object-health scan or a multi-backend transaction.
+
 Provide an access-node-local JSON configuration mapping registered backend IDs to
 absolute, existing directories on mounted NAS shares. Paths and mount credentials
 are not replicated in Raft. For local development, ordinary directories work too:
@@ -659,7 +674,7 @@ or SMB session migration is implied.
 Use one writable access node for this prototype. Keep other SMB entrances read-only;
 there is no distributed SMB lock service or automatic writer failover. Both backend
 IDs must already be registered in distinct failure domains, mapped locally, and
-have existing `staging/` and `objects/` directories (as initialized by `put-file`).
+have existing `staging/` and `objects/` directories (initialize with `init-backend`).
 
 ```sh
 zig-out/bin/nas-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json --write-backends 1,2

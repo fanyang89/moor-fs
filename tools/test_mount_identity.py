@@ -32,6 +32,8 @@ def test_mount_identity(
         report = run("check-file", endpoints, config, inode)
         assert report["replicas"][0]["reason"] == "BackendMountMismatch", report
         assert report["replicas"][1]["status"] == "healthy", report
+        result = run("init-backend", endpoints, config, 1, success=False)
+        assert "BackendMountMismatch" in result.stdout + result.stderr
         for flags in ([], ["--replace-corrupt"]):
             result = run(
                 "repair-file", endpoints, config, inode, 1, *flags, success=False

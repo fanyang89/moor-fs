@@ -36,6 +36,32 @@ def test_data(
             mapping["allow_local"] = True
         mappings.append(mapping)
     config.write_text(json.dumps(mappings))
+    unknown = directory / "unregistered-backend.json"
+    unknown.write_text(json.dumps([{**mappings[0], "id": 999999}]))
+    failure = run("init-backend", endpoints, unknown, 999999, success=False)
+    assert "BackendNotFound" in failure.stdout + failure.stderr
+    assert list(roots[0].iterdir()) == []
+    for i, root in enumerate(roots):
+        for _ in range(2):
+            result = run("init-backend", endpoints, config, i + 1)
+            assert result["backend"] == i + 1 and result["initialized"], result
+            assert (
+                result["failure_domain"]
+                == run("backend", endpoints, i + 1)["failure_domain"]
+            )
+        assert set(path.name for path in root.iterdir()) == {
+            "import",
+            "staging",
+            "objects",
+        }
+        assert all(
+            not list((root / child).iterdir())
+            for child in ("import", "staging", "objects")
+        )
+    print(
+        "PASS: registered backend initialization is repeatable and creates no objects; unknown backend rejected before writes",
+        flush=True,
+    )
     source = directory / "source.bin"
     content = bytes(range(256)) * 5000 + b"tail"
     source.write_bytes(content)
@@ -103,10 +129,10 @@ def test_data(
     assert "NoPublishedVersion" in failure.stdout + failure.stderr
 
     # A failed second replica must not publish or overwrite its corrupt object.
-    for child in ("objects", "staging"):
-        (roots[1] / child).mkdir()
     bad = object_path(roots[1], 200, content)
     bad.write_bytes(b"corrupt")
+    run("init-backend", endpoints, config, 2)
+    assert bad.read_bytes() == b"corrupt", "initialization replaced an existing object"
     failure = upload(2001, 200, 0, success=False)
     assert "ChecksumMismatch" in failure.stdout + failure.stderr, (
         failure.stdout,

@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "lookup", "Look up a child by name", &.{ "endpoint", "parent", "name" }, remoteLookup);
     try register(root, options, "list", "List a directory page", &.{ "endpoint", "parent" }, remoteList);
     try register(root, options, "backend", "Read a registered NAS failure domain", &.{ "endpoint", "id" }, remoteBackend);
+    try register(root, options, "init-backend", "Initialize a registered backend's guarded object directories", &.{ "endpoint", "config", "id" }, @import("data_cli.zig").initialize);
     try register(root, options, "file-version", "Read an immutable file version", &.{ "endpoint", "id" }, remoteVersion);
     try register(root, options, "put-file", "Copy, verify and publish a file version", &.{ "endpoint", "config", "json", "source" }, @import("data_cli.zig").put);
     try register(root, options, "get-file", "Read a verified replica into a new local file", &.{ "endpoint", "config", "id", "destination" }, @import("data_cli.zig").get);

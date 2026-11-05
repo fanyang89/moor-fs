@@ -637,3 +637,11 @@ FUSE 和 SMB 各增加一例：先在双副本落盘后暂停接入进程，再�
 自动重试有预算上限，实际测试曾遇到 ClusterUnavailable，因此本场景不承诺客户端一定透明成功。无论自动重试成功还是明确失败，都在新 leader 上以原 request_id、原 expected_version 和相同 publication 重放。必须返回原来的 ok/inode 回执，current_version 必须保持为暂停前的对象版本；不能因为 expected_version 已过期而将重复请求误判为版本冲突。随后校验完整内容、健康双副本及接入重启后继续写入，最后恢复旧 voter。
 
 Debug 与 Safe 完整 SMB 故障套件通过，矩阵增至十三例；35 项单测通过，普通 Safe FUSE 构建检查确认不含三类故障选择器。另为 FUSE 发布失败增加 inode、expected_version 和错误名日志，帮助定位不确定结果。重放原请求的幂等性不等于普通 SMB 客户端重新打开并重写会复用同一 request_id，也不等于会话透明恢复；部署恢复与 Windows/macOS 验收仍待完成。
+
+## 35. 后端独立初始化与部署操作入口
+
+新增 `init-backend ENDPOINT CONFIG ID`：先通过线性化元数据查询确认 backend 已登记，再复用挂载身份校验路径，创建 import/staging/objects 并同步目录。root 必须预先存在，命令不创建 inode、版本或请求回执，不需要通过上传占位文件初始化可写入口。重复执行保留已有对象；异常可留下部分空目录，修复原因后重试，不宣称多后端原子初始化。它只准备目录，不替代 check-file 完整校验。
+
+本地目录集群测试与真实 CIFS 的 Safe 完整 SMB E2E 覆盖空库初始化、重复调用、已有损坏对象保持原样，以及未登记后端在写目录前拒绝；挂载身份故障套件同时验证 init-backend 拒绝本地回落、错误共享及跨挂载 staging。35 项单测、Debug 集群 E2E 与 Safe SMB E2E 通过。
+
+新增 `docs/operations.zh-CN.md`，提供依赖与权限检查、三 voter 身份/地址、NAS CIFS 挂载与后端登记、初始化、单可写 FUSE/Samba 入口、首文件下载与副本检查、按依赖顺序停止/重启，以及挂载故障、不确定写入、缺失/损坏副本和元数据本地重建的恢复说明。明确日志位置、guest/明文范围、容量上限、构建 RPATH 与发布包限制，并区分 E2E 已有证据和未完成的真实多机部署签收；NASFS-8 仍进行中。
