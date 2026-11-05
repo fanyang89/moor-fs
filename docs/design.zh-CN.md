@@ -1,6 +1,6 @@
 # nas-fs 分布式文件服务设计
 
-状态：初步设计，尚未实现。本文记录已确认的产品约定，并明确需要原型验证的技术细节。
+状态：已实现可运行原型，仍有生产化与多机验收边界。本文记录产品约定和历次实现；历史本地暂存、逐 write 发布语义由第 38 节的后端双 staging 写会话替代。
 
 ## 1. 目标与范围
 
@@ -663,3 +663,15 @@ ready 只表示服务启动，不等于完整数据健康；helper 自身 SIGKIL
 manifest.json 记录提交、工作树 dirty 状态、子模块版本、工具链、架构、libc 和外部共享库；脚本在包外目录检查库解析及 CLI/launcher help，并验证校验清单。输出目录必须新建，不覆盖已有产物；失败保留诊断。launcher 用 python3 -B，避免构建自检把路径相关 pycache 混入交付清单。
 
 验证将包整体移动后，在包外工作目录运行包内 test_e2e.py 与 bin/nas-fs 的真实 SMB 套件，包含接入 supervisor 的启停与故障恢复。它证明程序、库、helpers 和测试不依赖源码树所在目录，不等于独立机器或跨发行版 ABI 验收。目标机仍需兼容 glibc/加载器、liburing/libnuma、Samba/cifs-utils/fusermount3、Python 和内核支持；不提供静态/跨架构镜像、签名、系统服务或完整备份恢复。操作入口见 `docs/package.zh-CN.md`。
+
+## 38. 后端双 staging 写会话
+
+可写句柄直接持有两个 NAS staging 文件，不再使用接入机 tmpfile。普通 write/truncate 顺序修改两侧，成功表示两侧接受修改，不表示已同步或发布。新建与截断打开从空 staging 开始；局部修改先从完整校验的旧版本用 256 KiB 缓冲区复制到两侧，尚无 reflink、服务端复制或并行写优化。
+
+flush/fsync/关闭遇到脏句柄时，重新验证配置目录与固定描述符的挂载 ID/inode，分别同步并计算摘要，要求大小和哈希一致，再以不覆盖 rename 安装两个不可变对象、同步目录，最后 expected_version CAS 发布。O_SYNC/O_DSYNC 写入在回复前执行发布。重复 fsync 无新修改时不创建版本；发布消耗可写 staging 描述符，同一句柄后续修改重新建立 staging，不能原地修改已发布对象。
+
+写句柄读取自己的 staging；其他读者读取已提交版本，已打开只读句柄固定旧版本。未发布的新 inode 可以先出现在命名空间，但尚无可读版本。flush（包括继承描述符关闭）可能在上传中途触发，因此仍不保证整个 SMB 上传原子替换。任何写入或发布失败冻结句柄；CAS 冲突不覆盖其他发布。RPC 错误可能隐藏已提交结果，必须保留已安装对象并查询实际状态。
+
+进程死亡可能留下孤立 staging；已确认普通 write、尚未发布的数据不自动恢复，也没有 staging GC 或跨机写会话 fencing。发布后的耐久性仍依赖 NAS 对 fsync 的实现，不以进程崩溃测试代替硬件断电验证。单可写入口建议和版本/回执容量限制仍适用。
+
+新增单元测试验证 staging 重命名保持 inode、后续 staging 不改变不可变对象，以及配置目录被替换时拒绝写入。FUSE/真实 CIFS SMB 验证双 staging 内容与未发布可见性、重复 fsync、同句柄多次提交、稀疏写/截断、staging 损坏冻结和 O_DSYNC。故障矩阵扩展为十五项：新增在首侧 staging 写完后杀死接入进程，以及双侧普通 write 已确认、fsync 前杀死进程；均验证未安装对象、元数据保持旧版本、重启读取原内容，明确区分 WRITE_ACK 与 COMMIT_ACK。

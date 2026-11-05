@@ -123,6 +123,7 @@ def test_write_faults(
         assert result["status"] == "ok", result
         old_version = request_id
         before = [set((root / "objects").iterdir()) for root in roots]
+        stages_before = [set((root / "staging").iterdir()) for root in roots]
         source.write_bytes(content)
         expected = (
             content
@@ -130,8 +131,6 @@ def test_write_faults(
             or kind == "disconnect"
             or outage in ("election", "reply-loss")
             else original
-            if kind == "fuse"
-            else b""
         )
 
         def interrupt(command, access):
@@ -140,6 +139,32 @@ def test_write_faults(
             with log.open("w") as output:
                 client = subprocess.Popen(command, stdout=output, stderr=output)
             try:
+                if point in ("staged", "first_stage_write"):
+                    wait_stopped(client if point == "staged" else access)
+                    assert access.poll() is None
+                    assert ("WRITE_ACK" in log.read_text()) == (point == "staged")
+                    assert (
+                        run("get", endpoints, inode)["current_version"] == old_version
+                    )
+                    for i, root in enumerate(roots):
+                        assert set((root / "objects").iterdir()) == before[i]
+                        staged = set((root / "staging").iterdir()) - stages_before[i]
+                        staged_content = (
+                            original
+                            if point == "first_stage_write" and i == 1
+                            else content
+                        )
+                        assert (
+                            len(staged) == 1
+                            and staged.pop().read_bytes() == staged_content
+                        )
+                    access.kill()
+                    assert access.wait(timeout=15) == -signal.SIGKILL
+                    if point == "staged":
+                        client.send_signal(signal.SIGCONT)
+                    assert client.wait(timeout=45) != 0
+                    assert "COMMIT_ACK" not in log.read_text()
+                    return
                 wait_stopped(access)
                 assert client.poll() is None, log.read_text()
                 current = run("get", endpoints, inode)["current_version"]
@@ -149,11 +174,8 @@ def test_write_faults(
                     assert record["sha256"] == list(hashlib.sha256(content).digest()), (
                         record
                     )
-                elif kind == "fuse":
-                    assert current == old_version, record
                 else:
-                    # SMB put already acknowledged a separate empty truncation.
-                    assert record["size"] == 0, record
+                    assert current == old_version, record
                 staged_version = None
                 for index, root in enumerate(roots):
                     additions = set((root / "objects").iterdir()) - before[index]
@@ -185,7 +207,7 @@ def test_write_faults(
                         code = client.wait(timeout=90)
                         output = log.read_text()
                         if kind == "fuse":
-                            assert code != 0 and "WRITE_ACK" not in output, output
+                            assert code != 0 and "COMMIT_ACK" not in output, output
                         else:
                             assert code != 0 or "NT_STATUS_" in output, output
                         assert access.poll() is None
@@ -229,9 +251,9 @@ def test_write_faults(
                             # Bounded automatic retries may expire during election.
                             # Replay the exact original request to verify its durable receipt.
                             if kind == "fuse":
-                                assert (
-                                    code == 0 and f"WRITE_ACK {len(content)}" in output
-                                ) or (code != 0 and "WRITE_ACK" not in output), output
+                                assert (code == 0 and "COMMIT_ACK" in output) or (
+                                    code != 0 and "COMMIT_ACK" not in output
+                                ), output
                             else:
                                 assert code == 0 or "NT_STATUS_" in output, output
                             version = run("file-version", endpoints, staged_version)
@@ -258,7 +280,7 @@ def test_write_faults(
                         else:
                             assert code == 0, output
                             if kind == "fuse":
-                                assert f"WRITE_ACK {len(content)}" in output, output
+                                assert "COMMIT_ACK" in output, output
                             else:
                                 assert "NT_STATUS_" not in output, output
                         assert (
@@ -293,7 +315,7 @@ def test_write_faults(
                 code = client.wait(timeout=45)
                 output = log.read_text()
                 if kind == "fuse":
-                    assert code != 0 and "WRITE_ACK" not in output, output
+                    assert code != 0 and "COMMIT_ACK" not in output, output
                 else:
                     assert code != 0 or "NT_STATUS_" in output, output
             finally:
@@ -301,14 +323,20 @@ def test_write_faults(
                     client.kill()
                 client.wait(timeout=10)
 
-        with mounted(label, point) as (path, access):
+        with mounted(label, None if point == "staged" else point) as (path, access):
             if kind == "fuse":
                 interrupt(
                     [
                         sys.executable,
                         "-c",
-                        "import os,sys; fd=os.open(sys.argv[1],os.O_RDWR); "
-                        "n=os.pwrite(fd,b'new'*1024,0); print('WRITE_ACK',n,flush=True); os.close(fd)",
+                        "import os,sys,signal; fd=os.open(sys.argv[1],os.O_RDWR); "
+                        "n=os.pwrite(fd,b'new'*1024,0); print('WRITE_ACK',n,flush=True); "
+                        + (
+                            "os.kill(os.getpid(),signal.SIGSTOP); "
+                            if point == "staged"
+                            else ""
+                        )
+                        + "os.fsync(fd); print('COMMIT_ACK',flush=True); os.close(fd)",
                         str(path / name),
                     ],
                     access,
@@ -357,5 +385,7 @@ def test_write_faults(
         exercise(kind, "both_replicas", outage="election")
         exercise(kind, "both_replicas", outage="quorum")
         exercise(kind, "both_replicas", outage="reply-loss")
+    exercise("fuse", "staged")
+    exercise("fuse", "first_stage_write")
     if smb:
         exercise("disconnect", "first_replica")

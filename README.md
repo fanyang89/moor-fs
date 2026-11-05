@@ -534,15 +534,15 @@ For both direct FUSE writes and SMB uploads, the harness kills the access proces
 after the first replica, after both replicas, and after metadata publication but
 before replying. It checks the exact installed objects, committed metadata,
 client failure, read-only visibility, and successful writes after restart.
-Pre-publication crashes preserve the previous version; SMB overwrite has already
-committed its separate empty truncation, so that previous version is empty.
+Pre-publication crashes preserve the previous committed contents, including for
+SMB overwrite; its truncation remains in backend staging until publication.
 Post-publication crashes expose the new contents despite client failure.
 An additional case kills `smbclient` after the first replica and resumes the access
 process: the in-flight write still commits two healthy replicas without a client
 acknowledgement. Disconnect does not cancel or roll back an accepted write;
 reopen and inspect the committed state before deciding whether to retry.
-Only instrumented builds honor `NAS_FS_WRITE_STOP` values `first_replica`,
-`both_replicas`, and `published`, and only for nonempty publications. Normal builds
+Only instrumented builds honor `NAS_FS_WRITE_STOP` values `first_stage_write`,
+`first_replica`, `both_replicas`, and `published`, for nonempty writes/publications. Normal builds
 omit these checkpoints. This coverage uses Linux clients; Windows/macOS client
 acceptance and distributed SMB locking remain outstanding.
 
@@ -562,7 +562,7 @@ or the exact staged version, checks the corresponding contents and two healthy
 replicas, and verifies further writes after access restart. A timed-out proposal
 may commit once quorum returns; the direct FUSE cases observed this delayed commit
 in both Debug and Safe runs. Object installation alone never warrants a successful
-client reply. The full fault matrix now contains eleven scenarios.
+commit acknowledgement. These cases bring the fault matrix to eleven scenarios.
 
 Two metadata-reply-loss cases extend this matrix to thirteen scenarios. After a
 nonempty publication commits, a one-shot server checkpoint stops the leader before
@@ -574,6 +574,11 @@ are checked afterward. Automatic client retries remain bounded and can return
 failure during election; receipt replay and committed-state recovery are verified
 even in that case. This does not make ordinary client reopen/rewrite reuse the
 original request ID or guarantee transparent SMB session recovery.
+
+Two backend-staging crash cases bring the total to fifteen: kill FUSE between the
+two staging writes, or after both staging writes were acknowledged but before
+fsync. Neither changes installed objects or committed metadata; restart reads the
+previous version. Ordinary `WRITE_ACK` is distinct from durable `COMMIT_ACK`.
 
 Only instrumented metadata servers read `NAS_FS_PUBLISH_STOP_DIR`: an inode-named
 marker in this directory arms the next successful nonempty publication's reply
@@ -738,16 +743,21 @@ The helper refuses `--writable` on a read-only mount. DOS archive-bit mapping an
 DOS xattr storage are disabled; ownership/mode/time changes, ACLs, links, mmap,
 rename-over-existing and persistent timestamps are not implemented.
 
-Each writer uses an anonymous local temporary file (`tmpfile`, closed on handle
-release) seeded from a verified current replica. Each FUSE write or size change
-copies the **whole resulting file** to both NAS stores, verifies/syncs/readbacks
-the objects, and publishes through version CAS **before returning success**.
-Create publishes a dual-replica empty version before acknowledging success.
-`flush`/`fsync` report the handle's existing result, with no additional publication.
-This deliberately expensive path establishes synchronous correctness, not throughput:
-uploads can expose committed intermediate versions, and overwrite may first publish
-an empty truncation. It is not whole-upload atomic replacement. Read handles still
-pin their original versions.
+Each writable handle owns a staging file on each of the two NAS backends. Ordinary
+write/truncate operations update both staging files directly, currently sequentially;
+the access node uses bounded buffers, not a whole-file local temporary file.
+New/truncating opens start empty; partial updates seed both stages from a verified
+current replica. `flush`, `fsync`, and close synchronize and hash both stages,
+install them by rename, then publish with version CAS. `O_SYNC`/`O_DSYNC` writes
+publish before replying. A clean repeated fsync creates no new version.
+
+An ordinary write acknowledgement means both stages accepted the bytes, **not**
+durable metadata publication. Writable handles read their staged changes; other
+readers see committed versions, and existing read handles pin their original version.
+New inodes may be visible before they have readable committed contents. Subsequent
+mutation after publication creates fresh stages from the committed version; installed
+objects are never modified. Flush can publish during an upload (including inherited
+descriptor close), so this is not whole-upload atomic replacement.
 
 Only one writable handle per inode is allowed in a mount (`EBUSY`). External CLI
 publication or another mount can cause a CAS conflict (`EAGAIN`); this prevents
@@ -755,10 +765,11 @@ stale overwrite, but does not implement cross-node SMB share modes. Any write I/
 or publication failure freezes that handle: later writes/reads/flushes fail and
 close can report the error. Reopen and inspect current metadata after an uncertain
 RPC result; an error can hide a committed version. Failed create can leave an
-unpublished inode, and failed publications can leave objects; neither is reported
-as a successful write or automatically deleted. Process death closes local staging,
-and previously acknowledged writes remain published. No unacknowledged staging
-recovery or durable SMB session migration is provided.
+unpublished inode, and failed publications can leave installed objects. Process
+death can leave orphan backend staging files; acknowledged but unpublished writes
+are not recovered automatically. Installed objects are retained even on RPC errors
+because publication may have committed. No automatic staging recovery/GC or durable
+SMB session migration is provided.
 
 Metadata rename/remove now resolve parent/name inside the Raft-applied transaction
 (`rename_entry`/`remove_entry`), avoiding a separate lookup/mutation race. Existing
@@ -768,12 +779,14 @@ not recognize their WAL entries.
 
 Prototype limits still apply: 64 handles per mount, 2,048 retained versions and
 8,192 request receipts, no GC, no NAS I/O deadline, and administrator-trusted mount
-physical failure domains. Per-write publication can exhaust the version limit
+physical failure domains. Frequent flush/publication can exhaust the version limit
 quickly. Guarded mappings reject mount mismatches; `allow_local` explicitly bypasses
 that protection. This is not yet a production writable filesystem.
 
 `test-fuse` now includes writable offset/truncate, fixed old reads, writer exclusion,
-CAS conflict, second-store failure and namespace checks. `test-smb` additionally
+CAS conflict, second-store failure and namespace checks, plus staging visibility,
+rename inode preservation, repeated fsync, same-handle multiple commits, sparse
+writes, staging corruption and O_DSYNC. `test-smb` additionally
 exercises real SMB upload/overwrite/download/rename/delete/mkdir/rmdir, empty files,
 second-replica failure and writes after metadata leader recovery, alongside the
 existing read-only tests and backend restart/remount hash checks.

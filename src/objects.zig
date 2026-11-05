@@ -128,6 +128,17 @@ pub const Store = struct {
         self.root.close(self.io);
     }
 
+    pub fn validateMapping(self: Store, mapping: Mapping) !void {
+        const current = try Store.openMapping(self.io, mapping, false);
+        defer current.close();
+        for ([_]Dir{ self.root, self.staging, self.objects }, [_]Dir{ current.root, current.staging, current.objects }) |pinned, fresh| {
+            const a: File = .{ .handle = pinned.handle, .flags = .{ .nonblocking = false } };
+            const b: File = .{ .handle = fresh.handle, .flags = .{ .nonblocking = false } };
+            if (try mount.mountId(self.io, pinned) != try mount.mountId(self.io, fresh) or
+                (try a.stat(self.io)).inode != (try b.stat(self.io)).inode) return error.BackendMountMismatch;
+        }
+    }
+
     pub fn openVerified(self: Store, version: m.Version) !File {
         var buffer: [96]u8 = undefined;
         const file = try self.objects.openFile(self.io, try name(&buffer, version), .{ .follow_symlinks = false, .allow_directory = false });
@@ -191,6 +202,64 @@ pub const Store = struct {
         try syncDir(self.io, self.objects);
         try syncDir(self.io, self.staging);
         if (replace_corrupt) @import("repair_fault.zig").checkpoint(.after_sync);
+    }
+};
+
+/// A backend-resident mutable file. Installation consumes its writable descriptor.
+pub const Stage = struct {
+    store: Store,
+    file: ?File,
+    temporary: [32]u8,
+    installed: bool = false,
+
+    pub fn create(io: Io, mapping: Mapping, source: ?File, base: ?m.Version) !Stage {
+        const store = try Store.openMapping(io, mapping, false);
+        errdefer store.close();
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        const temporary = std.fmt.bytesToHex(random, .lower);
+        const file = try store.staging.createFile(io, &temporary, .{ .read = true, .exclusive = true });
+        errdefer file.close(io);
+        errdefer store.staging.deleteFile(io, &temporary) catch {};
+        if (source) |old| {
+            if (!matches(try transfer(io, old, file), base.?)) return error.SourceChanged;
+        }
+        return .{ .store = store, .file = file, .temporary = temporary };
+    }
+
+    pub fn deinit(self: *Stage) void {
+        if (self.file) |file| file.close(self.store.io);
+        if (!self.installed) self.store.staging.deleteFile(self.store.io, &self.temporary) catch {};
+        self.store.close();
+        self.* = undefined;
+    }
+
+    pub fn syncDigest(self: *Stage) !Digest {
+        const file = self.file orelse return error.InvalidSource;
+        try file.sync(self.store.io);
+        return hash(self.store.io, file);
+    }
+
+    pub fn install(self: *Stage, version: m.Version) !void {
+        if (self.store.identity) |identity| _ = try mount.validate(self.store.io, self.store.root, identity);
+        const file = self.file orelse return error.InvalidSource;
+        // Recheck after both replicas have been hashed, before giving this one an immutable name.
+        if (!matches(try hash(self.store.io, file), version)) return error.ChecksumMismatch;
+        var buffer: [96]u8 = undefined;
+        self.store.staging.renamePreserve(&self.temporary, self.store.objects, try name(&buffer, version), self.store.io) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                const existing = try self.store.openVerified(version);
+                defer existing.close(self.store.io);
+                try existing.sync(self.store.io);
+                try self.store.staging.deleteFile(self.store.io, &self.temporary);
+            },
+            else => return err,
+        };
+        self.installed = true;
+        file.close(self.store.io);
+        self.file = null;
+        try syncDir(self.store.io, self.store.objects);
+        try syncDir(self.store.io, self.store.staging);
     }
 };
 

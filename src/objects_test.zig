@@ -3,6 +3,47 @@ const t = std.testing;
 const objects = @import("objects.zig");
 const m = @import("metadata.zig");
 
+test "backend staging installs by rename and later staging preserves the immutable inode" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(path);
+    const mapping: objects.Mapping = .{ .id = 1, .root = path, .allow_local = true };
+    const store = try objects.Store.openMapping(t.io, mapping, true);
+    defer store.close();
+    var stage = try objects.Stage.create(t.io, mapping, null, null);
+    defer stage.deinit();
+    try stage.file.?.writePositionalAll(t.io, "staged", 0);
+    const inode = (try stage.file.?.stat(t.io)).inode;
+    const digest = try stage.syncDigest();
+    const version: m.Version = .{ .id = 42, .inode = 2, .size = digest.size, .sha256 = digest.sha256, .backends = .{ 1, 2 } };
+    try stage.install(version);
+    try t.expect(stage.file == null);
+    const pinned = try store.openVerified(version);
+    defer pinned.close(t.io);
+    try t.expectEqual(inode, (try pinned.stat(t.io)).inode);
+    var next = try objects.Stage.create(t.io, mapping, pinned, version);
+    defer next.deinit();
+    try next.file.?.writePositionalAll(t.io, "new", 0);
+    try t.expect(objects.matches(try objects.hash(t.io, pinned), version));
+    try t.expectError(error.ChecksumMismatch, next.install(version));
+    try t.expect(objects.matches(try objects.hash(t.io, pinned), version));
+}
+
+test "staging revalidation rejects replacement of its configured directory" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(path);
+    const mapping: objects.Mapping = .{ .id = 1, .root = path, .allow_local = true };
+    const store = try objects.Store.openMapping(t.io, mapping, true);
+    defer store.close();
+    try store.validateMapping(mapping);
+    try tmp.dir.rename("staging", tmp.dir, "old-staging", t.io);
+    try tmp.dir.createDir(t.io, "staging", .default_dir);
+    try t.expectError(error.BackendMountMismatch, store.validateMapping(mapping));
+}
+
 test "mount mismatch refuses initialization of exposed local storage" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();

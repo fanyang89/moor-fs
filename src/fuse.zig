@@ -12,8 +12,12 @@ const Api = extern struct {
     free: *const fn ([*]Entry, usize) callconv(.c) void,
     open: *const fn (*anyopaque, u64, *Entry, *c_int) callconv(.c) c_int,
     writable: c_int,
-    prepare: *const fn (*anyopaque, u64, *Entry, *c_int, *u64) callconv(.c) c_int,
-    commit: *const fn (*anyopaque, u64, c_int, *u64, *u64) callconv(.c) c_int,
+    prepare: *const fn (*anyopaque, u64, c_int, *Entry, *?*Writer) callconv(.c) c_int,
+    commit: *const fn (*Writer) callconv(.c) c_int,
+    write: *const fn (*Writer, [*]const u8, usize, u64, *u64) callconv(.c) c_int,
+    truncate: *const fn (*Writer, u64) callconv(.c) c_int,
+    read: *const fn (*Writer, [*]u8, usize, u64) callconv(.c) c_int,
+    close_writer: *const fn (*Writer) callconv(.c) void,
     create: *const fn (*anyopaque, u64, [*:0]const u8, c_int, *Entry) callconv(.c) c_int,
     remove: *const fn (*anyopaque, u64, [*:0]const u8, c_int) callconv(.c) c_int,
     rename: *const fn (*anyopaque, u64, [*:0]const u8, u64, [*:0]const u8) callconv(.c) c_int,
@@ -40,43 +44,20 @@ const Client = struct {
         return result.value.inode;
     }
 
-    fn prepareFile(self: *Client, id: u64, out: *Entry, fd: *c_int, expected: *u64) !void {
+    fn prepareFile(self: *Client, id: u64, truncate_requested: bool, out: *Entry) !*Writer {
         const record = try self.query(?m.Node, "Get", .{ .id = id });
         defer record.deinit();
         const node = record.value orelse return error.NotFound;
         if (node.kind != .file) return error.IsDirectory;
         if (node.replicas != .two) return error.InvalidReplicaPolicy;
-        expected.* = node.current_version;
         out.* = try entry(node);
-        fd.* = -1;
-        if (try self.getVersion(node)) |version| {
-            out.size = version.size;
-            for (version.backends) |backend| {
-                const store = objects.openMapped(self.io, self.mappings, backend, false) catch continue;
-                defer store.close();
-                const file = store.openVerified(version) catch continue;
-                fd.* = file.handle;
-                return;
-            }
-            return error.NoHealthyReplica;
-        }
-    }
-
-    fn publishFile(self: *Client, id: u64, fd: c_int, expected: *u64, size: *u64) !void {
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
-        const digest = try objects.hash(self.io, file);
-        const version: m.Version = .{ .id = self.randomId(), .inode = id, .size = digest.size, .sha256 = digest.sha256, .backends = self.write_backends };
-        for (self.write_backends, 0..) |backend, i| {
-            const store = try objects.openMapped(self.io, self.mappings, backend, false);
-            defer store.close();
-            try store.put(file, version);
-            if (i == 0) @import("write_fault.zig").checkpoint(.first_replica, version.size);
-        }
-        @import("write_fault.zig").checkpoint(.both_replicas, version.size);
-        _ = try self.apply(.{ .publish = .{ .expected_version = expected.*, .version = version } });
-        @import("write_fault.zig").checkpoint(.published, version.size);
-        expected.* = version.id;
-        size.* = version.size;
+        const base = try self.getVersion(node);
+        const writer = try allocator.create(Writer);
+        errdefer allocator.destroy(writer);
+        writer.* = .{ .client = self, .inode = id, .base = base, .size = if (truncate_requested) 0 else if (base) |v| v.size else 0, .dirty = truncate_requested or base == null };
+        try writer.ensureStages(truncate_requested);
+        out.size = writer.size;
+        return writer;
     }
 
     fn query(self: *Client, comptime T: type, method: []const u8, request: anytype) !std.json.Parsed(T) {
@@ -117,6 +98,10 @@ const Client = struct {
         const version = (try self.getVersion(node)) orelse return error.NoPublishedVersion;
         out.* = try entry(node);
         out.size = version.size;
+        return self.openVersion(version);
+    }
+
+    fn openVersion(self: *Client, version: m.Version) !std.Io.File {
         for (version.backends) |backend| {
             if (backend == 0) continue;
             const store = objects.openMapped(self.io, self.mappings, backend, false) catch continue;
@@ -155,6 +140,96 @@ const Client = struct {
             } else return entries.toOwnedSlice(allocator);
         }
         return error.DirectoryChanged;
+    }
+};
+
+const Writer = struct {
+    client: *Client,
+    inode: u64,
+    base: ?m.Version,
+    size: u64,
+    dirty: bool,
+    stages: ?[2]objects.Stage = null,
+    reader: ?std.Io.File = null,
+
+    fn expected(self: *Writer) u64 {
+        return if (self.base) |version| version.id else 0;
+    }
+
+    fn ensureStages(self: *Writer, empty: bool) !void {
+        if (self.stages != null) return;
+        const source = if (!empty and self.base != null) try self.client.openVersion(self.base.?) else null;
+        defer if (source) |file| file.close(self.client.io);
+        var stages: [2]objects.Stage = undefined;
+        var count: usize = 0;
+        errdefer for (stages[0..count]) |*stage| stage.deinit();
+        for (self.client.write_backends) |backend| {
+            stages[count] = try objects.Stage.create(self.client.io, try objects.mappingFor(self.client.mappings, backend), source, self.base);
+            count += 1;
+        }
+        self.stages = stages;
+        if (self.reader) |file| file.close(self.client.io);
+        self.reader = null;
+    }
+
+    fn validate(self: *Writer) !void {
+        for (&self.stages.?, self.client.write_backends) |*stage, backend| {
+            try stage.store.validateMapping(try objects.mappingFor(self.client.mappings, backend));
+        }
+    }
+
+    fn write(self: *Writer, bytes: []const u8, offset: u64) !void {
+        if (bytes.len == 0) return;
+        try self.ensureStages(false);
+        try self.validate();
+        self.dirty = true;
+        for (&self.stages.?, 0..) |*stage, i| {
+            try stage.file.?.writePositionalAll(self.client.io, bytes, offset);
+            if (i == 0) @import("write_fault.zig").checkpoint(.first_stage_write, @max(self.size, offset + bytes.len));
+        }
+        self.size = @max(self.size, offset + bytes.len);
+    }
+
+    fn truncate(self: *Writer, size: u64) !void {
+        try self.ensureStages(size == 0);
+        try self.validate();
+        self.dirty = true;
+        for (&self.stages.?) |*stage| try stage.file.?.setLength(self.client.io, size);
+        self.size = size;
+    }
+
+    fn read(self: *Writer, bytes: []u8, offset: u64) !void {
+        const file = if (self.stages) |stages| stages[0].file.? else blk: {
+            if (self.reader == null) self.reader = try self.client.openVersion(self.base.?);
+            break :blk self.reader.?;
+        };
+        if (try file.readPositionalAll(self.client.io, bytes, offset) != bytes.len) return error.SourceChanged;
+    }
+
+    fn commit(self: *Writer) !void {
+        if (!self.dirty) return;
+        try self.validate();
+        const first = try self.stages.?[0].syncDigest();
+        const second = try self.stages.?[1].syncDigest();
+        if (first.size != self.size or !std.meta.eql(first, second)) return error.ChecksumMismatch;
+        const version: m.Version = .{ .id = self.client.randomId(), .inode = self.inode, .size = first.size, .sha256 = first.sha256, .backends = self.client.write_backends };
+        for (&self.stages.?, 0..) |*stage, i| {
+            try stage.install(version);
+            if (i == 0) @import("write_fault.zig").checkpoint(.first_replica, version.size);
+        }
+        @import("write_fault.zig").checkpoint(.both_replicas, version.size);
+        _ = try self.client.apply(.{ .publish = .{ .expected_version = self.expected(), .version = version } });
+        @import("write_fault.zig").checkpoint(.published, version.size);
+        for (&self.stages.?) |*stage| stage.deinit();
+        self.stages = null;
+        self.base = version;
+        self.dirty = false;
+    }
+
+    fn deinit(self: *Writer) void {
+        if (self.stages) |*stages| for (stages) |*stage| stage.deinit();
+        if (self.reader) |file| file.close(self.client.io);
+        allocator.destroy(self);
     }
 };
 
@@ -199,19 +274,38 @@ fn checkStatus(status: m.Status) !void {
     };
 }
 
-fn prepare(context: *anyopaque, id: u64, out: *Entry, fd: *c_int, expected: *u64) callconv(.c) c_int {
+fn prepare(context: *anyopaque, id: u64, truncate_requested: c_int, out: *Entry, writer: *?*Writer) callconv(.c) c_int {
     const client: *Client = @ptrCast(@alignCast(context));
-    client.prepareFile(id, out, fd, expected) catch |err| return errno(err);
+    writer.* = client.prepareFile(id, truncate_requested != 0, out) catch |err| return errno(err);
     return 0;
 }
 
-fn commit(context: *anyopaque, id: u64, fd: c_int, expected: *u64, size: *u64) callconv(.c) c_int {
-    const client: *Client = @ptrCast(@alignCast(context));
-    client.publishFile(id, fd, expected, size) catch |err| {
-        std.log.err("publish inode {d}, expected version {d}: {s}", .{ id, expected.*, @errorName(err) });
+fn commit(writer: *Writer) callconv(.c) c_int {
+    writer.commit() catch |err| {
+        std.log.err("publish inode {d}, expected version {d}: {s}", .{ writer.inode, writer.expected(), @errorName(err) });
         return errno(err);
     };
     return 0;
+}
+
+fn write(writer: *Writer, bytes: [*]const u8, size: usize, offset: u64, result_size: *u64) callconv(.c) c_int {
+    writer.write(bytes[0..size], offset) catch |err| return errno(err);
+    result_size.* = writer.size;
+    return 0;
+}
+
+fn truncate(writer: *Writer, size: u64) callconv(.c) c_int {
+    writer.truncate(size) catch |err| return errno(err);
+    return 0;
+}
+
+fn read(writer: *Writer, bytes: [*]u8, size: usize, offset: u64) callconv(.c) c_int {
+    writer.read(bytes[0..size], offset) catch |err| return errno(err);
+    return 0;
+}
+
+fn closeWriter(writer: *Writer) callconv(.c) void {
+    writer.deinit();
 }
 
 fn create(context: *anyopaque, parent: u64, name: [*:0]const u8, directory: c_int, out: *Entry) callconv(.c) c_int {
@@ -285,6 +379,6 @@ pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []
     _ = try client.getNode(1, null);
     const mountpoint = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(mountpoint);
-    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free, .open = open, .writable = @intFromBool(write_config.len != 0), .prepare = prepare, .commit = commit, .create = create, .remove = remove, .rename = rename };
+    const api: Api = .{ .context = &client, .get = get, .list = list, .free = free, .open = open, .writable = @intFromBool(write_config.len != 0), .prepare = prepare, .commit = commit, .write = write, .truncate = truncate, .read = read, .close_writer = closeWriter, .create = create, .remove = remove, .rename = rename };
     if (nas_fuse_run(mountpoint, &api) != 0) return error.FuseFailed;
 }

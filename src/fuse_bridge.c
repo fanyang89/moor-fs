@@ -17,8 +17,12 @@ struct api {
     void (*free)(struct entry *, size_t);
     int (*open)(void *, uint64_t, struct entry *, int *);
     int writable;
-    int (*prepare)(void *, uint64_t, struct entry *, int *, uint64_t *);
-    int (*commit)(void *, uint64_t, int, uint64_t *, uint64_t *);
+    int (*prepare)(void *, uint64_t, int, struct entry *, void **);
+    int (*commit)(void *);
+    int (*write)(void *, const char *, size_t, uint64_t, uint64_t *);
+    int (*truncate)(void *, uint64_t);
+    int (*read)(void *, char *, size_t, uint64_t);
+    void (*close_writer)(void *);
     int (*create)(void *, uint64_t, const char *, int, struct entry *);
     int (*remove)(void *, uint64_t, const char *, int);
     int (*rename)(void *, uint64_t, const char *, uint64_t, const char *);
@@ -29,7 +33,7 @@ struct handle {
     int fd;
     struct entry node;
     int writable, failed;
-    uint64_t version;
+    void *writer;
     struct handle *next;
 };
 struct state { const struct api *api; struct handle *handles; size_t count; };
@@ -60,7 +64,7 @@ static void getattr_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
     struct state *s = fuse_req_userdata(req);
     struct entry node;
     struct handle *h = fi ? (void *)(uintptr_t)fi->fh : NULL;
-    if (h && h->fd >= 0) {
+    if (h && (h->fd >= 0 || h->writable)) {
         node = h->node;
     } else {
         int err = s->api->get(s->api->context, ino, NULL, &node);
@@ -76,7 +80,8 @@ static void release_handle(struct state *s, struct handle *h) {
     while (*p && *p != h) p = &(*p)->next;
     if (!*p) return;
     *p = h->next;
-    if (h->fd >= 0) close(h->fd);
+    if (h->writable) s->api->close_writer(h->writer);
+    else if (h->fd >= 0) close(h->fd);
     else s->api->free(h->entries, h->count);
     free(h);
     s->count--;
@@ -125,12 +130,12 @@ static void releasedir_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info 
 
 static int save(struct state *s, struct handle *h) {
     if (h->failed) return h->failed;
-    h->failed = s->api->commit(s->api->context, h->node.id, h->fd, &h->version, &h->node.size);
+    if (h->writable) h->failed = s->api->commit(h->writer);
     // An uncertain publication freezes the handle. Never mutate or republish it.
     return h->failed;
 }
 
-static int make_handle(struct state *s, fuse_ino_t ino, int writable, struct handle **out) {
+static int make_handle(struct state *s, fuse_ino_t ino, int writable, int truncate, struct handle **out) {
     if (writable && !s->api->writable) return EROFS;
     if (s->count >= 64) return EMFILE;
     for (struct handle *p = s->handles; writable && p; p = p->next)
@@ -141,33 +146,7 @@ static int make_handle(struct state *s, fuse_ino_t ino, int writable, struct han
     h->writable = writable;
     int err;
     if (writable) {
-        int source = -1;
-        err = s->api->prepare(s->api->context, ino, &h->node, &source, &h->version);
-        if (err) { free(h); return err; }
-        FILE *temporary = tmpfile();
-        if (!temporary) { err = errno; if (source >= 0) close(source); free(h); return err; }
-        h->fd = fcntl(fileno(temporary), F_DUPFD_CLOEXEC, 0);
-        fclose(temporary);
-        if (h->fd < 0) { if (source >= 0) close(source); free(h); return EIO; }
-        char buffer[256 * 1024];
-        uint64_t offset = 0;
-        while (source >= 0 && offset < h->node.size) {
-            size_t length = sizeof(buffer);
-            if (length > h->node.size - offset) length = h->node.size - offset;
-            ssize_t n = pread(source, buffer, length, (off_t)offset);
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) { err = EIO; break; }
-            size_t used = 0;
-            while (used < (size_t)n) {
-                ssize_t written = pwrite(h->fd, buffer + used, (size_t)n - used, (off_t)(offset + used));
-                if (written < 0 && errno == EINTR) continue;
-                if (written <= 0) { err = errno ? errno : EIO; break; }
-                used += (size_t)written;
-            }
-            if (err) break;
-            offset += (uint64_t)n;
-        }
-        if (source >= 0) close(source);
+        err = s->api->prepare(s->api->context, ino, truncate, &h->node, &h->writer);
     } else {
         err = s->api->open(s->api->context, ino, &h->node, &h->fd);
     }
@@ -182,12 +161,11 @@ static int make_handle(struct state *s, fuse_ino_t ino, int writable, struct han
 static void open_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
     struct state *s = fuse_req_userdata(req);
     struct handle *h;
-    int err = make_handle(s, ino, (fi->flags & O_ACCMODE) != O_RDONLY, &h);
+    int err = make_handle(s, ino, (fi->flags & O_ACCMODE) != O_RDONLY, !!(fi->flags & O_TRUNC), &h);
     if (err) { fuse_reply_err(req, err); return; }
     if (fi->flags & O_TRUNC) {
         if (!h->writable) err = EACCES;
-        else if (ftruncate(h->fd, 0) != 0) err = errno;
-        else err = save(s, h);
+        else if (fi->flags & (O_SYNC | O_DSYNC)) err = save(s, h);
         if (err) { release_handle(s, h); fuse_reply_err(req, err); return; }
     }
     fi->fh = (uint64_t)(uintptr_t)h;
@@ -207,6 +185,14 @@ static void read_cb(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
     if (size > h->node.size - (uint64_t)off) size = h->node.size - (uint64_t)off;
     char *buffer = malloc(size);
     if (!buffer) { fuse_reply_err(req, ENOMEM); return; }
+    if (h->writable) {
+        struct state *s = fuse_req_userdata(req);
+        int err = s->api->read(h->writer, buffer, size, (uint64_t)off);
+        if (err) { h->failed = err; fuse_reply_err(req, err); }
+        else fuse_reply_buf(req, buffer, size);
+        free(buffer);
+        return;
+    }
     size_t used = 0;
     while (used < size) {
         ssize_t n = pread(h->fd, buffer + used, size - used, off + (off_t)used);
@@ -226,14 +212,9 @@ static void write_cb(fuse_req_t req, fuse_ino_t ino, const char *buffer, size_t 
     if (!h->writable) { fuse_reply_err(req, EBADF); return; }
     if (h->failed) { fuse_reply_err(req, h->failed); return; }
     if (off < 0 || size > INT64_MAX - (uint64_t)off) { fuse_reply_err(req, EFBIG); return; }
-    size_t used = 0;
-    while (used < size) {
-        ssize_t n = pwrite(h->fd, buffer + used, size - used, off + (off_t)used);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) { h->failed = errno ? errno : EIO; fuse_reply_err(req, h->failed); return; }
-        used += (size_t)n;
-    }
-    int err = size ? save(s, h) : 0;
+    h->failed = s->api->write(h->writer, buffer, size, (uint64_t)off, &h->node.size);
+    int err = h->failed;
+    if (!err && size && (fi->flags & (O_SYNC | O_DSYNC))) err = save(s, h);
     if (err) fuse_reply_err(req, err);
     else fuse_reply_write(req, size);
 }
@@ -241,12 +222,21 @@ static void write_cb(fuse_req_t req, fuse_ino_t ino, const char *buffer, size_t 
 static void flush_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
     (void)ino;
     struct handle *h = (void *)(uintptr_t)fi->fh;
-    fuse_reply_err(req, h->failed);
+    fuse_reply_err(req, save(fuse_req_userdata(req), h));
 }
 
 static void fsync_cb(fuse_req_t req, fuse_ino_t ino, int datasync, struct fuse_file_info *fi) {
     (void)datasync;
     flush_cb(req, ino, fi);
+}
+
+static void release_cb(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    struct state *s = fuse_req_userdata(req);
+    struct handle *h = (void *)(uintptr_t)fi->fh;
+    int err = save(s, h);
+    release_handle(s, h);
+    fuse_reply_err(req, err);
 }
 
 static void setattr_cb(fuse_req_t req, fuse_ino_t ino, struct stat *st, int changes, struct fuse_file_info *fi) {
@@ -258,11 +248,12 @@ static void setattr_cb(fuse_req_t req, fuse_ino_t ino, struct stat *st, int chan
     if (st->st_size < 0) { fuse_reply_err(req, EINVAL); return; }
     struct handle *h = fi ? (void *)(uintptr_t)fi->fh : NULL;
     int temporary = !h;
-    int err = temporary ? make_handle(s, ino, 1, &h) : 0;
+    int err = temporary ? make_handle(s, ino, 1, st->st_size == 0, &h) : 0;
     if (!err && !h->writable) err = EBADF;
     if (!err) err = h->failed;
-    if (!err && ftruncate(h->fd, st->st_size) != 0) err = h->failed = errno;
-    if (!err) err = save(s, h);
+    if (!err) err = h->failed = s->api->truncate(h->writer, (uint64_t)st->st_size);
+    if (!err) h->node.size = (uint64_t)st->st_size;
+    if (!err && (temporary || (fi->flags & (O_SYNC | O_DSYNC)))) err = save(s, h);
     struct stat result;
     if (!err) attr(&h->node, &result, 1);
     if (temporary && h) release_handle(s, h);
@@ -278,8 +269,8 @@ static void create_cb(fuse_req_t req, fuse_ino_t parent, const char *name, mode_
     struct entry node;
     int err = s->api->create(s->api->context, parent, name, 0, &node);
     struct handle *h = NULL;
-    if (!err) err = make_handle(s, node.id, 1, &h);
-    if (!err) err = save(s, h);
+    if (!err) err = make_handle(s, node.id, 1, 1, &h);
+    if (!err && (fi->flags & (O_SYNC | O_DSYNC))) err = save(s, h);
     if (err) { if (h) release_handle(s, h); fuse_reply_err(req, err); return; }
     struct fuse_entry_param e = {0};
     e.ino = node.id;
@@ -327,7 +318,7 @@ int nas_fuse_run(const char *path, const struct api *api) {
     const struct fuse_lowlevel_ops ops = {
         .lookup = lookup, .getattr = getattr_cb, .opendir = opendir_cb,
         .readdir = readdir_cb, .releasedir = releasedir_cb, .open = open_cb,
-        .read = read_cb, .release = releasedir_cb,
+        .read = read_cb, .release = release_cb,
         .write = write_cb, .flush = flush_cb, .fsync = fsync_cb, .setattr = setattr_cb,
         .create = create_cb, .mkdir = mkdir_cb, .unlink = unlink_cb, .rmdir = rmdir_cb, .rename = rename_cb,
     };
