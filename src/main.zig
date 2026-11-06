@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     const root = try zli.Command.init(options, .{ .name = "nas-fs", .description = "Distributed NAS metadata service", .version = .{ .major = 0, .minor = 1, .patch = 0 } }, help);
     defer root.deinit();
     try register(root, options, "version", "Show version", &.{}, version);
+    try register(root, options, "serve-files", "Run the local shared WAL file service", &.{ "endpoint", "config", "runtime-directory", "first-backend", "second-backend" }, @import("service_cli.zig").serve);
     try register(root, options, "metadata-demo", "Run the in-memory demonstration", &.{}, demo);
     try register(root, options, "metadata-show", "Inspect an offline LMDB store", &.{"directory"}, localShow);
     try register(root, options, "metadata-apply", "Apply to an offline test store", &.{ "directory", "index", "term", "json" }, localApply);

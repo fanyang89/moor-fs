@@ -206,6 +206,8 @@ follow symlinks = no
             command.append("--repair-faults")
         if args.mutable_access:
             command.extend(["--mutable-access", args.mutable_access])
+        if args.file_ipc:
+            command.append("--file-ipc")
         if args.wal_smb:
             command.append("--wal-smb")
         if args.wal_faults:
@@ -312,6 +314,7 @@ def main():
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--file-store", action="store_true")
     parser.add_argument("--mutable-access")
+    parser.add_argument("--file-ipc", action="store_true")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
     parser.add_argument("--wal-benchmark", action="store_true")
@@ -373,6 +376,8 @@ def main():
         command.append("--smb")
     if args.wal_smb:
         command.append("--wal-smb")
+    if args.file_ipc:
+        command.append("--file-ipc")
     if args.wal_faults:
         command.append("--wal-faults")
     if args.wal_benchmark:

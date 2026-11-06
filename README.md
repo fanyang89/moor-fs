@@ -28,6 +28,19 @@ There is no ZooKeeper dependency.
 
 For the native FUSE build/link probe, see `third_party/README.md`.
 
+The experimental resident file core is available without FUSE:
+
+```sh
+zig-out/bin/nas-fs serve-files ENDPOINTS /absolute/backends.json /absolute/new-runtime-dir 1 2
+zig build test-file-ipc
+zig build test-file-ipc-cifs -Doptimize=safe
+```
+
+It exposes bounded, connection-owned Unix-socket file handles backed by the
+existing dual-replica WAL engine. See `docs/file-ipc.zh-CN.md` for framing,
+permissions, disconnect/restart semantics and limits. Namespace operations and
+the Samba custom VFS adapter are not connected to this interface yet.
+
 To build a standalone runtime directory with the matching libfuse, helpers,
 documentation, E2E scripts and SHA-256 manifest:
 

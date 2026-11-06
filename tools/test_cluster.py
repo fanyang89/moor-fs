@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--mutable-access")
+    parser.add_argument("--file-ipc", action="store_true")
     parser.add_argument("--wal-fuse", action="store_true")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
@@ -542,6 +543,10 @@ def main():
                 smb_ports=options.smb_ports,
                 repair_faults=options.repair_faults,
             )
+            if options.file_ipc:
+                from test_file_ipc import test_file_ipc
+
+                test_file_ipc(executable, directory, endpoints, run)
             if options.mutable_access:
                 from test_mutable_access import test_mutable_access
 

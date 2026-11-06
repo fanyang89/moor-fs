@@ -980,3 +980,13 @@ Service统一持有每inode一个Access及双侧后端锁。连接与句柄使�
 显式关闭写句柄先sync，失败也释放该句柄并返回错误；幸存读句柄保留已冻结的Access，不因写者离开而跳过故障。断线清理不宣称fsync成功：释放该连接全部句柄，若尚有读者则继续共享原会话，否则关闭Access，下一次open按既有双WAL恢复协议重放并协调元数据。ID耗尽拒绝新分配，不回绕。deinit要求传输层已停止并join所有工作任务。
 
 新增三个集成单测使用真实本地双副本WAL和内存元数据：跨连接句柄隔离/单写者/实时读取与截断；容量限制、脏写断线恢复及close失败后的冻结传播；并发连接争抢写者只允许一个成功。Debug/Safe各109项通过。这尚不是多进程IPC、真实Raft或CIFS服务端验收；下一步在此接口上实现有界协议和连接退出处理，再接薄VFS。命名空间、Samba share-mode/lease协调、失效订阅和跨节点fencing仍需后续实现。
+
+## 63. Unix socket常驻核心与多进程联调
+
+新增 `serve-files` 前台命令与 `file_ipc.zig`，用std.Io Unix socket和并发任务组接入上一节Service。runtime目录以0700独占创建，拒绝已有目录；每个连接由服务分配owner，不接受客户端声明owner。每连接顺序处理请求，退出时无条件disconnect，任务组退出时join后才销毁Service。
+
+v1使用4字节little-endian长度加JSON，最大帧132096字节，单次数据最大64KiB，二进制以hex编码；支持inode open/read/write/truncate/size/sync/close。逐请求释放arena；畸形/超限/截断帧及回复失败关闭连接，合法操作错误返回错误名称。版本及request关联号显式传输，但关联号不提供去重，丢回复后的结果可能不确定。当前没有空闲超时和SIGTERM优雅退出，信号退出的旧socket目录由运维在确认进程结束后清理。
+
+真实三节点Raft的Debug本地后端、Safe双内核CIFS均通过：独立子进程持有写者，另一连接实时读取；子进程SIGKILL后读者保留并接续写入；核心SIGKILL后重启恢复未checkpoint的已确认内容。测试还覆盖错误所有者、只读写入拒绝、64KiB任意二进制、分片/连续帧、范围溢出、版本错误、非法hex和畸形/半帧断线。默认连接/句柄上限沿用Service，Debug/Safe各109项底层单测通过。
+
+协议、运维及完整边界见 `file-ipc.zh-CN.md`。这是常驻核心数据面原型，当前SMB仍走FUSE；尚未实现命名空间IPC、Samba VFS与share-mode/lease协调、失效订阅或跨节点fencing。双CIFS测试是同机loopback，不是独立物理NAS验收。

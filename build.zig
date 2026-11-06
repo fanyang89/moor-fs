@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    const file_ipc = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
+    file_ipc.addArtifactArg(exe);
+    file_ipc.addArg("--file-ipc");
+    b.step("test-file-ipc", "Test resident file service IPC against real Raft voters").dependOn(&file_ipc.step);
+    const file_ipc_cifs = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+    file_ipc_cifs.addArtifactArg(exe);
+    file_ipc_cifs.addArg("--file-ipc");
+    b.step("test-file-ipc-cifs", "Test file service IPC with dual kernel CIFS backends").dependOn(&file_ipc_cifs.step);
     exe.root_module.addImport("build_options", build_options);
     if (fuse) {
         const wal_fuse = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
