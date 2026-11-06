@@ -107,12 +107,17 @@ def test_wal_fuse(
                 error(lambda: os.open(second / "wal-file", os.O_RDONLY), {errno.EBUSY})
                 error(path.unlink, {errno.EBUSY})
                 assert os.pwrite(writer.fileno(), b"XY", 4) == 2
-                assert os.pread(reader.fileno(), 8, 0) == b"baseXYne"
+                assert os.pread(reader.fileno(), 1024, 0) == b"baseXYne"
+                assert os.pread(reader.fileno(), 4, 8) == b""
                 assert os.pwrite(writer.fileno(), b"Z", 4096) == 1
+                # Read through the old reader without first refreshing its size.
+                assert os.pread(reader.fileno(), 4096, 8) == b"\0" * 4088 + b"Z"
+                assert os.pread(reader.fileno(), 4, 4097) == b""
                 assert path.stat().st_size == os.fstat(reader.fileno()).st_size == 4097
-                assert os.pread(reader.fileno(), 4089, 8) == b"\0" * 4088 + b"Z"
                 os.ftruncate(writer.fileno(), 6)
                 assert os.pread(reader.fileno(), 8, 0) == b"baseXY"
+                assert os.pread(reader.fileno(), 4, 6) == b""
+                assert os.pread(reader.fileno(), 4, 1 << 40) == b""
                 os.fsync(writer.fileno())
                 os.fsync(writer.fileno())
         with open(path, "wb", buffering=0) as writer:

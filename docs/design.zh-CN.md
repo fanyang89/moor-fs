@@ -864,3 +864,13 @@ Access.size 用零长度验证请求检查 WAL 推导大小及 EOF 边界，避�
 E2E矩阵由原5项fsync扩为13项：fsync/read分别覆盖payload、空洞、额外尾巴、缩短和不完整WAL尾部；stat覆盖两种长度损坏及WAL尾部。所有场景在未fsync的句柄上暂停注入相同双侧损坏，验证操作失败、checkpoint/WAL/元数据保持、重开重放成功。本地Debug和真实双CIFS Safe全部通过，既有SMB/supervisor及十项seal/修复SIGKILL继续通过。完整WAL故障套件因增加场景和核对成本超过旧600秒总时限，统一使用与既有SMB故障套件相同的900秒时限后通过；未放宽任何数据或失败断言。fmt/diff检查通过。
 
 本轮未实现跨节点 fencing、自动写者接管或全文件持久增量摘要。活跃范围的读验证是当前 WAL 生命周期内的保护，不扩大到底层 NAS 独立故障域与硬件持久性的保证。
+
+## 51. FUSE 单次读取去除重复大小预检
+
+第50节的 FUSE read 回调先调用 size，再调用 read，两者都会重新读取双侧活跃 WAL。本轮将 C/Zig 的 read 回调增加实际字节数输出，Writer.read 对 WAL 直接返回 Access.read 已完成内容、长度和EOF核对的结果；C 层据此回复精确长度，并拒绝超过申请缓冲的返回值。
+
+WAL read 不再独立查询大小，也不根据句柄保存的旧长度提前返回 EOF 或裁剪请求。一次 read 回调只走一次活跃日志证据核对，同时保留 1 MiB 单次缓冲上限、验证失败冻结和双侧数据比对。独立 getattr/stat/fstat 仍执行大小验证；内核或客户端另外发起的属性请求没有被缓存或省略。不把这个变化宣称为网络 I/O 总量减半。
+
+staging 读继续按固定版本/暂存大小裁剪，提前 EOF 仍视为源内容改变；只是回调返回原有的确定字节数。未改变 WAL、checkpoint、元数据格式或静止文件基线协议，也未引入可靠性边界不明的内容索引缓存。
+
+本地 Debug WAL FUSE、Safe 真实双 CIFS WAL 全部故障场景和默认 staging 完整 SMB 回归通过。增加旧读句柄在未先 stat 时看到扩展数据、跨 EOF 大请求短读、截断后 EOF 和大偏移空读断言；13项脏数据/WAL损坏场景、10项seal/修复SIGKILL及SMB/supervisor继续通过。C/Zig签名同时编译验证，fmt/diff检查通过。当前每个有效读取仍需要读取完整活跃日志，尚未完成吞吐性能验收。

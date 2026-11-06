@@ -22,7 +22,7 @@ struct api {
     int (*commit)(void *);
     int (*write)(void *, const char *, size_t, uint64_t, uint64_t *);
     int (*truncate)(void *, uint64_t);
-    int (*read)(void *, char *, size_t, uint64_t);
+    int (*read)(void *, char *, size_t, uint64_t, size_t *);
     void (*close_writer)(void *);
     int (*size)(void *, uint64_t *);
     int (*create)(void *, uint64_t, const char *, int, struct entry *);
@@ -190,19 +190,20 @@ static void read_cb(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, stru
     if (h->failed) { fuse_reply_err(req, h->failed); return; }
     if (off < 0) { fuse_reply_err(req, EINVAL); return; }
     struct state *s = fuse_req_userdata(req);
-    if (s->api->wal && h->writer) {
-        int err = s->api->size(h->writer, &h->node.size);
-        if (err) { h->failed = err; fuse_reply_err(req, err); return; }
-    }
-    if ((uint64_t)off >= h->node.size || size == 0) { fuse_reply_buf(req, NULL, 0); return; }
+    const int wal = s->api->wal && h->writer;
+    // WAL access validates the actual returned bytes and EOF itself. Do not
+    // preflight size (and reread both WALs), or clip using a stale handle size.
+    if (!wal && ((uint64_t)off >= h->node.size || size == 0)) { fuse_reply_buf(req, NULL, 0); return; }
     if (size > 1024 * 1024) size = 1024 * 1024;
-    if (size > h->node.size - (uint64_t)off) size = h->node.size - (uint64_t)off;
-    char *buffer = malloc(size);
+    if (!wal && size > h->node.size - (uint64_t)off) size = h->node.size - (uint64_t)off;
+    char *buffer = malloc(size ? size : 1);
     if (!buffer) { fuse_reply_err(req, ENOMEM); return; }
     if (h->writer) {
-        int err = s->api->read(h->writer, buffer, size, (uint64_t)off);
+        size_t count = 0;
+        int err = s->api->read(h->writer, buffer, size, (uint64_t)off, &count);
+        if (!err && count > size) err = EIO;
         if (err) { h->failed = err; fuse_reply_err(req, err); }
-        else fuse_reply_buf(req, buffer, size);
+        else fuse_reply_buf(req, buffer, count);
         free(buffer);
         return;
     }

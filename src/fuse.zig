@@ -17,7 +17,7 @@ const Api = extern struct {
     commit: *const fn (*Writer) callconv(.c) c_int,
     write: *const fn (*Writer, [*]const u8, usize, u64, *u64) callconv(.c) c_int,
     truncate: *const fn (*Writer, u64) callconv(.c) c_int,
-    read: *const fn (*Writer, [*]u8, usize, u64) callconv(.c) c_int,
+    read: *const fn (*Writer, [*]u8, usize, u64, *usize) callconv(.c) c_int,
     close_writer: *const fn (*Writer) callconv(.c) void,
     size: *const fn (*Writer, *u64) callconv(.c) c_int,
     create: *const fn (*anyopaque, u64, [*:0]const u8, c_int, *Entry) callconv(.c) c_int,
@@ -271,16 +271,14 @@ const Writer = struct {
         self.size = size;
     }
 
-    fn read(self: *Writer, bytes: []u8, offset: u64) !void {
-        if (self.shared) |shared| {
-            if (try shared.access.read(bytes, offset) != bytes.len) return error.SourceChanged;
-            return;
-        }
+    fn read(self: *Writer, bytes: []u8, offset: u64) !usize {
+        if (self.shared) |shared| return shared.access.read(bytes, offset);
         const file = if (self.stages) |stages| stages[0].file.? else blk: {
             if (self.reader == null) self.reader = try self.client.openVersion(self.base.?);
             break :blk self.reader.?;
         };
         if (try file.readPositionalAll(self.client.io, bytes, offset) != bytes.len) return error.SourceChanged;
+        return bytes.len;
     }
 
     fn commit(self: *Writer) !void {
@@ -381,8 +379,8 @@ fn truncate(writer: *Writer, size: u64) callconv(.c) c_int {
     return 0;
 }
 
-fn read(writer: *Writer, bytes: [*]u8, size: usize, offset: u64) callconv(.c) c_int {
-    writer.read(bytes[0..size], offset) catch |err| return errno(err);
+fn read(writer: *Writer, bytes: [*]u8, size: usize, offset: u64, count: *usize) callconv(.c) c_int {
+    count.* = writer.read(bytes[0..size], offset) catch |err| return errno(err);
     return 0;
 }
 
