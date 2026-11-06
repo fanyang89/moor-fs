@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * Read-only opaque Samba 4.25.1 adapter. The pinned upstream opaque skeleton
+ * Opaque Samba 4.25.1 adapter. The pinned upstream opaque skeleton
  * supplies explicit unsupported operations, never local-filesystem fallbacks.
  */
 #include "includes.h"
@@ -7,7 +7,7 @@
 #include "ipc_bridge.h"
 #include "../third_party/samba/examples/VFS/skel_opaque.c"
 
-struct nas_file { uint64_t inode, handle; };
+struct nas_file { uint64_t inode, handle; bool writable, sync; };
 struct nas_dir {
     struct nas_ipc *client;
     uint64_t inode;
@@ -34,7 +34,8 @@ static int nas_connect(struct vfs_handle_struct *h, const char *service, const c
 {
     struct nas_ipc *client = NULL;
     const char *path = lp_parm_const_string(SNUM(h->conn), "nas_fs", "socket", NULL);
-    if (!path || !lp_read_only(SNUM(h->conn)) || lp_smb2_leases() || lp_oplocks(SNUM(h->conn))) return nas_error(EINVAL);
+    if (!path || lp_smb2_leases() || lp_oplocks(SNUM(h->conn))) return nas_error(EINVAL);
+    if (!lp_read_only(SNUM(h->conn)) && !lp_strict_sync(SNUM(h->conn))) return nas_error(EINVAL);
     if (nas_error(nas_ipc_connect(path, &client)) != 0) return -1;
     SMB_VFS_HANDLE_SET_DATA(h, client, nas_free, struct nas_ipc, return -1);
     return 0;
@@ -45,12 +46,13 @@ static void nas_disconnect(struct vfs_handle_struct *h)
     if (h->data != NULL) nas_free(&h->data);
 }
 
-static void nas_stat_value(const struct nas_attr *a, SMB_STRUCT_STAT *st)
+static void nas_stat_value(struct vfs_handle_struct *h, const struct nas_attr *a, SMB_STRUCT_STAT *st)
 {
     ZERO_STRUCTP(st);
     st->st_ex_dev = 0x4e4153;
     st->st_ex_ino = a->inode;
-    st->st_ex_mode = (a->directory ? S_IFDIR | 0555 : S_IFREG | 0444);
+    st->st_ex_mode = a->directory ? S_IFDIR | 0555 : S_IFREG | 0444;
+    if (!lp_read_only(SNUM(h->conn))) st->st_ex_mode |= 0222;
     st->st_ex_nlink = a->directory ? 2 : 1;
     st->st_ex_uid = getuid();
     st->st_ex_gid = getgid();
@@ -99,7 +101,7 @@ static int nas_stat(struct vfs_handle_struct *h, struct smb_filename *name)
     struct nas_attr attr;
     if (name->stream_name) return nas_error(ENOENT);
     if (nas_resolve(h, nas_inode(h, h->conn->cwd_fsp), name->base_name, &attr)) return -1;
-    nas_stat_value(&attr, &name->st);
+    nas_stat_value(h, &attr, &name->st);
     return 0;
 }
 
@@ -107,7 +109,7 @@ static int nas_fstat(struct vfs_handle_struct *h, struct files_struct *fsp, SMB_
 {
     struct nas_attr attr;
     if (nas_error(nas_ipc_stat(h->data, nas_inode(h, fsp), &attr))) return -1;
-    nas_stat_value(&attr, st);
+    nas_stat_value(h, &attr, st);
     return 0;
 }
 
@@ -117,7 +119,7 @@ static int nas_fstatat(struct vfs_handle_struct *h, const struct files_struct *d
     struct nas_attr attr;
     if (name->stream_name) return nas_error(ENOENT);
     if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
-    nas_stat_value(&attr, st);
+    nas_stat_value(h, &attr, st);
     return 0;
 }
 
@@ -127,8 +129,31 @@ static int nas_share_root(struct vfs_handle_struct *h, struct files_struct *root
     SMB_STRUCT_STAT st;
     if (strcmp(path, "/") != 0) return nas_error(EINVAL);
     if (nas_error(nas_ipc_stat(h->data, 1, &attr))) return -1;
-    nas_stat_value(&attr, &st);
+    nas_stat_value(h, &attr, &st);
     return vfs_set_share_root(root, path, &st);
+}
+
+static int nas_create_path(struct vfs_handle_struct *h, uint64_t base, const char *path, uint64_t *inode)
+{
+    char *copy = talloc_strdup(talloc_tos(), path), *name, *slash;
+    struct nas_attr parent;
+    uint64_t request = 0;
+    int error;
+    if (!copy) return nas_error(ENOMEM);
+    slash = strrchr(copy, '/');
+    name = slash ? slash + 1 : copy;
+    if (slash) {
+        *slash = '\0';
+        if (nas_resolve(h, base, copy[0] ? copy : "/", &parent)) {
+            TALLOC_FREE(copy);
+            return -1;
+        }
+        base = parent.inode;
+    }
+    while (!request) generate_random_buffer((uint8_t *)&request, sizeof(request));
+    error = nas_ipc_create_file(h->data, base, name, request, inode);
+    TALLOC_FREE(copy);
+    return nas_error(error);
 }
 
 static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *dir,
@@ -139,16 +164,31 @@ static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *di
     struct nas_file *file;
     int fd, error;
     uint64_t opened = 0;
+    bool writable = !fsp->fsp_flags.is_pathref && ((how->flags & O_ACCMODE) != O_RDONLY);
     if ((how->resolve & ~(VFS_OPEN_HOW_WITH_BACKUP_INTENT | VFS_OPEN_HOW_RESOLVE_NO_XDEV)) != 0) return nas_error(ENOTSUP);
     if (name->stream_name) return nas_error(ENOENT);
-    if ((how->flags & O_ACCMODE) != O_RDONLY || (how->flags & (O_CREAT | O_TRUNC))) return nas_error(EROFS);
-    if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
+    if ((writable || (how->flags & (O_CREAT | O_TRUNC))) && lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
+    if (how->flags & O_APPEND) return nas_error(ENOTSUP);
+    if ((how->flags & O_TRUNC) && !writable) return nas_error(EACCES);
+    if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) {
+        uint64_t inode;
+        if (errno != ENOENT || !(how->flags & O_CREAT) || fsp->fsp_flags.is_pathref) return -1;
+        if (nas_create_path(h, nas_inode(h, dir), name->base_name, &inode)) {
+            if (errno != EEXIST || (how->flags & O_EXCL)) return -1;
+            if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
+        } else if (nas_error(nas_ipc_stat(h->data, inode, &attr))) return -1;
+    } else if ((how->flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) return nas_error(EEXIST);
     if ((how->flags & O_DIRECTORY) && !attr.directory) return nas_error(ENOTDIR);
     if (!attr.directory && !fsp->fsp_flags.is_pathref) {
-        if (nas_error(nas_ipc_open(h->data, attr.inode, &opened))) return -1;
+        error = writable ? nas_ipc_open_write(h->data, attr.inode, &opened) : nas_ipc_open(h->data, attr.inode, &opened);
+        if (nas_error(error)) return -1;
+        if (how->flags & O_TRUNC) {
+            error = nas_ipc_truncate(h->data, opened, 0);
+            if (error) { nas_ipc_close(h->data, opened); return nas_error(error); }
+        }
     }
     /* Samba requires an fd identity. It is never used for namespace or data. */
-    fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    fd = open("/dev/null", (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
     if (fd == -1) { if (opened) nas_ipc_close(h->data, opened); return -1; }
     file = VFS_ADD_FSP_EXTENSION(h, fsp, struct nas_file, NULL);
     if (!file) {
@@ -159,6 +199,8 @@ static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *di
     }
     file->inode = attr.inode;
     file->handle = opened;
+    file->writable = writable;
+    file->sync = (how->flags & (O_SYNC | O_DSYNC)) != 0;
     fsp->fsp_flags.have_proc_fds = false;
     return fd;
 }
@@ -189,6 +231,34 @@ static ssize_t nas_pread(struct vfs_handle_struct *h, struct files_struct *fsp,
         if (count < wanted) break;
     }
     return done;
+}
+
+static ssize_t nas_pwrite(struct vfs_handle_struct *h, struct files_struct *fsp,
+                         const void *data, size_t length, off_t offset)
+{
+    struct nas_file *file = VFS_FETCH_FSP_EXTENSION(h, fsp);
+    size_t done = 0;
+    if (!file || !file->handle) return nas_error(EBADF);
+    if (!file->writable || lp_read_only(SNUM(h->conn))) return nas_error(EACCES);
+    if (offset < 0 || length > (uint64_t)INT64_MAX - offset) return nas_error(EINVAL);
+    while (done < length) {
+        size_t count = MIN(length - done, 65536);
+        int error = nas_ipc_write(h->data, file->handle, offset + done, (const char *)data + done, count);
+        if (error) return nas_error(error);
+        done += count;
+    }
+    if (file->sync && nas_error(nas_ipc_sync(h->data, file->handle))) return -1;
+    return done;
+}
+
+static int nas_truncate(struct vfs_handle_struct *h, struct files_struct *fsp, off_t length)
+{
+    struct nas_file *file = VFS_FETCH_FSP_EXTENSION(h, fsp);
+    if (!file || !file->handle) return nas_error(EBADF);
+    if (!file->writable || lp_read_only(SNUM(h->conn))) return nas_error(EACCES);
+    if (length < 0) return nas_error(EINVAL);
+    if (nas_error(nas_ipc_truncate(h->data, file->handle, length))) return -1;
+    return file->sync ? nas_error(nas_ipc_sync(h->data, file->handle)) : 0;
 }
 
 static int nas_fcntl(struct vfs_handle_struct *h, struct files_struct *fsp, int command, va_list args)
@@ -224,6 +294,33 @@ static ssize_t nas_pread_recv(struct tevent_req *req, struct vfs_aio_state *aio)
     tevent_req_received(req);
     return count;
 }
+
+static struct tevent_req *nas_pwrite_send(struct vfs_handle_struct *h, TALLOC_CTX *ctx,
+    struct tevent_context *ev, struct files_struct *fsp, const void *data, size_t n, off_t offset)
+{
+    struct nas_read_state *state;
+    struct tevent_req *req = tevent_req_create(ctx, &state, struct nas_read_state);
+    if (!req) return NULL;
+    state->count = nas_pwrite(h, fsp, data, n, offset);
+    state->aio.error = state->count < 0 ? errno : 0;
+    tevent_req_done(req);
+    return tevent_req_post(req, ev);
+}
+
+static struct tevent_req *nas_fsync_send(struct vfs_handle_struct *h, TALLOC_CTX *ctx,
+    struct tevent_context *ev, struct files_struct *fsp)
+{
+    struct nas_read_state *state;
+    struct nas_file *file = VFS_FETCH_FSP_EXTENSION(h, fsp);
+    struct tevent_req *req = tevent_req_create(ctx, &state, struct nas_read_state);
+    if (!req) return NULL;
+    state->aio.error = (!file || !file->handle) ? EBADF : nas_ipc_sync(h->data, file->handle);
+    state->count = state->aio.error ? -1 : 0;
+    tevent_req_done(req);
+    return tevent_req_post(req, ev);
+}
+static int nas_fsync_recv(struct tevent_req *req, struct vfs_aio_state *aio)
+{ return (int)nas_pread_recv(req, aio); }
 
 static DIR *nas_fdopendir(struct vfs_handle_struct *h, struct files_struct *fsp, const char *mask, uint32_t attrs)
 {
@@ -329,7 +426,7 @@ static NTSTATUS nas_fget_dos(struct vfs_handle_struct *h, struct files_struct *f
     struct nas_attr attr;
     int error = nas_ipc_stat(h->data, nas_inode(h, fsp), &attr);
     if (error) return map_nt_error_from_unix(error);
-    *mode = FILE_ATTRIBUTE_READONLY | (attr.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
+    *mode = (lp_read_only(SNUM(h->conn)) ? FILE_ATTRIBUTE_READONLY : 0) | (attr.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
     return NT_STATUS_OK;
 }
 static struct tevent_req *nas_get_dos_send(TALLOC_CTX *ctx, struct tevent_context *ev,
@@ -342,7 +439,7 @@ static struct tevent_req *nas_get_dos_send(TALLOC_CTX *ctx, struct tevent_contex
     if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) {
         tevent_req_nterror(req, map_nt_error_from_unix(errno));
     } else {
-        state->dosmode = FILE_ATTRIBUTE_READONLY | (attr.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
+        state->dosmode = (lp_read_only(SNUM(h->conn)) ? FILE_ATTRIBUTE_READONLY : 0) | (attr.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
         tevent_req_done(req);
     }
     return tevent_req_post(req, ev);
@@ -372,6 +469,8 @@ NTSTATUS samba_init_module(TALLOC_CTX *ctx)
     f->openat_fn = nas_openat; f->close_fn = nas_close;
     f->fcntl_fn = nas_fcntl;
     f->pread_fn = nas_pread; f->pread_send_fn = nas_pread_send; f->pread_recv_fn = nas_pread_recv;
+    f->pwrite_fn = nas_pwrite; f->pwrite_send_fn = nas_pwrite_send; f->pwrite_recv_fn = nas_pread_recv;
+    f->ftruncate_fn = nas_truncate; f->fsync_send_fn = nas_fsync_send; f->fsync_recv_fn = nas_fsync_recv;
     f->fdopendir_fn = nas_fdopendir; f->readdir_fn = nas_readdir;
     f->rewind_dir_fn = nas_rewind; f->closedir_fn = nas_closedir;
     f->chdir_fn = nas_chdir; f->realpath_fn = nas_realpath;

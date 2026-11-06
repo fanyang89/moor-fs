@@ -44,6 +44,24 @@ def main():
             c.POINTER(c.c_size_t),
         ]
         lib.nas_ipc_read.restype = c.c_int
+        lib.nas_ipc_open_write.argtypes = lib.nas_ipc_open.argtypes
+        lib.nas_ipc_create_file.argtypes = [
+            c.c_void_p,
+            c.c_uint64,
+            c.c_char_p,
+            c.c_uint64,
+            c.POINTER(c.c_uint64),
+        ]
+        lib.nas_ipc_write.argtypes = [
+            c.c_void_p,
+            c.c_uint64,
+            c.c_uint64,
+            c.c_void_p,
+            c.c_size_t,
+        ]
+        lib.nas_ipc_truncate.argtypes = [c.c_void_p, c.c_uint64, c.c_uint64]
+        lib.nas_ipc_sync.argtypes = [c.c_void_p, c.c_uint64]
+        lib.nas_ipc_close.argtypes = [c.c_void_p, c.c_uint64]
 
         def exact(sock, count):
             result = b""
@@ -60,6 +78,9 @@ def main():
                 for reply in replies:
                     size = struct.unpack("<I", exact(connection, 4))[0]
                     request = json.loads(exact(connection, size))
+                    if isinstance(reply, tuple):
+                        expected, reply = reply
+                        assert request["operation"] == expected, request
                     if isinstance(reply, bytes):
                         connection.sendall(reply)
                         connection.shutdown(socket.SHUT_WR)
@@ -147,6 +168,75 @@ def main():
                     )
                     assert count.value == 0
                     assert lib.nas_ipc_open(client, 42, c.byref(handle)) == errno.EIO
+                finally:
+                    lib.nas_ipc_disconnect(client)
+                future.result(timeout=5)
+            path = directory / "writes"
+            create = {
+                "change": {
+                    "request_id": 901,
+                    "mutation": {
+                        "create": {"parent": 1, "name": "file", "kind": "file"}
+                    },
+                }
+            }
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                listener.listen()
+                future = pool.submit(
+                    serve,
+                    listener,
+                    [
+                        (
+                            create,
+                            {
+                                "result": {
+                                    "change": {"status": "already_exists", "inode": 0}
+                                }
+                            },
+                        ),
+                        (create, {"result": {"change": {"status": "ok", "inode": 42}}}),
+                        (
+                            {"open": {"inode": 42, "writable": True}},
+                            {"result": {"handle": 7}},
+                        ),
+                        (
+                            {"write": {"handle": 7, "offset": 9, "hex": "00ff80"}},
+                            {"result": {"count": 3}},
+                        ),
+                        ({"truncate": {"handle": 7, "length": 12}}, {"result": {}}),
+                        ({"sync": {"handle": 7}}, {"err": "WalSessionFailed"}),
+                        ({"close": {"handle": 7}}, {"err": "WalSessionFailed"}),
+                        (
+                            {"write": {"handle": 7, "offset": 0, "hex": "00ff80"}},
+                            {"result": {"count": 2}},
+                        ),
+                    ],
+                )
+                client = c.c_void_p()
+                assert lib.nas_ipc_connect(str(path).encode(), c.byref(client)) == 0
+                try:
+                    inode = c.c_uint64()
+                    assert (
+                        lib.nas_ipc_create_file(client, 1, b"file", 901, c.byref(inode))
+                        == errno.EEXIST
+                    )
+                    assert (
+                        lib.nas_ipc_create_file(client, 1, b"file", 901, c.byref(inode))
+                        == 0
+                        and inode.value == 42
+                    )
+                    handle = c.c_uint64()
+                    assert lib.nas_ipc_open_write(client, inode, c.byref(handle)) == 0
+                    assert lib.nas_ipc_write(client, handle, 9, b"\x00\xff\x80", 3) == 0
+                    assert lib.nas_ipc_truncate(client, handle, 12) == 0
+                    assert lib.nas_ipc_sync(client, handle) == errno.EIO
+                    assert lib.nas_ipc_close(client, handle) == errno.EIO
+                    assert (
+                        lib.nas_ipc_write(client, handle, 0, b"\x00\xff\x80", 3)
+                        == errno.EIO
+                    )
+                    assert lib.nas_ipc_sync(client, handle) == errno.EIO
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)

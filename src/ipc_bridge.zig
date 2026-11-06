@@ -2,6 +2,7 @@
 //! an uncertain request or silently reconnect with old handles.
 const std = @import("std");
 const ns = @import("namespace.zig");
+const m = @import("metadata.zig");
 const c = @import("ipc_sys");
 const allocator = std.heap.c_allocator;
 const max_frame = 132096;
@@ -56,6 +57,7 @@ const Reply = struct {
         hex: ?[]const u8 = null,
         attributes: ?ns.Attributes = null,
         page: ?ns.Page = null,
+        change: ?m.Result = null,
     },
 };
 
@@ -147,13 +149,73 @@ export fn nas_ipc_list(client: *Client, parent: u64, after: [*:0]const u8, out: 
     return 0;
 }
 
-export fn nas_ipc_open(client: *Client, inode: u64, out: *u64) c_int {
+fn open(client: *Client, inode: u64, writable: bool, out: *u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const reply = client.call(arena.allocator(), .{ .open = .{ .inode = inode, .writable = false } }) catch |err| return failure(err);
+    const reply = client.call(arena.allocator(), .{ .open = .{ .inode = inode, .writable = writable } }) catch |err| return failure(err);
     if (status(reply) != 0) return status(reply);
     out.* = reply.result.handle orelse return protocol(client);
     if (out.* == 0) return protocol(client);
+    return 0;
+}
+
+export fn nas_ipc_open(client: *Client, inode: u64, out: *u64) c_int {
+    return open(client, inode, false, out);
+}
+
+export fn nas_ipc_open_write(client: *Client, inode: u64, out: *u64) c_int {
+    return open(client, inode, true, out);
+}
+
+export fn nas_ipc_create_file(client: *Client, parent: u64, name: [*:0]const u8, request_id: u64, out: *u64) c_int {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reply = client.call(arena.allocator(), .{ .change = .{ .request_id = request_id, .mutation = .{ .create = .{ .parent = parent, .name = std.mem.span(name), .kind = "file" } } } }) catch |err| return failure(err);
+    if (status(reply) != 0) return status(reply);
+    const result = reply.result.change orelse return protocol(client);
+    switch (result.status) {
+        .ok => {
+            if (result.inode == 0) return protocol(client);
+            out.* = result.inode;
+            return 0;
+        },
+        .already_exists => return c.EEXIST,
+        .not_found => return c.ENOENT,
+        .not_directory => return c.ENOTDIR,
+        .invalid_name, .invalid_request => return c.EINVAL,
+        .capacity_exceeded => return c.ENOSPC,
+        else => return c.EIO,
+    }
+}
+
+fn simple(client: *Client, operation: anytype) c_int {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reply = client.call(arena.allocator(), operation) catch |err| return failure(err);
+    return status(reply);
+}
+
+export fn nas_ipc_sync(client: *Client, handle: u64) c_int {
+    return simple(client, .{ .sync = .{ .handle = handle } });
+}
+
+export fn nas_ipc_truncate(client: *Client, handle: u64, length: u64) c_int {
+    return simple(client, .{ .truncate = .{ .handle = handle, .length = length } });
+}
+
+export fn nas_ipc_write(client: *Client, handle: u64, offset: u64, data: [*]const u8, length: usize) c_int {
+    if (length > 65536) return c.EINVAL;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const hex = arena.allocator().alloc(u8, length * 2) catch return c.ENOMEM;
+    const digits = "0123456789abcdef";
+    for (data[0..length], 0..) |byte, i| {
+        hex[i * 2] = digits[byte >> 4];
+        hex[i * 2 + 1] = digits[byte & 15];
+    }
+    const reply = client.call(arena.allocator(), .{ .write = .{ .handle = handle, .offset = offset, .hex = hex } }) catch |err| return failure(err);
+    if (status(reply) != 0) return status(reply);
+    if ((reply.result.count orelse return protocol(client)) != length) return protocol(client);
     return 0;
 }
 

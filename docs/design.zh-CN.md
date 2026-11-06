@@ -1006,3 +1006,13 @@ Debug本地/Safe双CIFS真实Raft多进程E2E通过：目录及文件完全通�
 模块要求只读共享、leases/oplocks关闭；所有分量通过核心查找。Samba内部fd为只读/dev/null占位，仅生命周期/fcntl使用；内容和属性不来自宿主文件。属性权限、uid/gid、时间与容量仍为单用户原型值，固定虚拟device ID只适合单命名空间；未支持SMB写入、ACL持久化或byte-range lock等完整语义。pread_send同步完成后投递结果，尚非异步后端I/O。
 
 Debug本地/Safe双CIFS真实Raft E2E通过：SMB3分页浏览、任意二进制下载、两个独立smbd共享脏写会话、实时写入可见；拒绝写入与宿主路径访问；单侧损坏导致读取失败，释放失败句柄后WAL恢复并重新下载一致。退出日志无panic。C ABI Debug/Safe受控回复测试覆盖分片、半帧、长度/JSON/版本/关联号/句柄/hex异常与毒化后的不重连；底层Debug/Safe各110项单测通过。详细构建、限制及测试日志见 `samba-vfs.zh-CN.md`；尚非Windows/macOS或物理NAS验收。
+
+## 66. 原生VFS创建、写入、截断与同步
+
+C ABI扩展可写open、有回执的文件create、write/truncate/sync，核对每次写确认字节数。VFS接入O_EXCL、O_TRUNC、分段pwrite、ftruncate、同步执行的pwrite/fsync tevent回调和关闭checkpoint。核心继续统一管理每inode单写者与共享读者，写确认沿用双副本WAL协议。可写共享必须strict sync=yes且禁用leases/oplocks；权限按共享可写性合成，fd仍仅/dev/null占位。
+
+create随后stat/open不是原子操作，后续失败可能留空文件；64KiB分段写中途失败不回滚已持久化前缀，不确定操作可能由恢复重放，不自动重连或重试。拒绝O_APPEND。mkdir/rename/unlink、持久ACL/时间和完整SMB锁语义仍未接入。
+
+本地Debug/双CIFS Safe真实Raft SMB E2E通过：创建与排他创建、153610字节写、跨进程写者互斥/共享读取、稀疏写、截断、关闭checkpoint、sync-always未关闭句柄checkpoint、smbclient上传覆盖下载；破坏待提交WAL覆盖的数据后关闭返回NT_STATUS_IO_DEVICE_ERROR，重新打开WAL恢复一致。本机libsmbclient将该close错误映射为EINVAL，测试同时核验服务端状态。其SMB2转换丢弃O_SYNC，所以sync-always验证的是实际fsync回调，不是客户端write-through标志。普通fsync不对未触及基线全文件哈希。
+
+C ABI Debug/Safe测试核对写请求与创建错误映射、同步/关闭错误及短写确认毒化；底层Debug/Safe各110项通过。运行配置和验收范围见 `samba-vfs.zh-CN.md`。

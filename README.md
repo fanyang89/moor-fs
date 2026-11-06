@@ -40,7 +40,8 @@ It exposes bounded, connection-owned Unix-socket file handles backed by the
 existing dual-replica WAL engine. See `docs/file-ipc.zh-CN.md` for framing,
 permissions, disconnect/restart semantics and limits. The interface also exposes
 stat, component lookup, bounded directory pages and receipt-backed namespace
-mutations. An experimental read-only native Samba VFS now connects directly to
+mutations. An experimental native Samba VFS supports reads, file creation,
+writes, truncation and sync, and connects directly to
 this core, without FUSE:
 
 ```sh

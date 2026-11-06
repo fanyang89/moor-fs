@@ -20,6 +20,11 @@ int nas_ipc_stat(struct nas_ipc *, uint64_t, struct nas_attr *);
 int nas_ipc_lookup(struct nas_ipc *, uint64_t, const char *, struct nas_attr *);
 int nas_ipc_list(struct nas_ipc *, uint64_t, const char *, struct nas_page *);
 int nas_ipc_open(struct nas_ipc *, uint64_t, uint64_t *);
+int nas_ipc_open_write(struct nas_ipc *, uint64_t, uint64_t *);
+int nas_ipc_create_file(struct nas_ipc *, uint64_t, const char *, uint64_t, uint64_t *);
 int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
+int nas_ipc_write(struct nas_ipc *, uint64_t, uint64_t, const void *, size_t);
+int nas_ipc_truncate(struct nas_ipc *, uint64_t, uint64_t);
+int nas_ipc_sync(struct nas_ipc *, uint64_t);
 int nas_ipc_close(struct nas_ipc *, uint64_t);
 #endif

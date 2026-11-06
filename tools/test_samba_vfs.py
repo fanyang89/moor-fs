@@ -9,6 +9,9 @@ import signal
 import socket
 import subprocess
 import time
+import sys
+import select
+import errno
 
 from test_file_ipc import Client
 
@@ -64,11 +67,37 @@ kernel share modes = no
 use sendfile = no
 map archive = no
 store dos attributes = no
+strict sync = yes
 nt acl support = no
+[write]
+copy = nas
+read only = no
+[sync]
+copy = write
+sync always = yes
 """)
     processes = []
     logs = []
     client = None
+    workers = []
+
+    def worker(url):
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "tools/smb_vfs_client.py"), url],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        workers.append(process)
+        return process
+
+    def call(process, op, error=0, **fields):
+        process.stdin.write(json.dumps({"op": op, **fields}) + "\n")
+        process.stdin.flush()
+        assert select.select([process.stdout], [], [], 25)[0], "SMB worker timed out"
+        result = json.loads(process.stdout.readline())
+        assert result["errno"] == error, (op, result)
+        return result
 
     def spawn(command, name):
         log = open(state / name, "w")
@@ -79,11 +108,11 @@ nt acl support = no
         processes.append(process)
         return process
 
-    def smb(command, success=True):
+    def smb(command, success=True, share="nas"):
         result = subprocess.run(
             [
                 "smbclient",
-                "//127.0.0.1/nas",
+                f"//127.0.0.1/{share}",
                 "-p",
                 str(port),
                 "-N",
@@ -195,6 +224,86 @@ nt acl support = no
         assert not (directory / "must-not-exist").exists()
         assert "NT_STATUS_ACCESS_DENIED" in smb("mkdir forbidden", success=False)
         client.call({"lookup": {"parent": 1, "name": "forbidden"}}, error="NotFound")
+        url = f"smb://127.0.0.1:{port}/write/vfs-read/upload.dat"
+        writer = worker(url)
+        call(writer, "open", flags=os.O_RDWR | os.O_CREAT | os.O_EXCL)
+        upload = client.call({"lookup": {"parent": parent, "name": "upload.dat"}})[
+            "attributes"
+        ]["node"]["id"]
+        payload = bytes(range(256)) * 600 + b"write-tail"
+        assert call(writer, "write", offset=0, hex=payload.hex())["value"] == len(
+            payload
+        )
+        reader = worker(url)
+        call(reader, "open", flags=os.O_RDONLY)
+        assert (
+            bytes.fromhex(call(reader, "read", offset=0, length=len(payload))["hex"])
+            == payload
+        )
+        contender = worker(url)
+        # Samba maps the backend EBUSY open failure to ACCESS_DENIED.
+        call(contender, "open", flags=os.O_WRONLY, error=errno.EACCES)
+        client.call({"open": {"inode": upload, "writable": True}}, error="FileBusy")
+        call(
+            contender,
+            "open",
+            flags=os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            error=errno.EEXIST,
+        )
+        call(writer, "truncate", length=3)
+        assert (
+            bytes.fromhex(call(reader, "read", offset=0, length=10)["hex"])
+            == payload[:3]
+        )
+        assert call(writer, "write", offset=4096, hex="ff")["value"] == 1
+        assert (
+            bytes.fromhex(call(reader, "read", offset=3, length=4094)["hex"])
+            == b"\0" * 4093 + b"\xff"
+        )
+        call(writer, "close")
+        checkpoint = client.call({"stat": {"inode": upload}})["attributes"]["node"][
+            "mutable_file"
+        ]
+        assert checkpoint["size"] == 4097
+        call(contender, "open", flags=os.O_RDWR | os.O_TRUNC)
+        assert call(reader, "read", offset=0, length=10)["hex"] == ""
+        call(contender, "close")
+        synced = worker(url.replace("/write/", "/sync/"))
+        call(synced, "open", flags=os.O_RDWR)
+        assert call(synced, "write", offset=0, hex=b"synced".hex())["value"] == 6
+        checkpoint = client.call({"stat": {"inode": upload}})["attributes"]["node"][
+            "mutable_file"
+        ]
+        assert checkpoint["size"] == 6, checkpoint
+        call(synced, "close")
+        call(reader, "close")
+        smb(f"get vfs-read/upload.dat {directory / 'vfs-written-download'}")
+        assert (directory / "vfs-written-download").read_bytes() == b"synced"
+        source = directory / "vfs-upload-source"
+        source.write_bytes(payload)
+        smb(f"put {source} vfs-read/put.dat", share="write")
+        source.write_bytes(b"short")
+        smb(f"put {source} vfs-read/put.dat", share="write")
+        smb(f"get vfs-read/put.dat {directory / 'vfs-put-download'}")
+        assert (directory / "vfs-put-download").read_bytes() == b"short"
+        # Damage bytes covered by pending WAL, so close must reject checkpointing.
+        call(writer, "open", flags=os.O_RDWR)
+        call(writer, "write", offset=0, hex=b"repair".hex())
+        node = client.call({"stat": {"inode": upload}})["attributes"]["node"]
+        mapping = json.loads((directory / "backends.json").read_text())[1]
+        replica = (
+            Path(mapping["root"])
+            / "mutable"
+            / f"{upload}-{node['mutable_file']['generation']}"
+            / "data"
+        )
+        with open(replica, "r+b", buffering=0) as damaged:
+            damaged.write(b"!")
+        # libsmbclient maps SMB IO_DEVICE_ERROR on close to EINVAL.
+        call(writer, "close", error=errno.EINVAL)
+        assert "NT_STATUS_IO_DEVICE_ERROR" in (state / "process.log").read_text()
+        smb(f"get vfs-read/upload.dat {directory / 'vfs-close-recovered'}")
+        assert (directory / "vfs-close-recovered").read_bytes() == b"repair"
         assert client.call({"stat": {"inode": file}})["attributes"]["size"] == len(data)
         node = client.call({"stat": {"inode": file}})["attributes"]["node"]
         mapping = json.loads((directory / "backends.json").read_text())[1]
@@ -215,7 +324,7 @@ nt acl support = no
         smb(f"get vfs-read/binary.dat {destination}")
         assert destination.read_bytes() == data
         print(
-            "PASS: native Samba VFS SMB3 pagination, parallel/live reads and corruption recovery without FUSE; writes/host paths rejected",
+            "PASS: native Samba VFS SMB3 reads, create/write/truncate, writer exclusion, sync/close checkpoints and corruption/close-error recovery without FUSE; host paths rejected",
             flush=True,
         )
     except BaseException:
@@ -225,6 +334,15 @@ nt acl support = no
                 print(f"{path}:\n{path.read_text()[-12000:]}", flush=True)
         raise
     finally:
+        for process in workers:
+            if process.poll() is None:
+                process.stdin.close()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            process.stdout.close()
         if client:
             client.close()
         for process in reversed(processes):

@@ -13,7 +13,7 @@ zig-out/bin/nas-fs serve-files \
 
 runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0700权限独占创建它，并监听其中的 `core.sock`；路径受Unix socket长度限制。启动遇到已有目录直接失败，绝不删除旧socket。当前没有SIGTERM优雅退出处理；信号退出可能留下目录。确认旧进程退出后，由运维删除这个已知socket及空目录，或使用新的runtime目录。不要删除仍被存活服务使用的目录。
 
-这是同一OS用户内的可信本机接口。0700目录隔离其他用户，不实现SMB用户认证、ACL或对同UID进程的隔离。现有FUSE入口保留；新增原生只读VFS实验入口见 `samba-vfs.zh-CN.md`，尚未实现SMB用户身份映射。
+这是同一OS用户内的可信本机接口。0700目录隔离其他用户，不实现SMB用户认证、ACL或对同UID进程的隔离。现有FUSE入口保留；原生读写VFS实验入口见 `samba-vfs.zh-CN.md`，尚未实现SMB用户身份映射。
 
 ## 帧与字段
 

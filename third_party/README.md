@@ -70,7 +70,7 @@ SMB filesystem semantics.
 
 ## Runtime integration boundaries
 
-The pinned Samba now also has an experimental native read-only VFS build:
+The pinned Samba now also has an experimental native read/write VFS build:
 `python3 tools/build_vfs.py`. It builds the matching daemon in Samba's standard
 ignored `bin` tree and links the Zig IPC bridge into `zig-out/lib/nas_fs.so`.
 No system installation or submodule source edits are performed. Use that daemon
