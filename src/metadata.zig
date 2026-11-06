@@ -34,6 +34,8 @@ pub const MutableUpdate = union(enum) {
 };
 pub const Replicas = enum { one, two };
 pub const Kind = enum { directory, file };
+pub const Entry = struct { inode: u64, parent: u64, name: []const u8 };
+pub const RenameChecked = struct { source: Entry, parent: u64, name: []const u8 };
 pub const Node = struct {
     id: u64,
     parent: u64,
@@ -53,6 +55,8 @@ pub const Command = union(enum) {
     register_backend: Backend,
     publish: Publication,
     mutable_file: MutableUpdate,
+    rename_checked: RenameChecked,
+    remove_checked: Entry,
 };
 pub const Request = struct { version: u32 = 1, request_id: u64, command: Command };
 pub const Status = enum(u8) {
@@ -76,6 +80,7 @@ pub const Status = enum(u8) {
     same_failure_domain = 17,
     storage_conflict = 18,
     sequence_conflict = 19,
+    entry_conflict = 20,
 };
 pub const Result = struct { status: Status, inode: u64 = 0 };
 pub const Receipt = struct { request_id: u64, digest: [32]u8, result: Result };
@@ -153,6 +158,16 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .rename_checked => |c| {
+                const node = self.get(c.source.inode) orelse return .{ .status = .entry_conflict };
+                if (node.parent != c.source.parent or !std.mem.eql(u8, node.name, c.source.name)) return .{ .status = .entry_conflict };
+                return self.execute(.{ .rename = .{ .id = c.source.inode, .parent = c.parent, .name = c.name } });
+            },
+            .remove_checked => |c| {
+                const node = self.get(c.inode) orelse return .{ .status = .entry_conflict };
+                if (node.parent != c.parent or !std.mem.eql(u8, node.name, c.name)) return .{ .status = .entry_conflict };
+                return self.execute(.{ .remove = .{ .id = c.inode } });
+            },
             .remove_entry => |c| {
                 if (!validName(c.name)) return .{ .status = .invalid_name };
                 const node = self.lookup(c.parent, c.name) orelse return .{ .status = .not_found };

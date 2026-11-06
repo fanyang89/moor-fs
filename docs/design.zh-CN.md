@@ -1024,3 +1024,11 @@ C ABI Debug/Safe测试核对写请求与创建错误映射、同步/关闭错误
 本地Debug与双CIFS Safe真实Raft SMB E2E通过：mkdir、跨目录文件改名、目录改名、删除文件及空目录；非空目录、重名目标、目录环拒绝；改名期间保留的IPC读句柄继续读原内容，活跃句柄阻止SMB删除，关闭后成功。C ABI Debug/Safe核对请求及错误映射通过。
 
 目前路径查找与按inode提交仍分离，缺少预期父目录/名称CAS，并发移动时可能操作已移动的原inode；未宣称POSIX路径原子性。目录路径引用不算核心活跃数据句柄，完整SMB delete-on-close/share-mode、持久ACL/时间和跨节点fencing仍未完成。
+
+## 68. 源目录项条件修改与回执
+
+新增metadata/IPC rename_checked和remove_checked：携带源inode、parent、精确规范name，内存状态机与LMDB在同一次执行/事务中比较后修改，源消失或位置/名称不同返回entry_conflict（20）。VFS使用查找返回的属性调用checked C ABI，冲突映射ESTALE，不自动重试。remove仍在核心串行区内检查本地活跃数据句柄。旧inode命令和序列化保持不变，避免改变旧receipt摘要；新命令要求全部Raft节点、核心和桥接统一升级。
+
+内存/LMDB对照逐请求重启测试覆盖跨目录移动、旧名称复用、精确名称/父目录不匹配、源消失、成功及冲突回执重放，并比较完整快照。真实Raft本地Debug/双CIFS Safe的SMB/IPC混合E2E验证旧查找结果在移动和名称复用后失败，原inode与新inode均保留；C ABI核对checked请求和ESTALE映射。Debug/Safe各111项单测通过。
+
+该CAS保护最终源目录项，不验证祖先目录链或目标目录完整路径，不检测源移走后又移回相同位置的历史；不是完整路径事务或跨服务fencing。旧IPC inode修改仍明确保留原语义。

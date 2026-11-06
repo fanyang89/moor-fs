@@ -249,6 +249,29 @@ def main():
                 c.c_uint64,
             ]
             lib.nas_ipc_remove.argtypes = [c.c_void_p, c.c_uint64, c.c_uint64]
+
+            class Attr(c.Structure):
+                _fields_ = [
+                    ("inode", c.c_uint64),
+                    ("parent", c.c_uint64),
+                    ("size", c.c_uint64),
+                    ("directory", c.c_int),
+                    ("name", c.c_char * 256),
+                ]
+
+            lib.nas_ipc_rename_checked.argtypes = [
+                c.c_void_p,
+                c.POINTER(Attr),
+                c.c_uint64,
+                c.c_char_p,
+                c.c_uint64,
+            ]
+            lib.nas_ipc_remove_checked.argtypes = [
+                c.c_void_p,
+                c.POINTER(Attr),
+                c.c_uint64,
+            ]
+            source = {"inode": 42, "parent": 1, "name": "old"}
             path = directory / "namespace"
             mutations = [
                 (
@@ -266,6 +289,13 @@ def main():
                 ({"remove": {"inode": 42}}, "not_empty", 0),
                 ({"remove": {"inode": 1}}, "root_protected", 0),
                 ({"remove": {"inode": 42}}, "ok", 42),
+                (
+                    {"rename_checked": {"source": source, "parent": 2, "name": "new"}},
+                    "entry_conflict",
+                    0,
+                ),
+                ({"remove_checked": source}, "entry_conflict", 0),
+                ({"remove_checked": source}, "ok", 42),
             ]
             with socket.socket(socket.AF_UNIX) as listener:
                 listener.bind(str(path))
@@ -296,6 +326,18 @@ def main():
                     assert lib.nas_ipc_remove(client, 42, 902) == errno.ENOTEMPTY
                     assert lib.nas_ipc_remove(client, 1, 902) == errno.EPERM
                     assert lib.nas_ipc_remove(client, 42, 902) == 0
+                    attr = Attr(inode=42, parent=1, name=b"old")
+                    assert (
+                        lib.nas_ipc_rename_checked(
+                            client, c.byref(attr), 2, b"new", 902
+                        )
+                        == errno.ESTALE
+                    )
+                    assert (
+                        lib.nas_ipc_remove_checked(client, c.byref(attr), 902)
+                        == errno.ESTALE
+                    )
+                    assert lib.nas_ipc_remove_checked(client, c.byref(attr), 902) == 0
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)

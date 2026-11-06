@@ -183,6 +183,14 @@ export fn nas_ipc_remove(client: *Client, inode: u64, request_id: u64) c_int {
     return change(client, .{ .remove = .{ .inode = inode } }, request_id, null);
 }
 
+export fn nas_ipc_rename_checked(client: *Client, source: *const Attr, parent: u64, name: [*:0]const u8, request_id: u64) c_int {
+    return change(client, .{ .rename_checked = .{ .source = .{ .inode = source.inode, .parent = source.parent, .name = std.mem.sliceTo(&source.name, 0) }, .parent = parent, .name = std.mem.span(name) } }, request_id, null);
+}
+
+export fn nas_ipc_remove_checked(client: *Client, source: *const Attr, request_id: u64) c_int {
+    return change(client, .{ .remove_checked = .{ .inode = source.inode, .parent = source.parent, .name = std.mem.sliceTo(&source.name, 0) } }, request_id, null);
+}
+
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -203,6 +211,7 @@ fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_i
         .not_empty => return c.ENOTEMPTY,
         .root_protected => return c.EPERM,
         .cycle => return c.EINVAL,
+        .entry_conflict => return c.ESTALE,
         .invalid_name, .invalid_request => return c.EINVAL,
         .capacity_exceeded => return c.ENOSPC,
         else => return c.EIO,

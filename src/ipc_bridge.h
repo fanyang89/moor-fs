@@ -25,6 +25,8 @@ int nas_ipc_create_file(struct nas_ipc *, uint64_t, const char *, uint64_t, uint
 int nas_ipc_mkdir(struct nas_ipc *, uint64_t, const char *, uint64_t, uint64_t *);
 int nas_ipc_rename(struct nas_ipc *, uint64_t, uint64_t, const char *, uint64_t);
 int nas_ipc_remove(struct nas_ipc *, uint64_t, uint64_t);
+int nas_ipc_rename_checked(struct nas_ipc *, const struct nas_attr *, uint64_t, const char *, uint64_t);
+int nas_ipc_remove_checked(struct nas_ipc *, const struct nas_attr *, uint64_t);
 int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
 int nas_ipc_write(struct nas_ipc *, uint64_t, uint64_t, const void *, size_t);
 int nas_ipc_truncate(struct nas_ipc *, uint64_t, uint64_t);

@@ -195,7 +195,7 @@ static int nas_renameat(struct vfs_handle_struct *h, struct files_struct *src,
         return -1;
     }
     /* The core deliberately refuses replacement of a different inode. */
-    error = nas_ipc_rename(h->data, attr.inode, parent, name, nas_request_id());
+    error = nas_ipc_rename_checked(h->data, &attr, parent, name, nas_request_id());
     TALLOC_FREE(copy);
     return nas_error(error);
 }
@@ -209,7 +209,7 @@ static int nas_unlinkat(struct vfs_handle_struct *h, struct files_struct *dir,
     if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
     if (attr.directory && !(flags & AT_REMOVEDIR)) return nas_error(EISDIR);
     if (!attr.directory && (flags & AT_REMOVEDIR)) return nas_error(ENOTDIR);
-    return nas_error(nas_ipc_remove(h->data, attr.inode, nas_request_id()));
+    return nas_error(nas_ipc_remove_checked(h->data, &attr, nas_request_id()));
 }
 
 static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *dir,

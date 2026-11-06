@@ -261,6 +261,16 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .rename_checked => |r| {
+                const node = (try self.readNode(txn, allocator, r.source.inode)) orelse return .{ .status = .entry_conflict };
+                if (node.parent != r.source.parent or !std.mem.eql(u8, node.name, r.source.name)) return .{ .status = .entry_conflict };
+                return self.execute(txn, allocator, meta, .{ .rename = .{ .id = r.source.inode, .parent = r.parent, .name = r.name } });
+            },
+            .remove_checked => |r| {
+                const node = (try self.readNode(txn, allocator, r.inode)) orelse return .{ .status = .entry_conflict };
+                if (node.parent != r.parent or !std.mem.eql(u8, node.name, r.name)) return .{ .status = .entry_conflict };
+                return self.execute(txn, allocator, meta, .{ .remove = .{ .id = r.inode } });
+            },
             .remove_entry => |r| {
                 if (!m.validName(r.name)) return .{ .status = .invalid_name };
                 const id = (try self.find(txn, r.parent, r.name)) orelse return .{ .status = .not_found };

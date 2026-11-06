@@ -59,11 +59,13 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 {"version":1,"request":2,"operation":{"change":{"request_id":123456,"mutation":{"create":{"parent":1,"name":"example","kind":"file"}}}}}
 ```
 
-mutation只允许create:{parent,name,kind}、rename:{inode,parent,name}或remove:{inode}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
+mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{inode}，以及rename_checked:{source:{inode,parent,name},parent,name}、remove_checked:{inode,parent,name}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；两种remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
 
 `change.request_id`不同于外层关联号：它是全Raft集群共享的非零去重ID，调用者应生成随机u64并对同一修改保持ID和完整参数。重连后可重放；不同请求复用ID返回request_conflict。Raft结果在result.change.status中，包括ok、not_found、already_exists、not_empty等；这类业务拒绝的顶层err仍为null。FileBusy等本地前置拒绝不会写入Raft receipt，可在句柄释放后重试。receipt容量仍有上限，未实现GC。
 
-rename/remove使用inode身份，不对先前路径查找做原子CAS。所有本机修改和open/close串行，但外部元数据客户端与其他服务实例不受这把锁约束；不能将它当作Samba完整POSIX/Windows路径操作语义。
+旧rename/remove保留按inode操作的语义。原生VFS使用checked变体：Raft状态机在同一次执行/LMDB事务中核对源inode的parent和精确name，再修改；源inode消失或任一字段不同返回entry_conflict，并保存冲突回执。name应取lookup返回的规范名称，而不是用户输入的大小写别名。该校验保护最终源目录项，不锁定祖先目录链或目标目录的完整路径，也不检测移走后又移回相同位置的历史。
+
+checked变体采用新增命令，不改变旧命令的JSON和回执摘要；新增status为entry_conflict（20），C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 
 操作失败返回非空 `err`，目前为Zig错误名称，例如 `FileBusy`、`InvalidHandle`、`ReadOnlyHandle`、`InvalidRange`、`UnsupportedVersion`、`WalSessionFailed`；错误映射尚不是Samba errno ABI。失败响应的result各字段为null。非法JSON、未知字段/操作、超长/空帧、半帧EOF及响应发送失败均断开连接并清理句柄，不保证返回错误帧。
 

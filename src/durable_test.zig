@@ -65,6 +65,47 @@ test "path mutations are atomic, typed and deduplicated across name reuse and re
     try t.expectEqual(@as(u64, 4), memory.lookup(2, "moved").?.id);
 }
 
+test "checked namespace mutations reject stale entries and retain receipts across restart" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const stale: m.Entry = .{ .inode = 3, .parent = 2, .name = "child" };
+    const moved: m.Entry = .{ .inode = 3, .parent = 1, .name = "moved" };
+    const reject: m.Request = .{ .request_id = 4, .command = .{ .remove_checked = stale } };
+    const remove: m.Request = .{ .request_id = 7, .command = .{ .remove_checked = moved } };
+    const commands = [_]m.Request{
+        create,
+        .{ .request_id = 2, .command = .{ .create = .{ .parent = 2, .name = "child", .kind = .file } } },
+        .{ .request_id = 3, .command = .{ .rename_checked = .{ .source = stale, .parent = 1, .name = "moved" } } },
+        reject,
+        .{ .request_id = 5, .command = .{ .rename_checked = .{ .source = stale, .parent = 1, .name = "wrong" } } },
+        .{ .request_id = 6, .command = .{ .create = .{ .parent = 2, .name = "child", .kind = .file } } },
+        reject,
+        remove,
+        .{ .request_id = 8, .command = .{ .create = .{ .parent = 1, .name = "moved", .kind = .file } } },
+        remove,
+        .{ .request_id = 9, .command = .{ .remove_checked = moved } },
+        .{ .request_id = 10, .command = .{ .remove_checked = .{ .inode = 4, .parent = 1, .name = "child" } } },
+        .{ .request_id = 11, .command = .{ .remove_checked = .{ .inode = 4, .parent = 2, .name = "CHILD" } } },
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .entry_conflict, .entry_conflict, .ok, .entry_conflict, .ok, .ok, .ok, .entry_conflict, .entry_conflict, .entry_conflict };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqual(@as(u64, 4), memory.lookup(2, "child").?.id);
+    try t.expectEqual(@as(u64, 5), memory.lookup(1, "moved").?.id);
+}
+
 test "directory pages use exclusive case-folded cursors and own their data" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

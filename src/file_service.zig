@@ -104,6 +104,11 @@ pub const Service = struct {
             // when an externally created parent has a single-replica policy.
             .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
             .rename => |op| .{ .rename = .{ .id = op.inode, .parent = op.parent, .name = op.name } },
+            .rename_checked => |op| .{ .rename_checked = op },
+            .remove_checked => |op| blk: {
+                if (self.sessions.contains(op.inode)) return error.FileBusy;
+                break :blk .{ .remove_checked = op };
+            },
             .remove => |op| blk: {
                 if (self.sessions.contains(op.inode)) return error.FileBusy;
                 break :blk .{ .remove = .{ .id = op.inode } };

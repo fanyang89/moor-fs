@@ -16,4 +16,6 @@ pub const Change = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: m.Kind },
     rename: struct { inode: u64, parent: u64, name: []const u8 },
     remove: struct { inode: u64 },
+    rename_checked: m.RenameChecked,
+    remove_checked: m.Entry,
 };

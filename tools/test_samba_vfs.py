@@ -321,6 +321,39 @@ sync always = yes
             == original
         )
         client.call({"close": {"handle": active}})
+        stale = {"inode": original, "parent": folder, "name": "first.dat"}
+        client.change(
+            51200,
+            {
+                "rename_checked": {
+                    "source": stale,
+                    "parent": parent,
+                    "name": "wrong.dat",
+                }
+            },
+            status="entry_conflict",
+        )
+        client.change(51201, {"remove_checked": stale}, status="entry_conflict")
+        smb(f"put {source} vfs-read/namespace/first.dat", share="write")
+        replacement = client.call({"lookup": {"parent": folder, "name": "first.dat"}})[
+            "attributes"
+        ]["node"]["id"]
+        assert replacement != original
+        client.change(51201, {"remove_checked": stale}, status="entry_conflict")
+        client.change(51202, {"remove_checked": stale}, status="entry_conflict")
+        assert (
+            client.call({"lookup": {"parent": folder, "name": "first.dat"}})[
+                "attributes"
+            ]["node"]["id"]
+            == replacement
+        )
+        assert (
+            client.call({"lookup": {"parent": parent, "name": "moved.dat"}})[
+                "attributes"
+            ]["node"]["id"]
+            == original
+        )
+        smb("del vfs-read/namespace/first.dat", share="write")
         smb("rename vfs-read/namespace vfs-read/renamed-dir", share="write")
         assert (
             client.call({"lookup": {"parent": parent, "name": "renamed-dir"}})[
