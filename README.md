@@ -923,6 +923,12 @@ within 4 MiB of verification heap scratch. Checkpoint/full-scrub validation keep
 its existing interval algorithm. This reduces read-validation memory, not total
 WAL bytes transferred; NAS throughput has not been benchmarked. See section 52.
 
+An opt-in read/stat latency benchmark is available via `--wal-benchmark` in the
+WAL FUSE/CIFS test harnesses, or `tools/benchmark_wal.py` on a dedicated test
+mount. See `docs/benchmarks.zh-CN.md` for commands, samples and limitations.
+The first same-host run found about 201 ms for 4 KiB reads even with an empty
+WAL, so metadata/read-barrier timing needs investigation before further tuning.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -30,10 +30,13 @@ def main():
     parser.add_argument("--wal-fuse", action="store_true")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
+    parser.add_argument("--wal-benchmark", action="store_true")
     parser.add_argument("--backend-roots", nargs=2, type=Path)
     parser.add_argument("--backend-server-roots", nargs=2, type=Path)
     parser.add_argument("--smb-ports", nargs=2, type=int)
     options = parser.parse_args()
+    if options.wal_benchmark and not (options.wal_fuse or options.wal_smb):
+        parser.error("--wal-benchmark requires --wal-fuse or --wal-smb")
     if options.wal_faults and not (options.wal_fuse or options.wal_smb):
         parser.error("--wal-faults requires --wal-fuse or --wal-smb")
     executable = str(Path(options.executable).resolve())
@@ -562,6 +565,7 @@ def main():
                     smb=options.wal_smb,
                     server_roots=options.backend_server_roots,
                     faults=options.wal_faults,
+                    benchmark=options.wal_benchmark,
                 )
             if options.fuse or options.smb:
                 from test_fuse import test_mounts

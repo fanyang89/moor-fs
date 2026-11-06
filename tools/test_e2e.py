@@ -210,6 +210,8 @@ follow symlinks = no
             command.append("--wal-smb")
         if args.wal_faults:
             command.append("--wal-faults")
+        if args.wal_benchmark:
+            command.append("--wal-benchmark")
         if args.file_store:
             command = [
                 sys.executable,
@@ -312,11 +314,14 @@ def main():
     parser.add_argument("--mutable-access")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
+    parser.add_argument("--wal-benchmark", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--directory", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--uid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--gid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.wal_benchmark and not args.wal_smb:
+        parser.error("--wal-benchmark requires --wal-smb")
     if args.wal_faults and not args.wal_smb:
         parser.error("--wal-faults requires --wal-smb")
     if args.file_store and args.mutable_access:
@@ -370,6 +375,8 @@ def main():
         command.append("--wal-smb")
     if args.wal_faults:
         command.append("--wal-faults")
+    if args.wal_benchmark:
+        command.append("--wal-benchmark")
     if args.repair_faults:
         command.append("--repair-faults")
     if args.file_store:

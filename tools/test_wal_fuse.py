@@ -12,7 +12,14 @@ import time
 
 
 def test_wal_fuse(
-    executable, directory, endpoints, run, smb=False, server_roots=None, faults=False
+    executable,
+    directory,
+    endpoints,
+    run,
+    smb=False,
+    server_roots=None,
+    faults=False,
+    benchmark=False,
 ):
     config = directory / "backends.json"
     roots = [Path(item["root"]) for item in json.loads(config.read_text())]
@@ -93,6 +100,10 @@ def test_wal_fuse(
         run("scrub-mutable", endpoints, config, inode, success=False)
         assert run("get", endpoints, inode)["mutable_file"] is None
         first, process = mount()
+        if benchmark:
+            from benchmark_wal import benchmark_wal
+
+            benchmark_wal(first, roots)
         second, _ = mount()
         path = first / "wal-file"
         with open(path, "rb", buffering=0) as reader:
