@@ -927,26 +927,27 @@ An opt-in read/stat latency benchmark is available via `--wal-benchmark` in the
 WAL FUSE/CIFS test harnesses, or `tools/benchmark_wal.py` on a dedicated test
 mount. See `docs/benchmarks.zh-CN.md` for commands, samples and limitations.
 The first same-host run found about 201 ms for 4 KiB reads even with an empty
-WAL, so metadata/read-barrier timing needs investigation before further tuning.
+WAL, prompting metadata/read-barrier timing investigation.
 
 Stage tracing (`-Dlatency-trace=true`) identified the metadata ReadIndex wait.
-The runtime now polls Raft events between unchanged 100 ms logical ticks rather
-than waiting for the next tick to process requests/responses. In traced same-host
-Safe runs, clean 4 KiB reads fell to about 2.4 ms locally and 4.3 ms over dual
-loopback CIFS. Full WAL authentication remains; a 16 MiB pending payload still
-cost about 31/43 ms per small read. See the benchmark document for raw-stage
-definitions, polling overhead and environment limits. Faster reopening also
+The runtime now uses raftz's event-driven `Raftor.run()` from PR #7, pinned at
+`e506a2818f610b3d3aeebb786da11378ceb391ad`; the local 1 ms poll loop is removed.
+Requests, gRPC inbound messages and shutdown notify the driver, while logical
+ticks remain at 100 ms. In untraced same-host Safe runs, clean 4 KiB reads took
+about 1.3 ms locally and 3.1 ms over dual loopback CIFS, versus 2.5/4.4 ms with
+the previous poll driver. A 16 MiB pending payload still cost about 27/43 ms
+per small read. Full WAL authentication remains. Faster reopening also
 exposed stale CIFS WAL length: recovery now reads the actual bounded tail rather
 than treating stat as authoritative EOF, while rejecting complete corruption.
 
 The benchmark also records voter/FUSE CPU time and surviving-thread context
 switches, using three five-second idle windows and at least one second per load
-case. A same-host comparison found roughly 850–870 additional voluntary switches
-per second per voter with polling; idle CPU remained below 0.5% of one core per
-voter in the aggregated samples. With 16 MiB pending payload, sustained local
-small reads used about 92% of one FUSE core. These process counters exclude
-Samba/kernel CPU and do not measure power consumption; details are in the
-benchmark document.
+case. Event-driven execution reduced whole-voter voluntary switches from about
+1950/s to 1010–1020/s, but measured idle CPU remained similar (roughly 0.3–0.5%
+of one core per voter). Remaining switches include other process threads.
+With 16 MiB pending payload, sustained local small reads used about 95% of one
+FUSE core. These counters exclude Samba/kernel CPU and do not measure power
+consumption. The benchmark document records the PR pin, comparison and limits.
 
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to

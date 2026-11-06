@@ -163,7 +163,7 @@ pub const Runtime = struct {
     }
 
     fn drive(self: *Runtime) void {
-        self.driveLoop() catch |err| {
+        self.node.run() catch |err| {
             if (err != error.ShuttingDown) {
                 self.failed.store(true, .release);
                 raft.log.err(@src(), "Raft stopped: {s}", .{@errorName(err)});
@@ -171,23 +171,6 @@ pub const Runtime = struct {
             self.node.stop();
         };
         self.exited.store(true, .release);
-    }
-
-    fn driveLoop(self: *Runtime) !void {
-        var next_tick = try monotonicNs();
-        while (true) {
-            if (try monotonicNs() >= next_tick) {
-                _ = try self.node.tick();
-                // Never compress missed ticks after a slow storage operation.
-                next_tick = try monotonicNs() + tick_interval_ms * std.time.ns_per_ms;
-            } else {
-                // ReadIndex and transport responses need not wait for the next
-                // logical tick. Polling does not advance election/timeout clocks.
-                _ = try self.node.poll();
-            }
-            const pause: std.os.linux.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
-            _ = std.os.linux.nanosleep(&pause, null);
-        }
     }
 
     fn apply(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
@@ -279,12 +262,6 @@ pub const Runtime = struct {
         return reply(allocator, page);
     }
 };
-
-fn monotonicNs() !u64 {
-    var time: std.os.linux.timespec = undefined;
-    if (std.os.linux.clock_gettime(.MONOTONIC, &time) != 0) return error.ClockUnavailable;
-    return @as(u64, @intCast(time.sec)) * std.time.ns_per_s + @as(u64, @intCast(time.nsec));
-}
 
 const Pending = struct {
     done: std.atomic.Value(bool) = .init(false),

@@ -916,3 +916,13 @@ Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故�
 无诊断日志的poll持续4 KiB读median本地约2.5 ms、双CIFS4.4 ms；16 MiB活跃payload时约29.5/41.5 ms，FUSE分别占单核约92%/64%，每操作CPU约26.9/26.7 ms。调度优化收益保留，下一步数据路径优化应定位完整日志校验CPU，而不是据总延迟下降宣称扫描便宜。具体表格、原始日志位置与统计限制见基准文档。
 
 四组既有WAL本地/双CIFS回归通过，包含13项损坏与SMB/supervisor、冷重挂。实际忙循环CPU交叉检查、特殊进程名解析、Python编译和diff检查通过。本轮仅提交基准和文档，不修改产品驱动、认证语义或故障恢复路径，不重复SIGKILL完整矩阵。
+
+## 56. 接入raftz事件驱动PR并复测
+
+按用户指定采用raftz PR #7，固定e506a2818f610b3d3aeebb786da11378ceb391ad（base为原d5eba2b）。Runtime直接调用上游事件驱动Raftor.run，删除本地1 ms轮询循环及其单调时钟辅助函数；保留100 ms逻辑tick、quorum屏障和原失败/停机处理。grpc-lite transport通知入站请求和peer事件，提案/ReadIndex队列及stop也通知驱动，空闲使用futex等待；没有同时保留nas-fs轮询来掩盖PR效果。
+
+Safe关闭诊断日志，用相同至少七次/至少1秒操作窗口及三段5秒空闲窗口与第55节poll结果对照。本地/CIFS空WAL4 KiB读median分别1.305/3.079 ms（原2.500/4.371），每voter全进程自愿切换从约1950/秒降到1010–1020/秒，约下降48%；CPU仍在单核约0.3–0.5%附近，样本不足以断言显著降低。16 MiB待提交payload下小读约26.8/42.5 ms，CIFS并未改善；全WAL认证仍占主要开销。完整median/p95、CPU和统计限制见基准文档。
+
+额外本地trace测得ReadIndex提交后的等待约1.052 ms；Pending.wait的1 ms休眠检查还保留，因此该观测不等于上游实际ReadIndex RTT。本轮仅切换驱动，不混入调用方等待机制优化或日志验证改动。PR测试时仍未合并，依赖固定完整提交，不浮动追踪分支。
+
+Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故障矩阵和默认staging SMB通过，包含leader切换、无quorum拒绝、13项损坏、10项SIGKILL及冷重挂。上游PR已有测试说明与本次nas-fs集成验证分别记录；未代替用户推送或评论PR。

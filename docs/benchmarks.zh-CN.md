@@ -159,3 +159,51 @@ poll驱动、4 KiB pread、不限速循环，每例至少1秒。CPU%表示该负
 旧run对照的小读仍约201 ms。poll无诊断日志时延迟收益保持，16 MiB日志验证已使本地FUSE接近占满一个核心；下一步应定位重复校验的CPU成本，不能仅通过降低轮询频率解决，也不能跳过持久日志认证。
 
 原始输出保存在工作机 `/tmp/opencode/nas-{poll,tick}-cpu-{local,cifs}-safe.log`。四组都通过既有本地/双CIFS WAL回归；CIFS覆盖13项损坏、SMB/supervisor和冷重挂。本轮只提交基准与文档，未改产品路径，未重复运行SIGKILL完整矩阵。`process_metrics`还通过实际忙循环与进程CPU时钟交叉检查，并验证含空格及右括号的Linux进程名解析。
+
+## raftz PR #7：事件驱动对照
+
+PR：https://github.com/fanyang89/raftz/pull/7
+
+本轮固定PR提交 `e506a2818f610b3d3aeebb786da11378ceb391ad`，其base为原依赖 `d5eba2b338cfd00f2306680cc2dcafb016add3a0`。nas-fs直接调用事件驱动的 `Raftor.run()`，删除自建1 ms poll循环和对应时钟函数；仍显式配置100 ms逻辑tick。grpc-lite transport已提供通知，因此使用futex唤醒，不走无通知transport的1 ms回退。PR测试时仍为OPEN，子模块固定具体提交，不跟随分支浮动。
+
+使用上一节相同命令和参数：Safe、关闭latency-trace、同机三voter、本地或双loopback CIFS、每例至少七次且至少1秒、三个5秒空闲窗口。轮询基线复用上一轮日志，并非同一时刻交错采样；以下是单轮对照，不是统计显著性或跨机NAS验收。
+
+### 小读延迟与CPU
+
+每格延迟为median / p95，单位ms；CPU ms/操作为本轮事件驱动下的FUSE进程CPU，不包含voter、Samba、内核线程：
+
+| 后端 | 待提交payload | 原poll延迟 | PR事件驱动延迟 | PR样本数 | PR FUSE CPU ms/操作 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 本地 | 0 | 2.500 / 2.759 | 1.305 / 1.434 | 755 | 0.225 |
+| 本地 | 1 MiB | 4.377 / 4.884 | 3.158 / 3.665 | 311 | 2.154 |
+| 本地 | 4 MiB | 8.871 / 9.324 | 7.506 / 7.865 | 133 | 6.391 |
+| 本地 | 16 MiB | 29.451 / 30.682 | 26.837 / 28.169 | 38 | 25.789 |
+| 双CIFS | 0 | 4.371 / 4.953 | 3.079 / 3.551 | 320 | 0.750 |
+| 双CIFS | 1 MiB | 7.733 / 8.414 | 5.449 / 6.983 | 173 | 2.659 |
+| 双CIFS | 4 MiB | 14.322 / 16.365 | 15.567 / 16.582 | 65 | 8.154 |
+| 双CIFS | 16 MiB | 41.531 / 43.274 | 42.547 / 43.301 | 24 | 25.833 |
+
+小日志改善明显；大CIFS日志这一轮没有改善，4 MiB和16 MiB的median略高，不能宣称所有负载都更快。16 MiB时FUSE持续负载占单核约95%（本地）/62%（CIFS），完整日志验证仍是主要数据路径成本。
+
+PR版本的其他操作：空日志stat本地3.684/3.996 ms、CIFS5.860/6.334 ms；空日志1 MiB读本地3.886/4.221 ms、CIFS9.152/9.777 ms。checkpoint后的4 KiB读本地1.302/1.472 ms、CIFS3.177/3.462 ms，改善不依赖待提交WAL状态。
+
+### 空闲资源
+
+三个5秒窗口按实际时长加权，范围为三个voter各自统计：
+
+| 后端 | 驱动 | 每voter CPU（单核%） | 每voter自愿切换/秒 | 三voter合计CPU（单核%） |
+| --- | --- | ---: | ---: | ---: |
+| 本地 | 原poll | 0.33–0.47 | 1951–1958 | 1.27 |
+| 本地 | PR事件驱动 | 0.33–0.47 | 1012–1020 | 1.27 |
+| 双CIFS | 原poll | 0.40–0.47 | 1951–1961 | 1.33 |
+| 双CIFS | PR事件驱动 | 0.33–0.53 | 1015–1021 | 1.27 |
+
+全进程自愿切换下降约48%，但CPU差异在当前粒度/样本下很小，不能得出显著降低CPU或功耗的结论。剩余约千次切换来自进程内所有稳定线程，不能据此推断Raft事件驱动仍在1 ms轮询。本轮线程集合没有变化，空闲FUSE未累计CPU tick或自愿切换。
+
+### 诊断及验证
+
+另外用 `-Dlatency-trace=true` 跑本地分段诊断：空WAL小读median1.555 ms，元数据current约1.423 ms，屏障等待约1.052 ms。nas-fs的 `Pending.wait()` 仍按1 ms休眠检查回调完成标志，因此该等待值包含调用方观察完成的延迟，不能当作raftz本身的实际ReadIndex网络往返时间。本轮没有改动Pending等待方式，避免混入另一项优化；诊断构建数据不与无日志主表混合。
+
+Debug/Safe各98项nas-fs单测通过；本地Debug WAL FUSE、Safe双CIFS完整WAL故障矩阵以及默认staging SMB通过，覆盖leader切换、无quorum拒绝、恢复、13项损坏、10项SIGKILL及冷重挂。直接测试PR在nas-fs里的集成，不把PR说明中的上游测试结果当成本轮重跑。
+
+原始日志：`/tmp/opencode/nas-event-pr7-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-event-pr7-trace-local-safe.log`、`/tmp/opencode/nas-event-pr7-unit-{debug,safe}.log`、`/tmp/opencode/nas-event-pr7-wal-fault-safe.log`、`/tmp/opencode/nas-event-pr7-staging-safe.log`。最终恢复为普通Safe构建，未推送或评论上游PR。
