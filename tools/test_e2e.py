@@ -230,7 +230,7 @@ follow symlinks = no
             if (
                 cluster.wait(
                     timeout=900
-                    if args.smb and args.repair_faults
+                    if (args.smb and args.repair_faults) or args.wal_faults
                     else 600
                     if args.smb or args.wal_smb
                     else 480

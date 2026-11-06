@@ -1,4 +1,4 @@
-"""Dirty-data corruption must not retire the redo records needed for recovery."""
+"""Dirty-data corruption must not be served or retire its recovery evidence."""
 
 import os
 import signal
@@ -21,8 +21,14 @@ def test_wal_evidence(directory, endpoints, inode, path, data, run):
             for target in data
         ]
 
-    for damage in ("payload", "gap", "size", "short", "wal-tail"):
-        log = directory / f"wal-evidence-{damage}.log"
+    cases = [
+        (operation, damage)
+        for operation in ("fsync", "read")
+        for damage in ("payload", "gap", "size", "short", "wal-tail")
+    ]
+    cases += [("stat", damage) for damage in ("size", "short", "wal-tail")]
+    for operation, damage in cases:
+        log = directory / f"wal-evidence-{operation}-{damage}.log"
         with log.open("w") as output:
             child = subprocess.Popen(
                 [
@@ -37,14 +43,23 @@ assert os.pwrite(fd, b'XYZ', 2) == 3
 os.ftruncate(fd, 4)
 os.ftruncate(fd, 16)
 assert os.pwrite(fd, b'tail', 12) == 4
+assert os.pread(fd, 4, 0) == b'abXY'
 os.kill(os.getpid(), signal.SIGSTOP)
 try:
-    os.fsync(fd)
+    if sys.argv[2] == 'fsync':
+        os.fsync(fd)
+    elif sys.argv[2] == 'stat':
+        os.fstat(fd)
+    else:
+        print(repr(os.pread(fd, 4, 8 if sys.argv[3] in ('gap', 'short') else 0)), flush=True)
 except OSError as exc:
+    print(repr(exc), flush=True)
     os._exit(0 if exc.errno == errno.EIO else 2)
 os._exit(1)
 """,
                     str(path),
+                    operation,
+                    damage,
                 ],
                 stdout=output,
                 stderr=output,
@@ -72,7 +87,7 @@ os._exit(1)
             before = evidence()
             child.send_signal(signal.SIGCONT)
             assert child.wait(timeout=30) == 0, (
-                f"fsync accepted {damage} corruption: {log.read_text()}"
+                f"{operation} accepted {damage} corruption: {log.read_text()}"
             )
             assert evidence() == before, (
                 "failed checkpoint modified or collected redo evidence"
@@ -82,7 +97,7 @@ os._exit(1)
             assert all(file.read_bytes() == expected for file in data)
             assert run("get", endpoints, inode)["mutable_file"]["size"] == len(expected)
             print(
-                f"PASS: identical dirty {damage} corruption fails fsync, retains WAL/metadata and replays on reopen",
+                f"PASS: identical dirty {damage} corruption fails {operation}, retains WAL/metadata and replays on reopen",
                 flush=True,
             )
         finally:

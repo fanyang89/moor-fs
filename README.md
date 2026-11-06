@@ -900,6 +900,16 @@ their WAL has been retired. It adds reads proportional to the log and covered
 logical data ranges (including sparse gaps), plus memory proportional to record
 count. No file-format change is required. See design section 49.
 
+While WAL records remain active, reads now validate the actual returned buffer
+against WAL evidence for that range, and stat checks the WAL-derived length.
+Scrub also validates pending evidence before scanning the file. The EOF probe
+checks its byte against WAL when covered, detecting CIFS zero-fill after an
+out-of-band truncation of a nonzero tail. Failures freeze the shared session
+without retiring recovery evidence. This conservative implementation rereads
+both active logs for read/size checks; small reads can therefore be expensive
+with a large pending WAL. It does not cache an authoritative content index or
+protect untouched/retired baseline ranges. See design section 50.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -184,6 +184,18 @@ test "checkpoint verifies final size even with no pending records" {
     try t.expectError(error.WalDataSizeMismatch, store.sync());
 }
 
+test "read evidence checks returned bytes rather than rereading healthy files" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    try store.write("abcdefgh", 0);
+    try store.verifyRead(2, "cde", 3);
+    try t.expectError(error.WalDataMismatch, store.verifyRead(2, "cXe", 3));
+    try t.expectError(error.WalSessionFailed, store.sync());
+    try f.expect("abcdefgh");
+}
+
 test "sealed baseline repairs either replica in place and preserves the source" {
     for (0..2) |bad| {
         var f = try Fixture.init();

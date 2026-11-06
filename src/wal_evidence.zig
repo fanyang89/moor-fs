@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 
 const Range = struct { start: u64, end: u64, payload: ?[]const u8 };
 const Event = struct { position: u64, index: usize, start: bool };
+pub const Read = struct { offset: u64, bytes: []const u8, requested: usize };
 
 pub const Evidence = struct {
     allocator: Allocator,
@@ -46,29 +47,65 @@ pub const Evidence = struct {
     /// Sweep interval boundaries with the latest operation winning overlaps.
     /// O(records log records), not quadratic for many small overlapping writes.
     pub fn verify(self: *const Evidence, io: Io, files: [2]Io.File) !void {
+        try self.verifyWindow(io, files, null);
+    }
+
+    /// Check the actual caller-visible bytes, not a second read that could hide
+    /// corruption in the already-filled buffer. An empty request checks size only.
+    pub fn verifyRead(self: *const Evidence, io: Io, files: [2]Io.File, read: Read) !void {
+        const expected = if (read.offset >= self.size) 0 else @min(read.requested, self.size - read.offset);
+        if (read.bytes.len != expected) return error.WalDataSizeMismatch;
+        try self.verifyWindow(io, files, read);
+    }
+
+    fn verifyWindow(self: *const Evidence, io: Io, files: [2]Io.File, read: ?Read) !void {
         for (files) |file| {
             if ((try file.stat(io)).size != self.size) return error.WalDataSizeMismatch;
             // CIFS may retain the old inode size on an open writable handle
             // after out-of-band server changes, even with cache=none/actimeo=0.
             var byte: [1]u8 = undefined;
-            if (self.size > 0 and try file.readPositionalAll(io, &byte, self.size - 1) != 1) return error.WalDataSizeMismatch;
+            if (self.size > 0) {
+                if (try file.readPositionalAll(io, &byte, self.size - 1) != 1) return error.WalDataSizeMismatch;
+                // An open CIFS handle can zero-fill to its cached EOF after a
+                // server-side truncation. Check the byte too when WAL covers it.
+                var index = self.ranges.items.len;
+                while (index > 0) {
+                    index -= 1;
+                    const range = self.ranges.items[index];
+                    if (range.start <= self.size - 1 and range.end >= self.size) {
+                        try compare(range, self.size - 1, &byte);
+                        break;
+                    }
+                }
+            }
             if (try file.readPositionalAll(io, &byte, self.size) != 0) return error.WalDataSizeMismatch;
         }
         var events: std.ArrayList(Event) = .empty;
         defer events.deinit(self.allocator);
+        const lower = if (read) |value| value.offset else 0;
+        const upper = if (read) |value| @min(self.size, try std.math.add(u64, value.offset, value.bytes.len)) else self.size;
         for (self.ranges.items, 0..) |range, index| {
-            if (range.start >= self.size) continue;
-            try events.append(self.allocator, .{ .position = range.start, .index = index, .start = true });
-            try events.append(self.allocator, .{ .position = @min(range.end, self.size), .index = index, .start = false });
+            const start = @max(range.start, lower);
+            const end = @min(range.end, upper);
+            if (start >= end) continue;
+            try events.append(self.allocator, .{ .position = start, .index = index, .start = true });
+            try events.append(self.allocator, .{ .position = end, .index = index, .start = false });
         }
         std.mem.sort(Event, events.items, {}, earlier);
         var active: std.PriorityQueue(usize, void, newer) = .empty;
         defer active.deinit(self.allocator);
-        var position: u64 = 0;
+        var position: u64 = lower;
         var cursor: usize = 0;
         while (cursor < events.items.len) {
             const next = events.items[cursor].position;
-            if (active.peek()) |index| if (position < next) try verifyRange(io, files, self.ranges.items[index], position, next);
+            if (active.peek()) |index| {
+                if (position < next) {
+                    const range = self.ranges.items[index];
+                    if (read) |value| {
+                        try compare(range, position, value.bytes[@intCast(position - lower)..@intCast(next - lower)]);
+                    } else try verifyRange(io, files, range, position, next);
+                }
+            }
             position = next;
             while (cursor < events.items.len and events.items[cursor].position == position) : (cursor += 1) {
                 const event = events.items[cursor];
@@ -89,13 +126,17 @@ fn verifyRange(io: Io, files: [2]Io.File, range: Range, start: u64, end: u64) !v
         const bytes = buffer[0..@min(buffer.len, end - offset)];
         for (files) |file| {
             if (try file.readPositionalAll(io, bytes, offset) != bytes.len) return error.WalDataSizeMismatch;
-            if (range.payload) |payload| {
-                const relative: usize = @intCast(offset - range.start);
-                if (!std.mem.eql(u8, bytes, payload[relative..][0..bytes.len])) return error.WalDataMismatch;
-            } else {
-                for (bytes) |byte| if (byte != 0) return error.WalDataMismatch;
-            }
+            try compare(range, offset, bytes);
         }
         offset += bytes.len;
+    }
+}
+
+fn compare(range: Range, offset: u64, bytes: []const u8) !void {
+    if (range.payload) |payload| {
+        const relative: usize = @intCast(offset - range.start);
+        if (!std.mem.eql(u8, bytes, payload[relative..][0..bytes.len])) return error.WalDataMismatch;
+    } else {
+        for (bytes) |byte| if (byte != 0) return error.WalDataMismatch;
     }
 }

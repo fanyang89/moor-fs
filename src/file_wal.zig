@@ -7,6 +7,7 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const Allocator = std.mem.Allocator;
+const evidence_module = @import("wal_evidence.zig");
 const header_size = 112;
 pub const max_write = 1024 * 1024;
 pub const max_log = 64 * 1024 * 1024;
@@ -171,6 +172,14 @@ pub const Session = struct {
     /// Validate acknowledged in-session logs exactly (no torn-tail recovery),
     /// then compare their final effects before the enclosing store retires them.
     pub fn verifyPending(self: *Session, first: u64, baseline_size: u64) !void {
+        try self.verifyEvidence(first, baseline_size, null);
+    }
+
+    pub fn verifyRead(self: *Session, first: u64, baseline_size: u64, read: evidence_module.Read) !void {
+        try self.verifyEvidence(first, baseline_size, read);
+    }
+
+    fn verifyEvidence(self: *Session, first: u64, baseline_size: u64, read: ?evidence_module.Read) !void {
         if (self.failed) return error.WalSessionFailed;
         errdefer self.failed = true;
         const a = try readLog(self.allocator, self.io, self.replicas[0].log);
@@ -182,7 +191,7 @@ pub const Session = struct {
         }
         const scanned = try scan(a, self.identity, first);
         if (a.len != self.end or scanned.end != a.len or scanned.next != self.next) return error.WalChanged;
-        var evidence: @import("wal_evidence.zig").Evidence = .{ .allocator = self.allocator, .size = baseline_size };
+        var evidence: evidence_module.Evidence = .{ .allocator = self.allocator, .size = baseline_size };
         defer evidence.deinit();
         var offset: usize = 0;
         var sequence = first;
@@ -194,7 +203,8 @@ pub const Session = struct {
             offset = record.end;
             sequence += 1;
         }
-        try evidence.verify(self.io, .{ self.replicas[0].data, self.replicas[1].data });
+        const files = [2]File{ self.replicas[0].data, self.replicas[1].data };
+        if (read) |value| try evidence.verifyRead(self.io, files, value) else try evidence.verify(self.io, files);
     }
 
     fn mutate(self: *Session, operation: Operation, offset: u64, payload: []const u8) !void {

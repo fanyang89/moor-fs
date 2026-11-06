@@ -186,6 +186,12 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    pub fn verifyRead(self: *Store, offset: u64, bytes: []const u8, requested: usize) !void {
+        if (self.session.failed) return error.WalSessionFailed;
+        if (self.session.end == 0) return;
+        try self.session.verifyRead(self.checkpoint.next, self.checkpoint.size, .{ .offset = offset, .bytes = bytes, .requested = requested });
+    }
+
     pub fn write(self: *Store, bytes: []const u8, offset: u64) !void {
         if (self.session.failed) return error.WalSessionFailed;
         if (bytes.len > wal.max_write or offset > std.math.maxInt(i64) - bytes.len) return error.InvalidRange;

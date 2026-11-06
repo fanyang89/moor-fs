@@ -220,6 +220,7 @@ pub const Access = struct {
         _ = try self.current();
         _ = try self.replicaSize();
         const count = try self.readCompared(bytes, offset);
+        try self.data.verifyRead(offset, bytes[0..count], bytes.len);
         try self.validate();
         return count;
     }
@@ -260,6 +261,7 @@ pub const Access = struct {
         errdefer self.failed = true;
         try self.validate();
         _ = try self.current();
+        try self.data.session.verifyPending(self.data.checkpoint.next, self.data.checkpoint.size);
         const length = try self.replicaSize();
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         var buffer: [64 * 1024]u8 = undefined;
@@ -295,6 +297,7 @@ pub const Access = struct {
         errdefer self.failed = true;
         try self.validate();
         _ = try self.current();
+        try self.data.verifyRead(0, "", 0);
         return self.replicaSize();
     }
 
