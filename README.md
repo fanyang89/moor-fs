@@ -950,6 +950,16 @@ With 16 MiB pending payload, the PR-only comparison used about 95% of one
 FUSE core for sustained local small reads. These counters exclude Samba/kernel CPU and do not measure power
 consumption. The benchmark document records the PR pin, comparison and limits.
 
+WAL diagnostics now split setup, header processing, payload reads, payload
+comparison, record authentication, evidence overlay and final bounds checks.
+Profiling identified payload comparison as the largest local cost in the tested
+Safe build. Bounded 8-byte comparisons now replace the large-payload comparison
+in streaming read/size verification; every byte and every record checksum is
+still checked, with no cache or format change. In same-host untraced runs,
+4 KiB reads with 16 MiB pending payload fell from 27.4/39.1 ms to 13.1/25.6 ms
+(local/dual CIFS), with about 13 ms FUSE CPU per operation. See the benchmark
+document for stage timings and portability limits.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

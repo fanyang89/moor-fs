@@ -13,6 +13,61 @@ pub const max_write = 1024 * 1024;
 pub const max_log = 64 * 1024 * 1024;
 const magic = "NASWAL01";
 
+fn equalPayload(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    // Fixed-width loads avoid expensive vector comparison lowering in the
+    // current Safe toolchain. Every load stays within the payload slice.
+    var offset: usize = 0;
+    while (a.len - offset >= @sizeOf(u64)) : (offset += @sizeOf(u64)) {
+        const left: u64 = @bitCast(a[offset..][0..@sizeOf(u64)].*);
+        const right: u64 = @bitCast(b[offset..][0..@sizeOf(u64)].*);
+        if (left != right) return false;
+    }
+    return std.mem.eql(u8, a[offset..], b[offset..]);
+}
+
+test "payload comparison detects every byte at all word alignments and short lengths" {
+    const t = std.testing;
+    var a: [87]u8 = undefined;
+    var b: [87]u8 = undefined;
+    for (&a, 0..) |*byte, i| byte.* = @truncate(i * 37);
+    for (0..8) |left_offset| for (0..8) |right_offset| {
+        for (0..81) |length| {
+            const left = a[left_offset..][0..length];
+            const right = b[right_offset..][0..length];
+            @memcpy(right, left);
+            try t.expect(equalPayload(left, right));
+            if (length > 0) try t.expect(!equalPayload(left, right[0 .. length - 1]));
+            for (right) |*byte| {
+                byte.* ^= 0x80;
+                try t.expect(!equalPayload(left, right));
+                byte.* ^= 0x80;
+            }
+        }
+    };
+}
+
+test "payload comparison detects differences across large buffer and EOF boundaries" {
+    const t = std.testing;
+    const a = try t.allocator.alloc(u8, max_write + 7);
+    defer t.allocator.free(a);
+    const b = try t.allocator.alloc(u8, max_write + 7);
+    defer t.allocator.free(b);
+    @memset(a, 'X');
+    @memset(b, 'X');
+    for ([_]usize{ 65535, 65536, 65537, max_write }) |length| {
+        const left = a[1..][0..length];
+        const right = b[7..][0..length];
+        try t.expect(equalPayload(left, right));
+        for ([_]usize{ 0, 7, 8, 63, 64, 65, 65535, 65536, length - 1 }) |position| {
+            if (position >= length) continue;
+            right[position] = 'Y';
+            try t.expect(!equalPayload(left, right));
+            right[position] = 'X';
+        }
+    }
+}
+
 pub const Identity = struct { inode: u64, generation: u64 };
 pub const Replica = struct { log: File, data: File };
 const Operation = enum(u32) { write = 1, truncate = 2 };
@@ -285,6 +340,7 @@ pub const Session = struct {
     /// Stream both complete WALs, retaining only one frame per replica and the
     /// caller's requested window. No persistent-log integrity cache is trusted.
     pub fn verifyRead(self: *Session, first: u64, baseline_size: u64, read: evidence_module.Read) !void {
+        var timing = @import("latency_trace.zig").Timing(7).start();
         if (self.failed) return error.WalSessionFailed;
         errdefer self.failed = true;
         if (first == 0 or first > self.next) return error.WalChanged;
@@ -305,6 +361,7 @@ pub const Session = struct {
         var right: LogReader = .{ .io = self.io, .file = self.replicas[1].log, .limit = self.end };
         var offset: u64 = 0;
         var sequence = first;
+        timing.mark(0);
         while (offset < self.end) {
             if (self.end - offset < header_size) return error.WalChanged;
             try left.readExact(a[0..header_size]);
@@ -314,21 +371,28 @@ pub const Session = struct {
             _ = try decode(a[0..header_size], 0, self.identity, sequence);
             const length = header_size + std.mem.readInt(u32, a[40..44], .little);
             if (length > self.end - offset) return error.WalChanged;
+            timing.add(1);
             try left.readExact(a[header_size..length]);
             try right.readExact(b[header_size..length]);
-            if (!std.mem.eql(u8, a[header_size..length], b[header_size..length])) return error.WalDiverged;
+            timing.add(2);
+            if (!equalPayload(a[header_size..length], b[header_size..length])) return error.WalDiverged;
+            timing.add(3);
             const record = (try decode(a[0..length], 0, self.identity, sequence)) orelse return error.WalChanged;
+            timing.add(4);
             switch (record.operation) {
                 .write => try evidence.write(record.offset, record.payload),
                 .truncate => evidence.truncate(record.offset),
             }
             offset += length;
             sequence = std.math.add(u64, sequence, 1) catch return error.WalSequenceExhausted;
+            timing.add(5);
         }
         if (sequence != self.next) return error.WalChanged;
         try left.checkEnd();
         try right.checkEnd();
         try evidence.verify(self.io, .{ self.replicas[0].data, self.replicas[1].data });
+        timing.mark(6);
+        timing.finish("wal-verify", self.identity.inode, read.bytes.len, self.end);
     }
 
     fn mutate(self: *Session, operation: Operation, offset: u64, payload: []const u8) !void {

@@ -20,6 +20,13 @@ pub fn Timing(comptime count: usize) type {
             self.last = end;
         }
 
+        pub fn add(self: *Self, comptime index: usize) void {
+            if (!enabled) return;
+            const end = now();
+            self.stages[index] +|= end -| self.last;
+            self.last = end;
+        }
+
         pub fn finish(self: Self, comptime operation: []const u8, id: u64, size: u64, wal: u64) void {
             if (!enabled) return;
             std.log.info("latency op={s} id={d} size={d} wal={d} ns={any}", .{ operation, id, size, wal, self.stages });

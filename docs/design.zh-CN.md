@@ -934,3 +934,13 @@ Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故�
 固定raftz e506a28不变，Safe无诊断日志本地/CIFS空WAL4 KiB读median由1.305/3.079 ms降至0.513/2.234 ms，stat由3.684/5.860 ms降至1.323/3.175 ms。16 MiB活跃payload的小读约27.4/39.1 ms，结果仍受日志验证和运行波动影响。额外本地trace的ReadIndex等待约0.034 ms，原1.052 ms台阶消失；该计时仍含回调及调度成本，不是纯RTT。详细前后表、两次运行总延迟差异和原始日志在基准文档。
 
 新增2项单测，Debug/Safe各100项通过，覆盖完成先到、响应借用缓冲复制、畸形响应、超时/停机/leader错误，以及128次真实线程并发完成和结果可见性。本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL、默认staging SMB通过，包含无quorum拒绝、leader切换、关闭和恢复。未修改WAL认证、数据格式、Raft tick或依赖提交。
+
+## 58. WAL验证阶段计时与有界payload比对
+
+在现有latency-trace开关下增加wal-verify七阶段累计计时，区分初始化、头部、payload读取/拷贝、payload比对、记录认证、窗口覆盖与最终边界核对。普通构建不计时，仍只有成功验证输出诊断。本地16 MiB活跃payload的分段结果显示，原payload比对约13.91 ms，超过SHA-256记录认证约8.38 ms，读取/拷贝约2.60 ms；据此优先修改比对，而非增加缓存或跳过认证。
+
+最终实现仅替换Session.verifyRead中双payload的相等判断：长度必须相同，逐个有界8字节数组读取并bitCast比较，尾部不足8字节继续比较。无需特定指令集、未对齐指针强转或关闭安全检查，每一字节都参与相等判断；SHA-256、身份/序号、精确EOF和请求窗口外记录认证保持。临时memcmp实验解析到compiler-rt逐字节实现，未保留C外部调用。头部、检查点全量算法及数据读取原有比较保持原状。
+
+最终trace比对阶段约0.68 ms；Safe无trace16 MiB待提交payload的4 KiB读本地27.432→13.052 ms、双CIFS39.125→25.644 ms，FUSE每操作CPU约27.0→12.9/26.2→13.1 ms。所有结果限于同机本轮工具链，空日志路径未改，不能把其波动归因于payload优化。完整样本表、诊断定义和限制在基准文档。
+
+新增3项单测，Debug/Safe各103项通过：左右所有0–7对齐、0–80长度逐字节翻转；64 KiB边界/1 MiB payload关键字节及EOF；窗口外第二侧payload末字节损坏仍WalDiverged、冻结并保留checkpoint。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor冷重挂通过。当前仍逐次传输并认证双侧完整活跃日志，下一步成本主要在记录认证与I/O，不扩展为持久内容索引缓存。

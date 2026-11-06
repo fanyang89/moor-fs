@@ -242,3 +242,48 @@ Debug/Safe各98项nas-fs单测通过；本地Debug WAL FUSE、Safe双CIFS完整W
 新增两项单测：回调先完成时保留成功、ShuttingDown/LostLeadership/Timeout错误、拷贝借用响应及拒绝畸形响应；128次真实线程并发完成覆盖提案/ReadIndex成功及停机/失去leader错误，等待返回后验证结果可见。Debug/Safe各100项单测通过。本地Debug WAL FUSE、Safe双CIFS完整13项损坏和10项SIGKILL，以及默认staging SMB回归通过，保留无quorum拒绝、leader切换、关闭和恢复检查。
 
 原始日志在 `/tmp/opencode/nas-pending-notify-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-pending-notify-trace-local-safe.log`、`/tmp/opencode/nas-pending-notify-unit-{debug,safe}.log`、`/tmp/opencode/nas-pending-notify-wal-fault-safe.log` 和 `/tmp/opencode/nas-pending-notify-staging-safe.log`。最终构建恢复为普通Safe。下一步数据路径分析仍应针对大WAL完整认证的CPU/I/O成本。
+
+## WAL payload比对的CPU定位与优化
+
+诊断输出新增 `wal-verify`，每个数组为一次流式验证的七个纳秒累计值：
+
+1. stat、读窗口及双帧缓冲初始化。
+2. 双侧头部读取/比较、头部认证、长度检查（可能触发预读）。
+3. 双侧payload读取及从预读缓冲拷贝。
+4. 双侧payload字节相等性比较。
+5. 完整记录decode及SHA-256认证，包括再次头部检查。
+6. 读窗口/尾字节证据覆盖、序号和偏移推进。
+7. 精确日志EOF、数据大小/尾字节/读窗口的最终验证。
+
+循环阶段逐条累加，只在成功结束输出一条日志；普通构建不读取这些时钟。预读可能在头部阶段发生，不能将第三阶段直接当作独立NAS网络耗时。日志输出和defer清理不计在七段里，不将各段median简单相加代替端到端median。
+
+### 实测定位
+
+测试主机为AMD Ryzen 9 9955HX，Zig 0.17.0，Safe。本地16 MiB活跃payload、4 KiB请求下，原实现分段median约为：payload读/拷贝2.60 ms、payload比对13.91 ms、完整记录认证8.38 ms、窗口覆盖0.004 ms。瓶颈并不只是SHA-256，也不是构造窗口索引。
+
+曾对memcmp作临时实验，比对阶段约3.98 ms；检查二进制符号/反汇编发现实际解析到compiler-rt逐字节memcmp，并非预期的系统libc优化实现，因此没有保留该外部调用。最终仅在流式双WAL payload比对使用有界8字节读取，按原始位模式比较；不足8字节的尾部继续用原字节相等判断。切片边界检查保留，没有未对齐u64指针强转、不读取payload外字节、不更改校验算法。该变化规避的是本机当前Safe构建的大payload比较开销，不断言其他CPU/编译器也有相同比例收益。
+
+改后同类trace的payload比对约0.68 ms、读取/拷贝2.52 ms、记录认证8.41 ms。数据/记录仍完整认证，之后的主要成本转向记录校验和及双侧传输；没有缓存持久日志或跳过请求范围外的记录。
+
+### 无日志基准
+
+基线为上一节 `c1f3d12`，同机Safe、关闭trace、每例至少七次且至少1秒。以下为4 KiB pread的median / p95（ms），CPU列为FUSE进程每操作CPU毫秒：
+
+| 后端 | 待提交payload | 原字节比对 | 8字节比对 | 本轮样本数 | FUSE CPU前→后 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 本地 | 1 MiB | 2.326 / 2.641 | 1.309 / 1.561 | 746 | 2.275 → 1.247 |
+| 本地 | 4 MiB | 7.086 / 7.545 | 3.429 / 3.741 | 290 | 6.950 → 3.379 |
+| 本地 | 16 MiB | 27.432 / 28.282 | 13.052 / 13.841 | 77 | 27.027 → 12.857 |
+| 双CIFS | 1 MiB | 5.635 / 6.200 | 4.200 / 5.085 | 228 | 3.000 → 1.886 |
+| 双CIFS | 4 MiB | 14.721 / 16.076 | 11.740 / 12.821 | 93 | 8.235 → 4.409 |
+| 双CIFS | 16 MiB | 39.125 / 43.119 | 25.644 / 27.056 | 39 | 26.154 → 13.077 |
+
+16 MiB payload时stat本轮约26.490 ms（本地）/50.119 ms（CIFS），1 MiB读约28.815/55.224 ms。空日志不进入这条比对路径，其本轮小读median约0.381/1.678 ms，不能将相对上一轮的变动归因于此次优化。跨运行未做交错重复采样，CPU tick仍有10 ms粒度；不代表独立NAS、其他架构或所有记录大小分布。
+
+### 正确性与记录
+
+新增三项单测：所有左右0–7字节对齐组合、0–80字节长度逐个字节翻转都检出；64 KiB前后及1 MiB payload的起点、字边界、预读边界和最后字节损坏检出；仅第二侧1 MiB记录的最后一个payload字节损坏时，即使请求只读第一个字节也返回WalDiverged、冻结并保留checkpoint。原同损日志认证、重叠写/截断/空洞和有界内存测试继续通过。
+
+Debug/Safe各103项单测通过；本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过。默认staging路径本轮未修改。最后恢复普通Safe构建，raftz PR固定提交及元数据通知等待均不变。
+
+原始输出：`/tmp/opencode/nas-wal-stages-split-local-safe.log`（原分段）、`/tmp/opencode/nas-wal-memcmp-trace-local-safe.log`（临时memcmp）、`/tmp/opencode/nas-wal-word-trace-local-safe.log`（最终分段）、`/tmp/opencode/nas-wal-word-cpu-{local,cifs}-safe.log`（无日志基准）、`/tmp/opencode/nas-wal-word-unit-{debug,safe}.log`、`/tmp/opencode/nas-wal-word-fault-safe.log`。

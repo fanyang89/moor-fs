@@ -236,6 +236,22 @@ test "streaming verification rechecks WAL corruption outside the read window" {
     try t.expectEqual(@as(u64, 1), store.checkpoint.next);
 }
 
+test "streaming verification rejects a one-sided final payload byte outside the read window" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    const payload = try t.allocator.alloc(u8, wal.max_write);
+    defer t.allocator.free(payload);
+    @memset(payload, 'X');
+    try store.write(payload, 0);
+    try store.verifyRead(0, "X", 1);
+    try store.session.replicas[1].log.writePositionalAll(t.io, "Y", 112 + payload.len - 1);
+    try t.expectError(error.WalDiverged, store.verifyRead(0, "X", 1));
+    try t.expectError(error.WalSessionFailed, store.collect());
+    try t.expectEqual(@as(u64, 1), store.checkpoint.next);
+}
+
 test "streaming WAL frame length is authenticated and bounded before payload reads" {
     for ([_]u32{ wal.max_write, wal.max_write + 1 }) |length| {
         var f = try Fixture.init();
