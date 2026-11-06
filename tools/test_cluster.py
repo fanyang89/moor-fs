@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--repair-faults", action="store_true")
     parser.add_argument("--mutable-access")
     parser.add_argument("--file-ipc", action="store_true")
+    parser.add_argument("--samba-vfs", action="store_true")
     parser.add_argument("--wal-fuse", action="store_true")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
@@ -543,6 +544,10 @@ def main():
                 smb_ports=options.smb_ports,
                 repair_faults=options.repair_faults,
             )
+            if options.samba_vfs:
+                from test_samba_vfs import test_samba_vfs
+
+                test_samba_vfs(executable, directory, endpoints)
             if options.file_ipc:
                 from test_file_ipc import test_file_ipc
 

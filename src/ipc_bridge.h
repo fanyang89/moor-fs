@@ -1,0 +1,25 @@
+/* Local synchronous IPC ABI for the Samba adapter. Return values are errno codes. */
+#ifndef NAS_FS_IPC_BRIDGE_H
+#define NAS_FS_IPC_BRIDGE_H
+#include <stdint.h>
+#include <stddef.h>
+struct nas_ipc;
+struct nas_attr {
+    uint64_t inode, parent, size;
+    int directory;
+    char name[256];
+};
+struct nas_page {
+    struct nas_attr entries[16];
+    size_t count;
+    char next[256];
+};
+int nas_ipc_connect(const char *, struct nas_ipc **);
+void nas_ipc_disconnect(struct nas_ipc *);
+int nas_ipc_stat(struct nas_ipc *, uint64_t, struct nas_attr *);
+int nas_ipc_lookup(struct nas_ipc *, uint64_t, const char *, struct nas_attr *);
+int nas_ipc_list(struct nas_ipc *, uint64_t, const char *, struct nas_page *);
+int nas_ipc_open(struct nas_ipc *, uint64_t, uint64_t *);
+int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
+int nas_ipc_close(struct nas_ipc *, uint64_t);
+#endif

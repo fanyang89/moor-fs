@@ -40,7 +40,17 @@ It exposes bounded, connection-owned Unix-socket file handles backed by the
 existing dual-replica WAL engine. See `docs/file-ipc.zh-CN.md` for framing,
 permissions, disconnect/restart semantics and limits. The interface also exposes
 stat, component lookup, bounded directory pages and receipt-backed namespace
-mutations. The Samba custom VFS adapter is not connected yet.
+mutations. An experimental read-only native Samba VFS now connects directly to
+this core, without FUSE:
+
+```sh
+python3 tools/build_vfs.py
+zig build test-samba-vfs
+zig build test-samba-vfs-cifs -Doptimize=safe
+```
+
+Use the matching source-built Samba daemon only. See `docs/samba-vfs.zh-CN.md`
+for the single-user scope, synthetic attributes and unsupported operations.
 
 To build a standalone runtime directory with the matching libfuse, helpers,
 documentation, E2E scripts and SHA-256 manifest:

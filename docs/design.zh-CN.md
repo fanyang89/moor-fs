@@ -998,3 +998,11 @@ IPC增加stat、lookup、list、change。namespace.Api将Get/Lookup/List映射�
 change仅开放create/rename/remove，映射既有Raft请求与receipt；客户端提供独立非零request_id，外层request仍仅关联回复。create显式双副本；rename按inode执行且不覆盖目标，保留现有句柄；remove在同一会话锁内检查该inode是否仍有句柄，有则FileBusy，不向Raft提交。最后句柄关闭后可以重试。本地锁不约束外部元数据修改，不提供路径lookup+rename/remove的原子CAS或跨节点fencing。删除不回收旧数据目录。
 
 Debug本地/Safe双CIFS真实Raft多进程E2E通过：目录及文件完全通过IPC创建，分页与Unicode255字节名称、非法名称、大小写冲突、根保护/环/非空拒绝；活跃句柄重命名与删除保护、实时脏size、immutable stat不迁移；核心重启重放创建/重命名原回执，重放旧删除不影响同名新inode。新增单测验证单副本父目录下仍强制双副本、改名后的原句柄可读及删除前置拒绝后可重试。Debug/Safe各110项通过。协议文档列出两层错误及重放边界；Samba VFS仍待接入。
+
+## 65. 原生Samba只读VFS与C IPC桥
+
+新增 `vfs_nas_fs.c`，以固定Samba 4.25.1 opaque骨架的显式不支持操作为基础，接入IPC stat/lookup/list/open/read/close。Zig `ipc_bridge.zig` 提供同步C ABI，验证帧长、版本、关联号和结果边界，失败毒化连接，不自动重连旧句柄。静态库包含compiler runtime，模块使用与测试smbd相同构建树的编译参数。无FUSE挂载，未修改Samba子模块源码或系统服务。
+
+模块要求只读共享、leases/oplocks关闭；所有分量通过核心查找。Samba内部fd为只读/dev/null占位，仅生命周期/fcntl使用；内容和属性不来自宿主文件。属性权限、uid/gid、时间与容量仍为单用户原型值，固定虚拟device ID只适合单命名空间；未支持SMB写入、ACL持久化或byte-range lock等完整语义。pread_send同步完成后投递结果，尚非异步后端I/O。
+
+Debug本地/Safe双CIFS真实Raft E2E通过：SMB3分页浏览、任意二进制下载、两个独立smbd共享脏写会话、实时写入可见；拒绝写入与宿主路径访问；单侧损坏导致读取失败，释放失败句柄后WAL恢复并重新下载一致。退出日志无panic。C ABI Debug/Safe受控回复测试覆盖分片、半帧、长度/JSON/版本/关联号/句柄/hex异常与毒化后的不重连；底层Debug/Safe各110项单测通过。详细构建、限制及测试日志见 `samba-vfs.zh-CN.md`；尚非Windows/macOS或物理NAS验收。

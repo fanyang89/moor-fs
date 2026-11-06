@@ -1,0 +1,159 @@
+"""Exercise the C ABI against controlled fragmented and invalid IPC replies."""
+
+import ctypes as c
+import errno
+import json
+from pathlib import Path
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="nas-ipc-abi-") as temporary:
+        directory = Path(temporary)
+        shared = directory / "bridge.so"
+        subprocess.run(
+            [
+                "cc",
+                "-shared",
+                "-Wl,--whole-archive",
+                sys.argv[1],
+                "-Wl,--no-whole-archive",
+                "-o",
+                str(shared),
+            ],
+            check=True,
+        )
+        lib = c.CDLL(str(shared))
+        lib.nas_ipc_connect.argtypes = [c.c_char_p, c.POINTER(c.c_void_p)]
+        lib.nas_ipc_connect.restype = c.c_int
+        lib.nas_ipc_disconnect.argtypes = [c.c_void_p]
+        lib.nas_ipc_disconnect.restype = None
+        lib.nas_ipc_open.argtypes = [c.c_void_p, c.c_uint64, c.POINTER(c.c_uint64)]
+        lib.nas_ipc_open.restype = c.c_int
+        lib.nas_ipc_read.argtypes = [
+            c.c_void_p,
+            c.c_uint64,
+            c.c_uint64,
+            c.c_void_p,
+            c.c_size_t,
+            c.POINTER(c.c_size_t),
+        ]
+        lib.nas_ipc_read.restype = c.c_int
+
+        def exact(sock, count):
+            result = b""
+            while len(result) < count:
+                chunk = sock.recv(count - len(result))
+                assert chunk
+                result += chunk
+            return result
+
+        def serve(listener, replies):
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                for reply in replies:
+                    size = struct.unpack("<I", exact(connection, 4))[0]
+                    request = json.loads(exact(connection, size))
+                    if isinstance(reply, bytes):
+                        connection.sendall(reply)
+                        connection.shutdown(socket.SHUT_WR)
+                    else:
+                        response = {
+                            "version": 1,
+                            "request": request["request"],
+                            "err": None,
+                            "result": {},
+                        }
+                        response.update(reply)
+                        encoded = json.dumps(response).encode()
+                        frame = struct.pack("<I", len(encoded)) + encoded
+                        for byte in frame:
+                            connection.sendall(bytes([byte]))
+                # A poisoned client must close rather than retry/reconnect.
+                assert connection.recv(1) == b""
+
+        cases = [
+            b"\x01\x00",
+            struct.pack("<I", 0),
+            struct.pack("<I", 132097),
+            struct.pack("<I", 8) + b"{}",
+            struct.pack("<I", 1) + b"{",
+            {"version": 2},
+            {"request": 999},
+            {"result": {"handle": 0}},
+            {"result": {}},
+        ]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            for index, reply in enumerate(cases):
+                path = directory / f"socket-{index}"
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.settimeout(5)
+                    listener.bind(str(path))
+                    listener.listen()
+                    future = pool.submit(serve, listener, [reply])
+                    client = c.c_void_p()
+                    assert lib.nas_ipc_connect(str(path).encode(), c.byref(client)) == 0
+                    try:
+                        handle = c.c_uint64()
+                        assert (
+                            lib.nas_ipc_open(client, 42, c.byref(handle)) == errno.EIO
+                        )
+                        assert (
+                            lib.nas_ipc_open(client, 42, c.byref(handle)) == errno.EIO
+                        )
+                    finally:
+                        lib.nas_ipc_disconnect(client)
+                    future.result(timeout=5)
+            # An application error keeps framing synchronized; valid binary data
+            # survives arbitrary fragments, but malformed payloads poison it.
+            path = directory / "valid"
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                listener.listen()
+                future = pool.submit(
+                    serve,
+                    listener,
+                    [
+                        {"err": "NotFound"},
+                        {"result": {"handle": 7}},
+                        {"result": {"count": 4, "hex": "00ff0180"}},
+                        {"result": {"count": 4, "hex": "00zz0180"}},
+                    ],
+                )
+                client = c.c_void_p()
+                assert lib.nas_ipc_connect(str(path).encode(), c.byref(client)) == 0
+                try:
+                    handle = c.c_uint64()
+                    assert lib.nas_ipc_open(client, 42, c.byref(handle)) == errno.ENOENT
+                    assert (
+                        lib.nas_ipc_open(client, 42, c.byref(handle)) == 0
+                        and handle.value == 7
+                    )
+                    buffer = c.create_string_buffer(4)
+                    count = c.c_size_t()
+                    assert (
+                        lib.nas_ipc_read(client, 7, 0, buffer, 4, c.byref(count)) == 0
+                    )
+                    assert count.value == 4 and buffer.raw == b"\x00\xff\x01\x80"
+                    assert (
+                        lib.nas_ipc_read(client, 7, 0, buffer, 4, c.byref(count))
+                        == errno.EIO
+                    )
+                    assert count.value == 0
+                    assert lib.nas_ipc_open(client, 42, c.byref(handle)) == errno.EIO
+                finally:
+                    lib.nas_ipc_disconnect(client)
+                future.result(timeout=5)
+        print(
+            "PASS: C IPC ABI fragmentation, error mapping, binary reads and poisoned-connection failures"
+        )
+
+
+if __name__ == "__main__":
+    main()

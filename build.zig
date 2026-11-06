@@ -3,6 +3,29 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const ipc_sys = b.addTranslateC(.{
+        .root_source_file = b.path("src/ipc_sys.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const ipc_bridge = b.addLibrary(.{
+        .name = "nas-ipc",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ipc_bridge.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+            .imports = &.{.{ .name = "ipc_sys", .module = ipc_sys.createModule() }},
+        }),
+    });
+    ipc_bridge.bundle_compiler_rt = true;
+    const test_ipc_bridge = b.addSystemCommand(&.{ "python3", "tools/test_ipc_bridge.py" });
+    test_ipc_bridge.addArtifactArg(ipc_bridge);
+    b.step("test-ipc-bridge", "Test C IPC ABI against controlled socket replies").dependOn(&test_ipc_bridge.step);
+    b.step("ipc-bridge", "Build the synchronous C ABI for Samba IPC").dependOn(&b.addInstallArtifact(ipc_bridge, .{}).step);
     const fuse = b.option(bool, "fuse", "Build the FUSE namespace and file adapter") orelse false;
     const relocatable = b.option(bool, "relocatable", "Use a sibling lib directory for the packaged FUSE library") orelse false;
     const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair, write and metadata reply SIGSTOP checkpoints") orelse false;
@@ -51,6 +74,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    const test_vfs = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
+    test_vfs.addArtifactArg(exe);
+    test_vfs.addArg("--samba-vfs");
+    b.step("test-samba-vfs", "Test the prebuilt native Samba VFS without FUSE").dependOn(&test_vfs.step);
+    const test_vfs_cifs = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
+    test_vfs_cifs.addArtifactArg(exe);
+    test_vfs_cifs.addArg("--samba-vfs");
+    b.step("test-samba-vfs-cifs", "Test native Samba VFS with dual CIFS backends").dependOn(&test_vfs_cifs.step);
     const file_ipc = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
     file_ipc.addArtifactArg(exe);
     file_ipc.addArg("--file-ipc");
