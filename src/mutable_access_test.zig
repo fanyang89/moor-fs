@@ -98,6 +98,120 @@ const Fixture = struct {
     }
 };
 
+test "file service isolates connection handles and shares live writes across owners" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const a = try service.connect();
+    const b = try service.connect();
+    const writer = try service.open(a, 2, true);
+    const reader = try service.open(b, 2, false);
+    try t.expectError(error.FileBusy, service.open(b, 2, true));
+    try t.expectError(error.InvalidHandle, service.write(b, writer.handle, "bad", 0));
+    try t.expectError(error.InvalidHandle, service.close(a, reader.handle));
+    try t.expectError(error.ReadOnlyHandle, service.write(b, reader.handle, "bad", 0));
+    try service.write(a, writer.handle, "shared", 0);
+    var buffer: [16]u8 = undefined;
+    const count = try service.read(b, reader.handle, &buffer, 0);
+    try t.expectEqualStrings("shared", buffer[0..count]);
+    try t.expectEqual(@as(u64, 6), try service.size(b, reader.handle));
+    service.disconnect(a);
+    try t.expectError(error.InvalidConnection, service.open(a, 2, false));
+    try t.expectError(error.InvalidHandle, service.size(a, writer.handle));
+    const replacement = try service.open(b, 2, true);
+    try service.truncate(b, replacement.handle, 3);
+    try t.expectEqual(@as(u64, 3), try service.size(b, reader.handle));
+    try service.close(b, replacement.handle);
+    try service.close(b, reader.handle);
+    try t.expectEqual(@as(u32, 0), service.sessions.count());
+    var reopened = try f.open();
+    defer reopened.close();
+    try t.expectEqual(@as(usize, 3), try reopened.read(&buffer, 0));
+    try t.expectEqualStrings("sha", buffer[0..3]);
+}
+
+test "file service disconnect recovers WAL and failed close preserves frozen readers" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+        .max_connections = 2,
+        .max_handles = 2,
+    };
+    defer service.deinit();
+    const a = try service.connect();
+    const b = try service.connect();
+    try t.expectError(error.ConnectionLimit, service.connect());
+    const writer = try service.open(a, 2, true);
+    try service.write(a, writer.handle, "durable", 0);
+    service.disconnect(a);
+    const recovered = try service.open(b, 2, true);
+    try t.expectEqual(@as(u64, 7), recovered.size);
+    const reader = try service.open(b, 2, false);
+    try t.expectError(error.HandleLimit, service.open(b, 2, false));
+    try service.write(b, recovered.handle, "!", 7);
+    f.meta.unavailable = true;
+    try t.expectError(error.ClusterUnavailable, service.close(b, recovered.handle));
+    f.meta.unavailable = false;
+    try t.expectError(error.InvalidHandle, service.sync(b, recovered.handle));
+    try t.expectError(error.WalSessionFailed, service.size(b, reader.handle));
+    try t.expectError(error.WalSessionFailed, service.open(b, 2, true));
+    try service.close(b, reader.handle);
+    const final = try service.open(b, 2, false);
+    var buffer: [8]u8 = undefined;
+    try t.expectEqual(@as(usize, 8), try service.read(b, final.handle, &buffer, 0));
+    try t.expectEqualStrings("durable!", &buffer);
+    service.disconnect(b);
+    try t.expectEqual(@as(u32, 0), service.handles.count());
+    try t.expectEqual(@as(u32, 0), service.sessions.count());
+}
+
+test "file service concurrent owners cannot acquire two writers" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const Service = @import("file_service.zig").Service;
+    var service: Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const a = try service.connect();
+    const b = try service.connect();
+    const Race = struct {
+        fn run(s: *Service, owner: u64, gate: *std.Io.Event) !Service.Opened {
+            gate.waitUncancelable(t.io);
+            return s.open(owner, 2, true);
+        }
+    };
+    var gate: std.Io.Event = .unset;
+    var first = try t.io.concurrent(Race.run, .{ &service, a, &gate });
+    gate.set(t.io);
+    const second = service.open(b, 2, true);
+    const result = first.await(t.io);
+    if (result) |opened| {
+        try t.expectError(error.FileBusy, second);
+        try service.close(a, opened.handle);
+    } else |err| {
+        try t.expectEqual(error.FileBusy, err);
+        try service.close(b, (try second).handle);
+    }
+    try t.expectEqual(@as(u32, 0), service.handles.count());
+}
+
 test "mutable access migrates immutable contents once and preserves historical objects" {
     var f = try Fixture.init();
     defer f.deinit();
