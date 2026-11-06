@@ -6,12 +6,26 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import statistics
 import time
 import uuid
 
 
-def benchmark_wal(mount, roots, samples=7):
+def trace_samples(paths, offsets):
+    stages = {}
+    pattern = re.compile(rb"latency op=([\w-]+) id=\d+ size=\d+ wal=\d+ ns=\{([^}]+)\}")
+    for path, offset in zip(paths, offsets):
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            for operation, values in pattern.findall(stream.read()):
+                stages.setdefault(operation.decode(), []).append(
+                    [int(value.strip()) for value in values.split(b",")]
+                )
+    return stages
+
+
+def benchmark_wal(mount, roots, samples=7, trace_logs=()):
     if samples < 2:
         raise ValueError("at least two samples are required")
     roots = [Path(root) / "mutable" for root in roots]
@@ -53,6 +67,7 @@ def benchmark_wal(mount, roots, samples=7):
                         assert os.pread(fd, length, 0) == payload[:length]
 
                 invoke()  # Warm-up is deliberately excluded from the samples.
+                offsets = [path.stat().st_size for path in trace_logs]
                 elapsed = []
                 cpu = []
                 for _ in range(samples):
@@ -77,6 +92,7 @@ def benchmark_wal(mount, roots, samples=7):
                             "median_ms": statistics.median(elapsed),
                             "p95_ms": sorted(elapsed)[math.ceil(samples * 0.95) - 1],
                             "client_cpu_ms": cpu,
+                            "stage_samples_ns": trace_samples(trace_logs, offsets),
                         }
                     ),
                     flush=True,
@@ -102,5 +118,6 @@ if __name__ == "__main__":
     parser.add_argument("mount", type=Path)
     parser.add_argument("--backend-roots", type=Path, nargs=2, required=True)
     parser.add_argument("--samples", type=int, default=7)
+    parser.add_argument("--trace-logs", type=Path, nargs="*", default=[])
     args = parser.parse_args()
-    benchmark_wal(args.mount, args.backend_roots, args.samples)
+    benchmark_wal(args.mount, args.backend_roots, args.samples, args.trace_logs)

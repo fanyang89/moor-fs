@@ -215,13 +215,20 @@ pub const Access = struct {
     }
 
     pub fn read(self: *Access, bytes: []u8, offset: u64) !usize {
+        var timing = @import("latency_trace.zig").Timing(5).start();
         errdefer self.failed = true;
         try self.validate();
+        timing.mark(0);
         _ = try self.current();
+        timing.mark(1);
         _ = try self.replicaSize();
         const count = try self.readCompared(bytes, offset);
+        timing.mark(2);
         try self.data.verifyRead(offset, bytes[0..count], bytes.len);
+        timing.mark(3);
         try self.validate();
+        timing.mark(4);
+        timing.finish("read", self.data.session.identity.inode, bytes.len, self.data.session.end);
         return count;
     }
 
@@ -294,11 +301,18 @@ pub const Access = struct {
     }
 
     pub fn size(self: *Access) !u64 {
+        var timing = @import("latency_trace.zig").Timing(4).start();
         errdefer self.failed = true;
         try self.validate();
+        timing.mark(0);
         _ = try self.current();
+        timing.mark(1);
         try self.data.verifyRead(0, "", 0);
-        return self.replicaSize();
+        timing.mark(2);
+        const size_value = try self.replicaSize();
+        timing.mark(3);
+        timing.finish("size", self.data.session.identity.inode, size_value, self.data.session.end);
+        return size_value;
     }
 
     pub fn sync(self: *Access) !void {

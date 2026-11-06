@@ -76,12 +76,60 @@ fn scan(bytes: []const u8, identity: Identity, first: u64) !struct { end: usize,
 fn readLog(gpa: Allocator, io: Io, file: File) ![]u8 {
     const stat = try file.stat(io);
     if (stat.kind != .file or stat.size > max_log) return error.WalCapacityExceeded;
-    const bytes = try gpa.alloc(u8, @intCast(stat.size));
-    errdefer gpa.free(bytes);
-    if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.WalChanged;
+    return readLogBytes(gpa, io, file, stat.size);
+}
+
+fn readLogBytes(gpa: Allocator, io: Io, file: File, reported_size: u64) ![]u8 {
+    var bytes = try std.ArrayList(u8).initCapacity(gpa, @intCast(reported_size));
+    errdefer bytes.deinit(gpa);
+    try bytes.resize(gpa, @intCast(reported_size));
+    if (try file.readPositionalAll(io, bytes.items, 0) != bytes.items.len) return error.WalChanged;
+    // Reopened CIFS handles can under-report length after server-side changes.
+    // Treat stat as an allocation hint; recovery must inspect the actual tail.
+    var buffer: [64 * 1024]u8 = undefined;
+    while (bytes.items.len < max_log) {
+        const window = buffer[0..@min(buffer.len, max_log - bytes.items.len)];
+        const count = try file.readPositionalAll(io, window, bytes.items.len);
+        try bytes.appendSlice(gpa, window[0..count]);
+        if (count != window.len) break;
+    }
     var extra: [1]u8 = undefined;
-    if (try file.readPositionalAll(io, &extra, bytes.len) != 0) return error.WalChanged;
-    return bytes;
+    if (try file.readPositionalAll(io, &extra, bytes.items.len) != 0)
+        return if (bytes.items.len == max_log) error.WalCapacityExceeded else error.WalChanged;
+    return bytes.toOwnedSlice(gpa);
+}
+
+test "WAL stale size cannot hide later valid records or complete corruption" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(t.io, "wal", .{ .read = true });
+    defer file.close(t.io);
+    const identity: Identity = .{ .inode = 2, .generation = 7 };
+    const first = try encode(t.allocator, identity, 1, .write, 0, "first");
+    defer t.allocator.free(first);
+    const payload = try t.allocator.alloc(u8, 128 * 1024);
+    defer t.allocator.free(payload);
+    @memset(payload, 'X');
+    const second = try encode(t.allocator, identity, 2, .write, 0, payload);
+    defer t.allocator.free(second);
+    try file.writePositionalAll(t.io, first, 0);
+    try file.writePositionalAll(t.io, second, first.len);
+    const end = first.len + second.len;
+    try file.writePositionalAll(t.io, "torn", end);
+    for ([_]u64{ 0, first.len, end + 4 }) |reported_size| {
+        const bytes = try readLogBytes(t.allocator, t.io, file, reported_size);
+        defer t.allocator.free(bytes);
+        try t.expectEqual(end + 4, bytes.len);
+        const scanned = try scan(bytes, identity, 1);
+        try t.expectEqual(end, scanned.end);
+        try t.expectEqual(@as(u64, 3), scanned.next);
+    }
+    try file.writePositionalAll(t.io, "Q", first.len + header_size);
+    const corrupt = try readLogBytes(t.allocator, t.io, file, first.len);
+    defer t.allocator.free(corrupt);
+    try t.expectError(error.CorruptWal, scan(corrupt, identity, 1));
+    try t.expectError(error.WalChanged, readLogBytes(t.allocator, t.io, file, end + 5));
 }
 
 fn append(io: Io, replica: Replica, bytes: []const u8, offset: u64) !void {

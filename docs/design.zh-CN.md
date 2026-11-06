@@ -894,3 +894,15 @@ read/size 的校验堆工作区上限约为两份 1 MiB 加 112 字节帧缓冲�
 新增可独立运行的 Python 基准，并用 `--wal-benchmark` 接入既有本地 FUSE / 双 CIFS 测试环境。固定1 MiB文件，按干净、1/4/16 MiB待提交覆盖写、checkpoint后五个阶段测stat、4 KiB和1 MiB读取。每例预热后采七次，JSON保留全部样本、median/p95、客户端CPU与双侧实际日志长度；读内容、文件大小及测量前后日志长度必须正确。
 
 Safe下两种后端及既有非故障WAL回归通过。首次测得空日志小读约201 ms、stat约604 ms，大日志并未表现出明显增长；完整表格和可复现命令在 `docs/benchmarks.zh-CN.md`。这暴露出独立于日志大小的延迟底线，下一步应拆分元数据ReadIndex及数据路径计时，而不是据此增加未经失效验证的缓存。结果限于同机预热实验，不代表真实NAS吞吐或持续内容校验能力；本轮未修改产品数据路径。
+
+## 54. ReadIndex事件处理延迟与CIFS恢复读取
+
+增加默认关闭的编译期开关latency-trace，分段记录Access.read/size的路径检查、元数据、双侧数据读取与WAL核对，并记录Runtime.readBarrier提交和等待回调耗时。普通构建不读取诊断时钟或记录诊断日志。基准按每例操作窗口收集FUSE/voter日志原始纳秒数组；跨进程无request ID，因此窗口可能含延迟或并发日志，不能把阶段median简单相加。
+
+同机Safe实测确认原空WAL小读约198–201 ms用于元数据，其中几乎全部等待ReadIndex。Raftor.run每轮tick后休眠100 ms；Runtime改用既有tick/poll公开接口，仍由唯一driver线程执行，单调时钟每100 ms推进一次tick，间隙poll处理Ready/入队请求/传输事件，每轮休眠1 ms。停机沿用node.stop使驱动返回ShuttingDown，再join；其他错误继续标记failed并停止节点。慢存储之后不密集补发错过的tick，未缩短逻辑选举/请求超时，也未缓存线性一致读结果。约1 ms唤醒频率的CPU/功耗代价仍需独立评估。
+
+优化后ReadIndex等待约2.1 ms；空WAL4 KiB读本地2.4 ms、双CIFS4.3 ms，stat约6.9/9.7 ms。16 MiB活跃payload的小读约31/43 ms，日志验证成本不再被调度台阶掩盖。完整前后median/p95及阶段定义见基准文档，不视为物理NAS吞吐验收。
+
+更快重开也暴露了CIFS长度缓存：服务端在687字节WAL后加4字节残缺尾帧，stat仍报687但EOF探测可读到实际追加内容。整日志读取保留按报告长度的批量读，再按64 KiB缓冲读到实际EOF或64 MiB上限；超过上限或短读失败。恢复继续由完整认证的双侧有效前缀决定重放/截尾，完整损坏不忽略；活跃会话仍检查精确end/next，不接受新增尾巴。未改WAL格式或放宽损坏测试。新增单测验证零/偏小长度提示下不漏掉后续有效帧或完整损坏，并覆盖跨缓冲和残缺尾部。
+
+Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故障矩阵及默认staging SMB通过，包括leader切换、无quorum拒绝、13项损坏、10项SIGKILL和冷重挂。未修改raftz依赖，不实现跨节点写者fencing或持久内容索引缓存。

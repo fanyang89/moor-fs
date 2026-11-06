@@ -929,6 +929,16 @@ mount. See `docs/benchmarks.zh-CN.md` for commands, samples and limitations.
 The first same-host run found about 201 ms for 4 KiB reads even with an empty
 WAL, so metadata/read-barrier timing needs investigation before further tuning.
 
+Stage tracing (`-Dlatency-trace=true`) identified the metadata ReadIndex wait.
+The runtime now polls Raft events between unchanged 100 ms logical ticks rather
+than waiting for the next tick to process requests/responses. In traced same-host
+Safe runs, clean 4 KiB reads fell to about 2.4 ms locally and 4.3 ms over dual
+loopback CIFS. Full WAL authentication remains; a 16 MiB pending payload still
+cost about 31/43 ms per small read. See the benchmark document for raw-stage
+definitions, polling overhead and environment limits. Faster reopening also
+exposed stale CIFS WAL length: recovery now reads the actual bounded tail rather
+than treating stat as authoritative EOF, while rejecting complete corruption.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

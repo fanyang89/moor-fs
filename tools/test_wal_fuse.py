@@ -103,7 +103,11 @@ def test_wal_fuse(
         if benchmark:
             from benchmark_wal import benchmark_wal
 
-            benchmark_wal(first, roots)
+            benchmark_wal(
+                first,
+                roots,
+                trace_logs=[Path(logs[-1].name), *sorted(directory.glob("node-*.log"))],
+            )
         second, _ = mount()
         path = first / "wal-file"
         with open(path, "rb", buffering=0) as reader:

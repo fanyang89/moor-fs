@@ -58,3 +58,56 @@ python3 tools/benchmark_wal.py /path/to/fuse \
 2. 1–16 MiB 活跃日志下未观察到明显的端到端延迟增长，但不能推导扫描免费或真实 NAS 上不受影响。测试存在预热、本机缓存、同机网络及低样本量限制。
 3. 代码中 Access 每次操作查询元数据，元数据 Get 经过 ReadIndex；当前 Raft 使用 100 ms 默认 tick、heartbeat_tick=2。约 200 ms 的延迟台阶值得定位，但这些相关事实尚不能证明具体等待点就是心跳。下一轮应计时拆分元数据屏障、数据读取和 WAL 验证，再决定修改调度或读取流程。
 4. 两种后端的既有 WAL FUSE 回归均通过，CIFS 组还通过 SMB/supervisor 与冷重挂检查。本轮使用普通 Safe 二进制，未运行需 fault-injection 的完整故障矩阵；产品数据路径没有修改。
+
+## 分段定位与事件轮询优化
+
+启用诊断构建即可采集阶段计时，普通构建不读取诊断时钟、不输出这些日志：
+
+```sh
+zig build -Dfuse=true -Doptimize=safe -Dlatency-trace=true
+python3 tools/test_cluster.py zig-out/bin/nas-fs --wal-fuse --wal-benchmark
+python3 tools/test_e2e.py zig-out/bin/nas-fs --wal-smb --wal-benchmark
+```
+
+测试环境自动将 FUSE 和 voter 日志中的计时附在每例 JSON 的 `stage_samples_ns`。独立脚本可用 `--trace-logs /path/to/fuse.log /path/to/node-1.log ...` 指定日志。该字段按操作保存原始纳秒数组：
+
+- `read`：前置路径校验、元数据 current、数据大小及双侧读取、WAL核对、后置路径校验。
+- `size`：路径校验、元数据 current、WAL核对、双侧大小检查。
+- `read-index`：提交 ReadIndex、等待回调完成。只记录成功屏障，不记录 inode 内容。
+
+窗口按预热后日志偏移截取，不提供跨进程 request ID 关联；并发操作或预热后的延迟日志可能落入窗口。每个 syscall 也可能触发多个回调：本轮每七次1 MiB读有14条read记录，每七次stat有14条size记录及约21条屏障记录。不能将单个阶段的median直接相加当作syscall耗时。日志输出本身会扰动运行，诊断结果不作为普通构建的严格性能保证。
+
+### 定位结果
+
+原驱动的空日志小读，元数据查询median为本地201.195 ms、双CIFS198.529 ms，ReadIndex等待分别为200.677 ms和197.569 ms。16 MiB活跃日志的小读WAL核对为本地33.007 ms、双CIFS46.760 ms，元数据等待则降为约168/152 ms：原先约200 ms的端到端台阶掩盖了扫描增长。
+
+`Raftor.run()` 每轮 tick 后休眠100 ms，休眠期间没有处理新请求及远端回应。Runtime现改为单线程驱动：逻辑tick仍每100 ms推进一次，间隙调用现有 `poll()`，每轮休眠1 ms。poll不推进Raft选举/请求超时逻辑时钟；慢存储导致错过tick时不密集补发。保留原ReadIndex quorum屏障和关闭/失败处理，不引入元数据缓存。代价是每个voter空闲时约每毫秒唤醒一次；尚未测量独立机器的CPU/功耗或高负载尾延迟。
+
+### 优化前后（同机Safe，双方均开启分段诊断）
+
+每格为median / p95，单位ms，每例七样本：
+
+| 后端 | 阶段 | 操作 | 原驱动 | poll驱动 |
+| --- | --- | --- | ---: | ---: |
+| 本地 | 空WAL | stat | 604.259 / 604.706 | 6.867 / 7.285 |
+| 本地 | 空WAL | read 4 KiB | 201.435 / 201.757 | 2.391 / 2.447 |
+| 本地 | 空WAL | read 1 MiB | 402.765 / 403.164 | 6.051 / 6.206 |
+| 本地 | 16 MiB payload | stat | 604.178 / 604.552 | 60.653 / 62.017 |
+| 本地 | 16 MiB payload | read 4 KiB | 201.353 / 203.146 | 31.270 / 32.180 |
+| 本地 | 16 MiB payload | read 1 MiB | 402.227 / 403.528 | 65.653 / 66.399 |
+| 双CIFS | 空WAL | stat | 604.448 / 605.266 | 9.736 / 11.639 |
+| 双CIFS | 空WAL | read 4 KiB | 201.287 / 202.416 | 4.297 / 4.859 |
+| 双CIFS | 空WAL | read 1 MiB | 402.959 / 404.564 | 10.794 / 11.306 |
+| 双CIFS | 16 MiB payload | stat | 602.515 / 609.679 | 90.878 / 91.977 |
+| 双CIFS | 16 MiB payload | read 4 KiB | 200.249 / 201.395 | 42.945 / 44.097 |
+| 双CIFS | 16 MiB payload | read 1 MiB | 402.547 / 405.842 | 86.315 / 89.111 |
+
+优化后小读中的ReadIndex等待约2.1 ms。活跃日志扫描仍然完整执行：16 MiB时本地约28.7 ms、双CIFS约38.2 ms。下一步数据路径优化可针对这些实际开销，不能复用未经重新验证的日志缓存。原始样本在工作机 `/tmp/opencode/nas-wal-trace-{local,cifs}-safe.log` 和 `/tmp/opencode/nas-wal-poll-{local,cifs}-safe.log`；本地poll基准先于恢复读取调整，但计时阶段不涉及该恢复路径。
+
+### 快速重开暴露的CIFS长度缓存
+
+降低延迟后，既有wal-tail损坏测试稳定暴露：服务端给687字节日志追加4字节后，重开句柄stat仍报告687，但该位置能读到尾巴。旧恢复代码按stat分配并读满，再因额外字节拒绝恢复；错误路径保持证据，但无法立即重开。
+
+整日志读取现保留已报告长度的批量读取，再在64 MiB容量上限内继续读取实际尾部；短读仍失败，完整损坏记录仍拒绝，只有恢复允许丢弃不完整末帧。活跃会话的checkpoint/读取仍要求已确认end与序号精确匹配。新增单测用偏小/零长度提示检查后续有效记录、跨64 KiB读取、完整损坏以及残缺尾巴不会被隐藏；真实CIFS原场景不增加重试或放宽断言即可通过。
+
+最终Debug/Safe各98项单测通过；本地Debug WAL FUSE、Safe真实双CIFS完整WAL故障矩阵（13项损坏及10项SIGKILL）、默认staging SMB回归通过，涵盖选举、leader切换、无quorum拒绝及恢复。基准继续仅代表同机预热环境。

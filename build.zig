@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const relocatable = b.option(bool, "relocatable", "Use a sibling lib directory for the packaged FUSE library") orelse false;
     const fault_injection = b.option(bool, "fault-injection", "Enable test-only repair, write and metadata reply SIGSTOP checkpoints") orelse false;
     const options = b.addOptions();
+    options.addOption(bool, "latency_trace", b.option(bool, "latency-trace", "Log read-path stage timings for diagnostics") orelse false);
     options.addOption(bool, "fuse", fuse);
     options.addOption(bool, "fault_injection", fault_injection);
     const raft = b.dependency("raftz", .{ .target = target, .optimize = optimize });

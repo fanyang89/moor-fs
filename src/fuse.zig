@@ -318,6 +318,7 @@ fn entry(node: m.Node) !Entry {
 }
 
 fn errno(err: anyerror) c_int {
+    if (@import("build_options").latency_trace) std.log.info("FUSE error: {s}", .{@errorName(err)});
     return switch (err) {
         error.NotFound => 2,
         error.NotDirectory => 20,
