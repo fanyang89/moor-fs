@@ -52,6 +52,116 @@ class Client:
         assert response["err"] == error, response
         return response["result"]
 
+    def change(self, request_id, mutation, status="ok"):
+        result = self.call(
+            {"change": {"request_id": request_id, "mutation": mutation}}
+        )["change"]
+        assert result["status"] == status, result
+        return result["inode"]
+
+
+def namespace_checks(client):
+    directory = client.change(
+        41000, {"create": {"parent": 1, "name": "ipc-directory", "kind": "directory"}}
+    )
+    create = {"create": {"parent": directory, "name": "ipc-file", "kind": "file"}}
+    inode = client.change(41001, create)
+    assert client.change(41001, create) == inode
+    client.change(
+        41001,
+        {"create": {"parent": directory, "name": "different", "kind": "file"}},
+        "request_conflict",
+    )
+    client.change(
+        41002,
+        {"create": {"parent": directory, "name": "IPC-FILE", "kind": "file"}},
+        "already_exists",
+    )
+    attributes = client.call({"lookup": {"parent": directory, "name": "IPC-FILE"}})[
+        "attributes"
+    ]
+    assert attributes["node"]["id"] == inode and attributes["size"] == 0
+    assert attributes["node"]["replicas"] == "two"
+    client.call({"lookup": {"parent": directory, "name": "missing"}}, error="NotFound")
+    client.call(
+        {"lookup": {"parent": directory, "name": "../escape"}}, error="InvalidName"
+    )
+    client.call({"stat": {"inode": 2**63}}, error="NotFound")
+    client.call({"list": {"parent": directory, "limit": 0}}, error="InvalidLimit")
+    client.call({"list": {"parent": directory, "limit": 17}}, error="InvalidLimit")
+    client.change(41003, {"remove": {"inode": directory}}, "not_empty")
+    client.change(
+        41004,
+        {"rename": {"inode": directory, "parent": directory, "name": "cycle"}},
+        "cycle",
+    )
+    client.change(41005, {"remove": {"inode": 1}}, "root_protected")
+    for index, name in enumerate(("", ".", "..", "a/b", "x" * 256)):
+        client.change(
+            41010 + index,
+            {"create": {"parent": directory, "name": name, "kind": "file"}},
+            "invalid_name",
+        )
+    expected = {inode}
+    unicode_name = "文" * 85
+    unicode_inode = client.change(
+        41150, {"create": {"parent": directory, "name": unicode_name, "kind": "file"}}
+    )
+    expected.add(unicode_inode)
+    assert (
+        client.call({"lookup": {"parent": directory, "name": unicode_name}})[
+            "attributes"
+        ]["node"]["id"]
+        == unicode_inode
+    )
+    for index in range(18):
+        expected.add(
+            client.change(
+                41100 + index,
+                {
+                    "create": {
+                        "parent": directory,
+                        "name": f"entry-{index:02}",
+                        "kind": "file",
+                    }
+                },
+            )
+        )
+    after = None
+    actual = []
+    while True:
+        page = client.call({"list": {"parent": directory, "after": after, "limit": 7}})[
+            "page"
+        ]
+        assert 0 < len(page["entries"]) <= 7
+        actual.extend(node["id"] for node in page["entries"])
+        if page["next"] is None:
+            break
+        assert page["next"] != after
+        after = page["next"]
+    assert len(actual) == len(set(actual)) and set(actual) == expected
+    destination = client.change(
+        41200, {"create": {"parent": 1, "name": "ipc-destination", "kind": "directory"}}
+    )
+    occupied = client.change(
+        41201, {"create": {"parent": destination, "name": "occupied", "kind": "file"}}
+    )
+    client.change(
+        41202,
+        {"rename": {"inode": inode, "parent": destination, "name": "occupied"}},
+        "already_exists",
+    )
+    client.change(41203, {"remove": {"inode": occupied}})
+    assert (
+        client.call({"stat": {"inode": inode}})["attributes"]["node"]["parent"]
+        == directory
+    )
+    print(
+        "PASS: IPC namespace lookup/stat, bounded pagination, validation and mutation receipts",
+        flush=True,
+    )
+    return inode, directory, destination
+
 
 def writer_process(path, inode):
     client = Client(path)
@@ -64,22 +174,6 @@ def writer_process(path, inode):
 
 def test_file_ipc(executable, directory, endpoints, run):
     config = directory / "backends.json"
-    inode = run(
-        "apply",
-        endpoints,
-        json.dumps(
-            {
-                "request_id": 39000,
-                "command": {
-                    "create": {
-                        "parent": 1,
-                        "name": "ipc-file",
-                        "kind": "file",
-                    }
-                },
-            }
-        ),
-    )["inode"]
     runtime = directory / "ipc"
     path = runtime / "core.sock"
     command = [
@@ -129,6 +223,37 @@ def test_file_ipc(executable, directory, endpoints, run):
 
     try:
         start()
+        control = connect()
+        inode, parent, destination = namespace_checks(control)
+        immutable = control.change(
+            41400,
+            {"create": {"parent": destination, "name": "immutable", "kind": "file"}},
+        )
+        source = directory / "ipc-immutable-source"
+        source.write_bytes(b"immutable-baseline")
+        published = run(
+            "put-file",
+            endpoints,
+            config,
+            json.dumps(
+                {
+                    "request_id": 41401,
+                    "inode": immutable,
+                    "version_id": 41401,
+                    "expected_version": 0,
+                    "backends": [1, 2],
+                }
+            ),
+            source,
+        )
+        assert published["status"] == "ok"
+        attr = control.call({"stat": {"inode": immutable}})["attributes"]
+        assert attr["size"] == len(b"immutable-baseline")
+        assert (
+            attr["node"]["current_version"] == 41401
+            and attr["node"]["mutable_file"] is None
+        )
+        assert run("get", endpoints, immutable)["mutable_file"] is None
         duplicate = subprocess.run(command, capture_output=True, timeout=15)
         assert duplicate.returncode != 0 and path.exists()
         child = subprocess.Popen(
@@ -157,6 +282,22 @@ def test_file_ipc(executable, directory, endpoints, run):
             {"read": {"handle": handle, "offset": 0, "length": MAX_DATA}}
         )
         assert result["count"] == MAX_DATA and bytes.fromhex(result["hex"]) == data
+        assert (
+            control.call({"stat": {"inode": inode}})["attributes"]["size"] == MAX_DATA
+        )
+        control.call(
+            {"change": {"request_id": 41300, "mutation": {"remove": {"inode": inode}}}},
+            error="FileBusy",
+        )
+        rename = {"rename": {"inode": inode, "parent": destination, "name": "renamed"}}
+        control.change(41301, rename)
+        control.call(
+            {"lookup": {"parent": parent, "name": "ipc-file"}}, error="NotFound"
+        )
+        moved = control.call({"lookup": {"parent": destination, "name": "RENAMED"}})[
+            "attributes"
+        ]
+        assert moved["node"]["id"] == inode and moved["size"] == MAX_DATA
         reader.call(
             {"read": {"handle": handle, "offset": 0, "length": MAX_DATA + 1}},
             error="InvalidRange",
@@ -191,6 +332,7 @@ def test_file_ipc(executable, directory, endpoints, run):
         )
         reader.call({"truncate": {"handle": replacement, "length": 3}})
         assert reader.call({"size": {"handle": handle}})["size"] == 3
+        assert control.call({"stat": {"inode": inode}})["attributes"]["size"] == 3
         reader.call({"write": {"handle": replacement, "offset": 3, "hex": "ff00fe"}})
         reader.call({"sync": {"handle": replacement}})
         reader.call({"close": {"handle": replacement}})
@@ -223,6 +365,19 @@ def test_file_ipc(executable, directory, endpoints, run):
         runtime.rmdir()
         start()
         recovered = connect()
+        assert (
+            recovered.change(
+                41001,
+                {"create": {"parent": parent, "name": "ipc-file", "kind": "file"}},
+            )
+            == inode
+        )
+        assert recovered.change(41301, rename) == inode
+        recovered.call(
+            {"lookup": {"parent": parent, "name": "ipc-file"}}, error="NotFound"
+        )
+        # stat without a live handle recovers dirty mutable state as well.
+        assert recovered.call({"stat": {"inode": inode}})["attributes"]["size"] == 8
         opened = recovered.call({"open": {"inode": inode, "writable": False}})
         assert opened["size"] == 8
         result = recovered.call(
@@ -230,6 +385,21 @@ def test_file_ipc(executable, directory, endpoints, run):
         )
         assert bytes.fromhex(result["hex"]) == b"\x00\x01\x02\xff\x00\xfe\xab\xcd"
         recovered.call({"close": {"handle": opened["handle"]}})
+        recovered.change(41300, {"remove": {"inode": inode}})
+        recovered.change(41300, {"remove": {"inode": inode}})
+        recovered.call({"stat": {"inode": inode}}, error="NotFound")
+        fresh = recovered.change(
+            41302,
+            {"create": {"parent": destination, "name": "renamed", "kind": "file"}},
+        )
+        assert fresh != inode
+        recovered.change(41300, {"remove": {"inode": inode}})
+        assert (
+            recovered.call({"lookup": {"parent": destination, "name": "renamed"}})[
+                "attributes"
+            ]["node"]["id"]
+            == fresh
+        )
         print(
             "PASS: IPC multiprocess sharing, ownership, bounds, disconnect and core SIGKILL recovery",
             flush=True,

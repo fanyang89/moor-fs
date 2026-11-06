@@ -3,6 +3,8 @@
 const std = @import("std");
 const Service = @import("file_service.zig").Service;
 const Io = std.Io;
+const ns = @import("namespace.zig");
+const m = @import("metadata.zig");
 pub const max_data = 64 * 1024;
 pub const max_frame = max_data * 2 + 1024;
 
@@ -17,6 +19,10 @@ const Request = struct {
         size: struct { handle: u64 },
         sync: struct { handle: u64 },
         close: struct { handle: u64 },
+        stat: struct { inode: u64 },
+        lookup: ns.Lookup,
+        list: ns.List,
+        change: struct { request_id: u64, mutation: ns.Change },
     },
 };
 const Result = struct {
@@ -24,6 +30,9 @@ const Result = struct {
     size: ?u64 = null,
     count: ?usize = null,
     hex: ?[]const u8 = null,
+    attributes: ?ns.Attributes = null,
+    page: ?ns.Page = null,
+    change: ?m.Result = null,
 };
 
 fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allocator) !Result {
@@ -56,6 +65,10 @@ fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allo
         .size => |op| return .{ .size = try service.size(owner, op.handle) },
         .sync => |op| try service.sync(owner, op.handle),
         .close => |op| try service.close(owner, op.handle),
+        .stat => |op| return .{ .attributes = try service.stat(owner, arena, op.inode) },
+        .lookup => |op| return .{ .attributes = try service.lookup(owner, arena, op) },
+        .list => |op| return .{ .page = try service.list(owner, arena, op) },
+        .change => |op| return .{ .change = try service.change(owner, op.request_id, op.mutation) },
     }
     return .{};
 }

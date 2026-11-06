@@ -212,6 +212,38 @@ test "file service concurrent owners cannot acquire two writers" {
     try t.expectEqual(@as(u32, 0), service.handles.count());
 }
 
+test "file service namespace enforces replicas and guards removal while renamed handles survive" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const owner = try service.connect();
+    _ = try f.meta.state.apply(.{ .request_id = 900, .command = .{ .set_replicas = .{ .id = 1, .replicas = .one } } });
+    const created = try service.change(owner, 901, .{ .create = .{ .parent = 1, .name = "dual", .kind = .file } });
+    try t.expectEqual(m.Status.ok, created.status);
+    try t.expectEqual(m.Replicas.two, f.meta.state.get(created.inode).?.replicas);
+    const writer = try service.open(owner, created.inode, true);
+    try service.write(owner, writer.handle, "contents", 0);
+    try t.expectError(error.FileBusy, service.change(owner, 902, .{ .remove = .{ .inode = created.inode } }));
+    const renamed = try service.change(owner, 903, .{ .rename = .{ .inode = created.inode, .parent = 1, .name = "moved" } });
+    try t.expectEqual(m.Status.ok, renamed.status);
+    var buffer: [8]u8 = undefined;
+    try t.expectEqual(@as(usize, 8), try service.read(owner, writer.handle, &buffer, 0));
+    try t.expectEqualStrings("contents", &buffer);
+    try service.close(owner, writer.handle);
+    const removed = try service.change(owner, 902, .{ .remove = .{ .inode = created.inode } });
+    try t.expectEqual(m.Status.ok, removed.status);
+    try t.expectEqualDeep(removed, try service.change(owner, 902, .{ .remove = .{ .inode = created.inode } }));
+    service.disconnect(owner);
+    try t.expectError(error.InvalidConnection, service.change(owner, 904, .{ .create = .{ .parent = 1, .name = "disconnected", .kind = .file } }));
+}
+
 test "mutable access migrates immutable contents once and preserves historical objects" {
     var f = try Fixture.init();
     defer f.deinit();

@@ -10,6 +10,7 @@ pub const mutable_access = @import("mutable_access.zig");
 pub const mutable_rpc = @import("mutable_rpc.zig");
 pub const file_service = @import("file_service.zig");
 pub const file_ipc = @import("file_ipc.zig");
+pub const namespace = @import("namespace.zig");
 pub const raft = @import("raftz");
 
 test {

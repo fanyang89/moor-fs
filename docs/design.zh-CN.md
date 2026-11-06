@@ -990,3 +990,11 @@ v1使用4字节little-endian长度加JSON，最大帧132096字节，单次数据
 真实三节点Raft的Debug本地后端、Safe双内核CIFS均通过：独立子进程持有写者，另一连接实时读取；子进程SIGKILL后读者保留并接续写入；核心SIGKILL后重启恢复未checkpoint的已确认内容。测试还覆盖错误所有者、只读写入拒绝、64KiB任意二进制、分片/连续帧、范围溢出、版本错误、非法hex和畸形/半帧断线。默认连接/句柄上限沿用Service，Debug/Safe各109项底层单测通过。
 
 协议、运维及完整边界见 `file-ipc.zh-CN.md`。这是常驻核心数据面原型，当前SMB仍走FUSE；尚未实现命名空间IPC、Samba VFS与share-mode/lease协调、失效订阅或跨节点fencing。双CIFS测试是同机loopback，不是独立物理NAS验收。
+
+## 64. 常驻核心命名空间与修改回执
+
+IPC增加stat、lookup、list、change。namespace.Api将Get/Lookup/List映射到既有ReadIndex RPC，字符串属于请求arena；不增加跨请求缓存。stat/lookup返回node与单独实时size：活跃mutable会话复用验证，无会话mutable临时打开恢复，immutable只查询版本大小，不迁移。list每页最多16个元数据node，名字游标分页不是快照，也不扫描逐项数据。
+
+change仅开放create/rename/remove，映射既有Raft请求与receipt；客户端提供独立非零request_id，外层request仍仅关联回复。create显式双副本；rename按inode执行且不覆盖目标，保留现有句柄；remove在同一会话锁内检查该inode是否仍有句柄，有则FileBusy，不向Raft提交。最后句柄关闭后可以重试。本地锁不约束外部元数据修改，不提供路径lookup+rename/remove的原子CAS或跨节点fencing。删除不回收旧数据目录。
+
+Debug本地/Safe双CIFS真实Raft多进程E2E通过：目录及文件完全通过IPC创建，分页与Unicode255字节名称、非法名称、大小写冲突、根保护/环/非空拒绝；活跃句柄重命名与删除保护、实时脏size、immutable stat不迁移；核心重启重放创建/重命名原回执，重放旧删除不影响同名新inode。新增单测验证单副本父目录下仍强制双副本、改名后的原句柄可读及删除前置拒绝后可重试。Debug/Safe各110项通过。协议文档列出两层错误及重放边界；Samba VFS仍待接入。

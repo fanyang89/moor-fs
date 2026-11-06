@@ -15,6 +15,7 @@ pub fn serve(ctx: zli.CommandContext) !void {
         .allocator = ctx.allocator,
         .io = ctx.io,
         .metadata = rpc.api(),
+        .namespace = rpc.namespace(),
         .mappings = mappings.value,
         .migration_pair = pair,
     };

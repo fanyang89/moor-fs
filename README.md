@@ -38,8 +38,9 @@ zig build test-file-ipc-cifs -Doptimize=safe
 
 It exposes bounded, connection-owned Unix-socket file handles backed by the
 existing dual-replica WAL engine. See `docs/file-ipc.zh-CN.md` for framing,
-permissions, disconnect/restart semantics and limits. Namespace operations and
-the Samba custom VFS adapter are not connected to this interface yet.
+permissions, disconnect/restart semantics and limits. The interface also exposes
+stat, component lookup, bounded directory pages and receipt-backed namespace
+mutations. The Samba custom VFS adapter is not connected yet.
 
 To build a standalone runtime directory with the matching libfuse, helpers,
 documentation, E2E scripts and SHA-256 manifest:

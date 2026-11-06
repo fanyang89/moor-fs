@@ -3,11 +3,14 @@
 const std = @import("std");
 const access = @import("mutable_access.zig");
 const objects = @import("objects.zig");
+const m = @import("metadata.zig");
+const ns = @import("namespace.zig");
 
 pub const Service = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     metadata: access.Metadata,
+    namespace: ?ns.Api = null,
     mappings: []const objects.Mapping,
     migration_pair: [2]u64,
     mutex: std.Io.Mutex = .init,
@@ -38,6 +41,75 @@ pub const Service = struct {
         const owner = try self.id();
         try self.connections.put(self.allocator, owner, {});
         return owner;
+    }
+
+    fn namespaceQuery(self: *Service, owner: u64, arena: std.mem.Allocator, query: ns.Query) !ns.Reply {
+        if (!self.connections.contains(owner)) return error.InvalidConnection;
+        const api = self.namespace orelse return error.NamespaceUnavailable;
+        return api.query(api.context, arena, query);
+    }
+
+    fn attributes(self: *Service, node: m.Node) !ns.Attributes {
+        var length: u64 = 0;
+        if (node.kind == .file) {
+            if (node.mutable_file != null) {
+                if (self.sessions.get(node.id)) |session| {
+                    length = try session.file.size();
+                } else {
+                    // Existing mutable files may need recovery. Do not migrate
+                    // immutable files merely to obtain attributes.
+                    var file = try access.Access.open(self.allocator, self.io, self.metadata, self.mappings, node.id, self.migration_pair);
+                    defer file.close();
+                    length = try file.size();
+                }
+            } else if (node.current_version != 0) {
+                const version = try self.metadata.version(self.metadata.context, node.current_version);
+                if (version.id != node.current_version or version.inode != node.id) return error.InvalidVersion;
+                length = version.size;
+            }
+        }
+        return .{ .node = node, .size = length };
+    }
+
+    pub fn stat(self: *Service, owner: u64, arena: std.mem.Allocator, inode: u64) !ns.Attributes {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const reply = try self.namespaceQuery(owner, arena, .{ .get = inode });
+        return self.attributes(reply.node orelse return error.NotFound);
+    }
+
+    pub fn lookup(self: *Service, owner: u64, arena: std.mem.Allocator, query: ns.Lookup) !ns.Attributes {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!m.validName(query.name)) return error.InvalidName;
+        const reply = try self.namespaceQuery(owner, arena, .{ .lookup = query });
+        return self.attributes(reply.node orelse return error.NotFound);
+    }
+
+    pub fn list(self: *Service, owner: u64, arena: std.mem.Allocator, query: ns.List) !ns.Page {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (query.limit == 0 or query.limit > 16) return error.InvalidLimit;
+        if (query.after) |after| if (!m.validName(after)) return error.InvalidName;
+        const reply = try self.namespaceQuery(owner, arena, .{ .list = query });
+        return reply.page;
+    }
+
+    pub fn change(self: *Service, owner: u64, request_id: u64, mutation: ns.Change) !m.Result {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.connections.contains(owner)) return error.InvalidConnection;
+        const command: m.Command = switch (mutation) {
+            // Explicitly enforce the core's mandatory dual-replica policy even
+            // when an externally created parent has a single-replica policy.
+            .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
+            .rename => |op| .{ .rename = .{ .id = op.inode, .parent = op.parent, .name = op.name } },
+            .remove => |op| blk: {
+                if (self.sessions.contains(op.inode)) return error.FileBusy;
+                break :blk .{ .remove = .{ .id = op.inode } };
+            },
+        };
+        return self.metadata.apply(self.metadata.context, .{ .request_id = request_id, .command = command });
     }
 
     pub fn open(self: *Service, owner: u64, inode: u64, writable: bool) !Opened {
