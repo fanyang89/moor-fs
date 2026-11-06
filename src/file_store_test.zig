@@ -66,6 +66,124 @@ test "checkpoint rotation preserves data inode and reopens after old WAL collect
     try store.collect();
 }
 
+test "checkpoint refuses WAL-covered corruption on either or both replicas and reopen replays" {
+    for ([_]u2{ 1, 2, 3 }) |mask| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("acknowledged", 0);
+        const before = store.checkpoint;
+        const log_size = (try store.session.replicas[0].log.stat(t.io)).size;
+        for (store.session.replicas, 0..) |replica, i| {
+            if (mask & (@as(u2, 1) << @intCast(i)) != 0) try replica.data.writePositionalAll(t.io, "X", 0);
+        }
+        try t.expectError(error.WalDataMismatch, store.sync());
+        try t.expect(std.meta.eql(before, store.checkpoint));
+        try t.expectError(error.WalSessionFailed, store.collect());
+        for (store.session.replicas) |replica| try t.expectEqual(log_size, (try replica.log.stat(t.io)).size);
+        store.close();
+        store = try f.open();
+        defer store.close();
+        try f.expect("acknowledged");
+        try store.sync();
+    }
+}
+
+test "WAL evidence resolves overlaps truncation regrowth and sparse gaps against a byte oracle" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    var expected: [4096]u8 = @splat(0);
+    @memset(expected[0..1024], 'B');
+    var size: usize = 1024;
+    try store.write(expected[0..size], 0);
+    try store.sync();
+    for (0..1000) |i| {
+        if (i % 7 == 0) {
+            const length = (i * 137) % expected.len;
+            if (length > size) @memset(expected[size..length], 0);
+            size = length;
+            try store.truncate(size);
+        } else {
+            const offset = (i * 97) % 4000;
+            const length = (i * 31) % 64 + 1;
+            if (offset > size) @memset(expected[size..offset], 0);
+            @memset(expected[offset..][0..length], @intCast(i % 251));
+            size = @max(size, offset + length);
+            try store.write(expected[offset..][0..length], offset);
+        }
+    }
+    var bytes: [4096]u8 = undefined;
+    for (store.session.replicas) |replica| {
+        try t.expectEqual(size, try replica.data.readPositionalAll(t.io, &bytes, 0));
+        try t.expectEqualSlices(u8, expected[0..size], bytes[0..size]);
+    }
+    try store.sync();
+}
+
+test "WAL evidence verifies sparse and truncate extension zeros" {
+    for ([_]bool{ false, true }) |truncate| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        defer store.close();
+        try store.write("baseline", 0);
+        try store.sync();
+        if (truncate) {
+            try store.truncate(2);
+            try store.truncate(20);
+        } else try store.write("tail", 20);
+        for (store.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 10);
+        try t.expectError(error.WalDataMismatch, store.sync());
+    }
+}
+
+test "checkpoint revalidates complete active WALs instead of trusting in-memory sequence" {
+    for (0..3) |scenario| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        defer store.close();
+        try store.write("payload", 0);
+        for (store.session.replicas, 0..) |replica, i| {
+            if (scenario == 0) {
+                try replica.log.setLength(t.io, store.session.end - 1);
+            } else if (scenario == 1 or i == 0) try replica.log.writePositionalAll(t.io, "X", 112);
+        }
+        const expected = switch (scenario) {
+            0 => error.WalChanged,
+            1 => error.CorruptWal,
+            else => error.WalDiverged,
+        };
+        try t.expectError(expected, store.sync());
+        try t.expectEqual(@as(u64, 1), store.checkpoint.next);
+        try t.expectError(error.WalSessionFailed, store.collect());
+    }
+}
+
+test "WAL verification does not claim evidence for untouched baseline bytes" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    try store.write("baseline", 0);
+    try store.sync();
+    try store.write("new", 5);
+    for (store.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 0);
+    try store.sync();
+    try f.expect("Xaselnew");
+}
+
+test "checkpoint verifies final size even with no pending records" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    for (store.session.replicas) |replica| try replica.data.setLength(t.io, 1);
+    try t.expectError(error.WalDataSizeMismatch, store.sync());
+}
+
 test "sealed baseline repairs either replica in place and preserves the source" {
     for (0..2) |bad| {
         var f = try Fixture.init();

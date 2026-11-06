@@ -240,6 +240,7 @@ pub const Store = struct {
     /// Publication errors freeze the session; recovery decides which epoch won.
     pub fn sync(self: *Store) !void {
         try self.session.sync();
+        try self.session.verifyPending(self.checkpoint.next, self.checkpoint.size);
         if (self.session.next == self.checkpoint.next) return;
         errdefer self.session.failed = true;
         const io = self.session.io;

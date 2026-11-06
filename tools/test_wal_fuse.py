@@ -386,6 +386,11 @@ os._exit(1)
             "PASS: persistent baseline repairs either replica in place, rejects identical corruption and survives write invalidation/SIGKILL",
             flush=True,
         )
+        from test_wal_evidence import test_wal_evidence
+
+        test_wal_evidence(
+            directory, endpoints, inode, recovered / "wal-file", physical, run
+        )
         if faults:
             from test_mutable_repair_faults import test_mutable_repair_faults
             from test_seal_faults import test_seal_faults

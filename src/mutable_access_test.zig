@@ -338,3 +338,21 @@ test "mutable seal binds metadata checkpoint and detects identical damage during
     try t.expectError(error.SealedContentMismatch, session.scrub());
     try t.expectError(error.WalSessionFailed, session.write("new", 0));
 }
+
+test "mutable checkpoint retains WAL evidence and metadata after identical dirty corruption" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    try session.write("original", 0);
+    const before = f.meta.state.get(2).?.mutable_file.?;
+    for (session.data.session.replicas) |replica| try replica.data.writePositionalAll(t.io, "X", 0);
+    try t.expectError(error.WalDataMismatch, session.collect());
+    try t.expect(std.meta.eql(before, f.meta.state.get(2).?.mutable_file.?));
+    session.close();
+    session = try f.open();
+    defer session.close();
+    var bytes: [8]u8 = undefined;
+    try t.expectEqual(@as(usize, 8), try session.read(&bytes, 0));
+    try t.expectEqualStrings("original", &bytes);
+    try t.expectEqual(@as(u64, 8), f.meta.state.get(2).?.mutable_file.?.size);
+}

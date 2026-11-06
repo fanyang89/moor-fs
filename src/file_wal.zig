@@ -78,6 +78,8 @@ fn readLog(gpa: Allocator, io: Io, file: File) ![]u8 {
     const bytes = try gpa.alloc(u8, @intCast(stat.size));
     errdefer gpa.free(bytes);
     if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.WalChanged;
+    var extra: [1]u8 = undefined;
+    if (try file.readPositionalAll(io, &extra, bytes.len) != 0) return error.WalChanged;
     return bytes;
 }
 
@@ -164,6 +166,35 @@ pub const Session = struct {
 
     pub fn truncate(self: *Session, size: u64) !void {
         try self.mutate(.truncate, size, "");
+    }
+
+    /// Validate acknowledged in-session logs exactly (no torn-tail recovery),
+    /// then compare their final effects before the enclosing store retires them.
+    pub fn verifyPending(self: *Session, first: u64, baseline_size: u64) !void {
+        if (self.failed) return error.WalSessionFailed;
+        errdefer self.failed = true;
+        const a = try readLog(self.allocator, self.io, self.replicas[0].log);
+        defer self.allocator.free(a);
+        {
+            const b = try readLog(self.allocator, self.io, self.replicas[1].log);
+            defer self.allocator.free(b);
+            if (!std.mem.eql(u8, a, b)) return error.WalDiverged;
+        }
+        const scanned = try scan(a, self.identity, first);
+        if (a.len != self.end or scanned.end != a.len or scanned.next != self.next) return error.WalChanged;
+        var evidence: @import("wal_evidence.zig").Evidence = .{ .allocator = self.allocator, .size = baseline_size };
+        defer evidence.deinit();
+        var offset: usize = 0;
+        var sequence = first;
+        while (try decode(a, offset, self.identity, sequence)) |record| {
+            switch (record.operation) {
+                .write => try evidence.write(record.offset, record.payload),
+                .truncate => try evidence.truncate(record.offset),
+            }
+            offset = record.end;
+            sequence += 1;
+        }
+        try evidence.verify(self.io, .{ self.replicas[0].data, self.replicas[1].data });
     }
 
     fn mutate(self: *Session, operation: Operation, offset: u64, payload: []const u8) !void {

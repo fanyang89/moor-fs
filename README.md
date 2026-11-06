@@ -864,7 +864,7 @@ locks remain held; an interrupted copy can be retried. Neither matching source
 nor valid baseline means repair is refused.
 
 Before the next write/truncate, both seal files are durably removed; ordinary
-fsync does not rescan or reseal entire files. Re-establish the baseline explicitly
+fsync does not rebuild a whole-file seal. Re-establish the baseline explicitly
 after updates. This protects idle sealed contents, not continuously changing
 data, and cannot discover damage already identical on both replicas at first
 sealing. All access processes must use a seal-aware build. See design section 46
@@ -889,6 +889,16 @@ copies are durable, and kill FUSE during one-sided or completed seal
 invalidation before both write and truncate. They verify unchanged data/WAL,
 failure of the interrupted syscall, recovery with a remaining valid seal or
 without a seal, and successful mutation retry followed by resealing.
+
+Before checkpoint rotation, WAL mode now revalidates both active logs and checks
+their final effects against both data files. Overlapping writes, truncation,
+regrowth and sparse zero ranges are resolved in operation order. A mismatch
+freezes the session before checkpoint publication or log collection, preserving
+redo evidence for reopen/recovery. This detects identical corruption within
+WAL-covered ranges, not corruption in untouched baseline bytes or damage after
+their WAL has been retired. It adds reads proportional to the log and covered
+logical data ranges (including sparse gaps), plus memory proportional to record
+count. No file-format change is required. See design section 49.
 
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
