@@ -1060,3 +1060,11 @@ create+open仍是两步，后续失败可留下空条目，不回滚。open路�
 request_id去重的是创建元数据命令，writable仅控制本次句柄。回执重放会重新验证同一inode的原路径和祖先，再分配新句柄；不重放旧句柄、不截断已有内容，当前写者仍导致FileBusy，已移动或被替换路径导致EntryConflict。可预知本地容量不足在创建前拒绝，提交后的后端或分配失败不删除条目、不回滚。此机制仅提供本服务临界区，不是Raft与NAS的跨存储原子事务或跨服务fencing；桥接继续不自动重试不确定请求。
 
 Debug/Safe各115项通过：新增服务测试覆盖容量预检、写者排他、回执重放新句柄/内容保留、移动及名称复用拒绝、后端打开失败无句柄/会话泄漏、修复后复用原inode。C ABI Debug/Safe验证组合请求及EEXIST/有效句柄/异常毒化。本地Debug/双CIFS Safe真实Raft SMB E2E通过，两个独立客户端同时O_EXCL只有一方成功并持有写句柄，释放后另一方能读取；组合请求回执重放仍保留数据，既有深路径、损坏和WAL恢复用例继续通过。
+
+## 72. C IPC桥接绝对截止时限
+
+桥接改用非阻塞Unix socket与poll，以CLOCK_MONOTONIC生成连接和每次请求的绝对截止点；请求发送头/正文和响应头/正文共享一个时限，持续碎片、EAGAIN或EINTR不重置计时。默认30秒，VFS参数nas_fs:timeout_ms允许1–600000 ms，非法值拒绝连接；旧connect ABI沿用默认值，新增connect_timeout。连接队列满可立即EAGAIN。首次超时ETIMEDOUT并关闭/毒化连接，后续立即EIO，无自动重连/不确定请求重放。
+
+C ABI Debug/Safe受控socket测试覆盖无回复写、半头/半正文、持续碎片、超时后不重发、无效配置及满队列快速失败。真实Raft本地Debug/双CIFS Safe SMB E2E通过：已有读句柄下SIGSTOP核心，500 ms配置使请求有界失败；共享根检查先失败，Samba映射ACCESS_DENIED，日志确认Connection timed out。再次操作立即失败，SIGCONT后新连接读取一致；既有读写、路径和WAL损坏恢复用例继续通过。配套模块和Safe FUSE兼容构建通过。
+
+这是桥接等待上限，不是服务端取消或fencing。已收到的写/创建可能在超时后完成，后端锁可能直到核心恢复/操作完成才释放；不回滚。大SMB请求的多个IPC分段各自计时，不声称整个SMB请求或操作系统调度有同一总时限。

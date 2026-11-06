@@ -16,6 +16,7 @@ struct nas_page {
     char next[256];
 };
 int nas_ipc_connect(const char *, struct nas_ipc **);
+int nas_ipc_connect_timeout(const char *, uint32_t, struct nas_ipc **);
 void nas_ipc_disconnect(struct nas_ipc *);
 int nas_ipc_stat(struct nas_ipc *, uint64_t, struct nas_attr *);
 int nas_ipc_lookup(struct nas_ipc *, uint64_t, const char *, struct nas_attr *);

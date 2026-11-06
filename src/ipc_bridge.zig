@@ -6,22 +6,48 @@ const m = @import("metadata.zig");
 const c = @import("ipc_sys");
 const allocator = std.heap.c_allocator;
 const max_frame = 132096;
+const default_timeout_ms = 30000;
+const max_timeout_ms = 600000;
+
+fn monotonicMillis() !i64 {
+    var now: c.struct_timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &now) != 0) return error.ClockFailed;
+    return now.tv_sec * 1000 + @divTrunc(now.tv_nsec, 1000000);
+}
 const Attr = extern struct { inode: u64, parent: u64, size: u64, directory: c_int, name: [256]u8 };
 const Page = extern struct { entries: [16]Attr, count: usize, next: [256]u8 };
 const Client = struct {
     fd: c_int,
     sequence: u64 = 0,
+    timeout_ms: u32,
 
     fn poison(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
         self.fd = -1;
     }
 
-    fn transfer(self: *Client, bytes: []u8, send: bool) !void {
+    fn wait(self: *Client, events: c_short, deadline: i64) !void {
+        while (true) {
+            const remaining = deadline - try monotonicMillis();
+            if (remaining <= 0) return error.TimedOut;
+            var descriptor: c.struct_pollfd = .{ .fd = self.fd, .events = events, .revents = 0 };
+            const ready = c.poll(&descriptor, 1, @intCast(remaining));
+            if (ready < 0 and c.__errno_location().* == c.EINTR) continue;
+            if (ready < 0 or (descriptor.revents & c.POLLNVAL) != 0) return error.Transport;
+            if (ready == 0) continue;
+            return;
+        }
+    }
+
+    fn transfer(self: *Client, bytes: []u8, send: bool, deadline: i64) !void {
         var offset: usize = 0;
         while (offset < bytes.len) {
+            try self.wait(if (send) c.POLLOUT else c.POLLIN, deadline);
             const n = if (send) c.send(self.fd, bytes.ptr + offset, bytes.len - offset, c.MSG_NOSIGNAL) else c.recv(self.fd, bytes.ptr + offset, bytes.len - offset, 0);
-            if (n < 0 and c.__errno_location().* == c.EINTR) continue;
+            if (n < 0) {
+                const err = c.__errno_location().*;
+                if (err == c.EINTR or err == c.EAGAIN or err == c.EWOULDBLOCK) continue;
+            }
             if (n <= 0) return error.Transport;
             offset += @intCast(n);
         }
@@ -30,20 +56,22 @@ const Client = struct {
     fn call(self: *Client, arena: std.mem.Allocator, operation: anytype) !Reply {
         if (self.fd < 0) return error.Transport;
         errdefer self.poison();
+        const deadline = (try monotonicMillis()) + self.timeout_ms;
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.Protocol;
         const request = try std.json.Stringify.valueAlloc(arena, .{ .version = @as(u32, 1), .request = self.sequence, .operation = operation }, .{});
         if (request.len > max_frame) return error.Protocol;
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(request.len), .little);
-        try self.transfer(&header, true);
-        try self.transfer(request, true);
-        try self.transfer(&header, false);
+        try self.transfer(&header, true, deadline);
+        try self.transfer(request, true, deadline);
+        try self.transfer(&header, false, deadline);
         const length = std.mem.readInt(u32, &header, .little);
         if (length == 0 or length > max_frame) return error.Protocol;
         const bytes = try arena.alloc(u8, length);
-        try self.transfer(bytes, false);
+        try self.transfer(bytes, false, deadline);
         const reply = try std.json.parseFromSliceLeaky(Reply, arena, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
         if (reply.version != 1 or reply.request != self.sequence) return error.Protocol;
+        if (try monotonicMillis() >= deadline) return error.TimedOut;
         return reply;
     }
 };
@@ -62,7 +90,11 @@ const Reply = struct {
 };
 
 fn failure(err: anyerror) c_int {
-    return if (err == error.OutOfMemory) c.ENOMEM else c.EIO;
+    return switch (err) {
+        error.OutOfMemory => c.ENOMEM,
+        error.TimedOut => c.ETIMEDOUT,
+        else => c.EIO,
+    };
 }
 
 fn protocol(client: *Client) c_int {
@@ -85,24 +117,53 @@ fn attr(value: ns.Attributes, out: *Attr) c_int {
 }
 
 export fn nas_ipc_connect(path: [*:0]const u8, out: *?*Client) c_int {
+    return nas_ipc_connect_timeout(path, default_timeout_ms, out);
+}
+
+export fn nas_ipc_connect_timeout(path: [*:0]const u8, timeout_ms: u32, out: *?*Client) c_int {
     out.* = null;
+    if (timeout_ms == 0 or timeout_ms > max_timeout_ms) return c.EINVAL;
+    const deadline = (monotonicMillis() catch |err| return failure(err)) + timeout_ms;
     var address: c.struct_sockaddr_un = std.mem.zeroes(c.struct_sockaddr_un);
     const name = std.mem.span(path);
     if (name.len == 0 or name.len >= address.sun_path.len) return c.ENAMETOOLONG;
     address.sun_family = c.AF_UNIX;
     @memcpy(@as([*]u8, @ptrCast(&address.sun_path))[0..name.len], name);
-    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_CLOEXEC | c.SOCK_NONBLOCK, 0);
     if (fd < 0) return c.__errno_location().*;
+    var connecting: Client = .{ .fd = fd, .timeout_ms = timeout_ms };
     if (c.connect(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) != 0) {
         const err = c.__errno_location().*;
-        _ = c.close(fd);
-        return err;
+        if (err != c.EINPROGRESS) {
+            connecting.poison();
+            return err;
+        }
+        connecting.wait(c.POLLOUT, deadline) catch |wait_err| {
+            connecting.poison();
+            return failure(wait_err);
+        };
+        var socket_error: c_int = 0;
+        var length: c.socklen_t = @sizeOf(c_int);
+        const result = c.getsockopt(fd, c.SOL_SOCKET, c.SO_ERROR, &socket_error, &length);
+        if (result != 0 or socket_error != 0) {
+            const socket_errno = if (result != 0) c.__errno_location().* else socket_error;
+            connecting.poison();
+            return socket_errno;
+        }
+    }
+    const completed = monotonicMillis() catch |err| {
+        connecting.poison();
+        return failure(err);
+    };
+    if (completed >= deadline) {
+        connecting.poison();
+        return c.ETIMEDOUT;
     }
     const client = allocator.create(Client) catch {
         _ = c.close(fd);
         return c.ENOMEM;
     };
-    client.* = .{ .fd = fd };
+    client.* = connecting;
     out.* = client;
     return 0;
 }

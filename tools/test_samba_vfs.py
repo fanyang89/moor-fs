@@ -1,4 +1,4 @@
-"""Read-only SMB3 against the native opaque VFS, without a FUSE mount."""
+"""SMB3 against the native opaque VFS, without a FUSE mount."""
 
 import os
 import json
@@ -75,6 +75,9 @@ read only = no
 [sync]
 copy = write
 sync always = yes
+[deadline]
+copy = nas
+nas_fs:timeout_ms = 500
 """)
     processes = []
     logs = []
@@ -639,8 +642,32 @@ sync always = yes
         # Reopen recovers the acknowledged WAL after every failed handle closes.
         smb(f"get vfs-read/binary.dat {destination}")
         assert destination.read_bytes() == data
+        paused = worker(url.replace("/write/", "/deadline/"))
+        call(paused, "open", flags=os.O_RDONLY)
+        os.kill(core.pid, signal.SIGSTOP)
+        try:
+            _, stopped = os.waitpid(core.pid, os.WUNTRACED)
+            assert os.WIFSTOPPED(stopped)
+            started = time.monotonic()
+            # Samba checks the share root first and maps that failure to
+            # ACCESS_DENIED, before dispatching the file's read callback.
+            call(paused, "read", offset=0, length=6, error=errno.EACCES)
+            assert 0.25 <= time.monotonic() - started < 5
+            # The same IPC connection is poisoned: no second wait or replay.
+            started = time.monotonic()
+            call(paused, "read", offset=0, length=6, error=errno.EACCES)
+            assert time.monotonic() - started < 0.5
+        finally:
+            os.kill(core.pid, signal.SIGCONT)
+        call(paused, "close", error=errno.EACCES)
+        assert (
+            "vfs_ChDir_shareroot(/) failed: Connection timed out"
+            in (state / "process.log").read_text()
+        )
+        smb(f"get vfs-read/upload.dat {directory / 'vfs-after-timeout'}")
+        assert (directory / "vfs-after-timeout").read_bytes() == b"repair"
         print(
-            "PASS: native Samba VFS SMB3 reads, create/write/truncate, writer exclusion, sync/close checkpoints and corruption/close-error recovery without FUSE; host paths rejected",
+            "PASS: native Samba VFS SMB3 reads/writes, namespace mutations, writer exclusion, checkpoints, corruption recovery and paused-core deadline without FUSE; host paths rejected",
             flush=True,
         )
     except BaseException:

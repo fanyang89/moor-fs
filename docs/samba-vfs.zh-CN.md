@@ -39,6 +39,7 @@ smb2 leases = no
 path = /
 vfs objects = nas_fs
 nas_fs:socket = /absolute/core-runtime/core.sock
+nas_fs:timeout_ms = 30000
 read only = yes
 follow symlinks = no
 oplocks = no
@@ -58,7 +59,11 @@ nt acl support = no
 
 每个VFS连接持有独立IPC连接，每文件使用核心句柄。Samba要求的本机fd以 `/dev/null` 占位（写句柄使用O_RDWR），仅用于fd生命周期和F_GETFL/F_SETFL/F_GETFD/F_SETFD；不用于文件内容、命名空间、文件锁或属性。所有读取经核心验证。路径引用和目录不占核心数据句柄；数据文件真正open后才获取共享Access。
 
-IPC桥接同步阻塞，单次数据帧64KiB，较大的SMB读写拆分调用。pread/pwrite/fsync的send回调目前在当前线程完成后投递tevent结果，并非后台异步I/O；不宣称具备高并发生产性能。transport/协议失败关闭并毒化连接，不自动重连或重放旧句柄。尚无IPC超时，暂停或卡住的核心会阻塞相应smbd工作进程。
+IPC桥接同步等待，单次数据帧64KiB，较大的SMB读写拆分调用。pread/pwrite/fsync的send回调目前在当前线程完成后投递tevent结果，并非后台异步I/O；不宣称具备高并发生产性能。transport/协议失败关闭并毒化连接，不自动重连或重放旧句柄。
+
+`nas_fs:timeout_ms` 指定每次连接或IPC请求的总时限，默认30000 ms，允许1–600000 ms；非法配置拒绝连接。桥接使用非阻塞Unix socket、CLOCK_MONOTONIC绝对截止点与poll，发送帧头/正文、接收帧头/正文共用同一个请求截止点；部分传输、EINTR或持续零碎响应不会重置计时。Unix连接队列已满时可能立即EAGAIN。首次超时返回ETIMEDOUT并关闭/毒化连接，之后调用立即EIO；已有句柄不能在新连接复用。每个分段IPC独立计时，不是整个SMB请求的统一上限，也不限制进程调度或其他Samba逻辑耗时。
+
+超时不取消核心已经收到的请求、不回滚已持久化数据。核心或后端仍可能执行，直到恢复/完成后才处理断线及释放句柄；前端返回超时不表示NAS锁已经释放。SMB错误取决于触发位置：测试暂停核心时，Samba首先在共享根检查遇到超时，并映射为ACCESS_DENIED，而不是直接向客户端透传IO_TIMEOUT。调大时限前应结合实际后端/WAL耗时判断。
 
 只读open仍沿用核心Access：必要时会迁移旧immutable文件或恢复/发布checkpoint，因此“SMB只读”不表示NAS后端无写入。读句柄看到实时变化，不保留历史快照。跨请求和分段读取也不保证快照一致性。
 
@@ -121,3 +126,5 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 创建/open条件验证：Debug/Safe各114项、桥接Debug/Safe、本地及双CIFS E2E通过。单测覆盖守卫创建强制双副本、祖先改变后拒绝、回执重放，以及CheckPath前后完整快照不变；E2E验证旧路径拒绝创建文件/目录、拒绝读/写open（包括已有会话）、不迁移尚未打开的文件、原读句柄跨改名可用、路径恢复后可取得写句柄，18层长路径SMB读取成功。日志：`/tmp/opencode/nas-create-open-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
 
 合并创建验证：Debug/Safe各115项、C ABI Debug/Safe、本地/双CIFS E2E通过。单测验证容量不足不提交创建、首次写者排他、回执重放返回新句柄且保留内容、路径移动/名称复用拒绝、后端打开失败后条目保留且无句柄/会话泄漏、修复配置后重试复用同一inode；真实两个SMB客户端并发O_EXCL仅一个成功，成功方持有写句柄，关闭后另一客户端可读。真实Raft create_open回执重放不截断；桥接验证EEXIST和成功响应必须含非零句柄，异常后毒化。日志：`/tmp/opencode/nas-combined-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
+
+IPC时限验证：C ABI Debug/Safe覆盖写请求收到但无回复、半响应头、半正文、持续碎片不延长时限、超时后立即EIO且不重发、非法时限和满连接队列快速失败。本地Debug/双CIFS Safe真实SMB测试对已打开文件执行core SIGSTOP，500 ms配置下请求有界失败，服务日志确认共享根检查Connection timed out；同连接再次请求立即失败，SIGCONT后新连接下载内容一致，退出无PANIC。日志：`/tmp/opencode/nas-deadline-{abi-debug,abi-safe,local,cifs}.log`。

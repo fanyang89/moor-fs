@@ -79,6 +79,8 @@ create_open.request_id只标识guarded create元数据命令，不是句柄去�
 
 创建与后端打开仍非跨存储原子事务：创建提交后发生后端、分配或通信错误可能留下条目，不回滚；丢失成功响应也不能推断失败。桥接不自动重试。服务断线清理连接句柄，重试须使用新的连接句柄并明确处理元数据回执和当前路径状态。
 
+C桥接默认连接/单请求总时限30秒，VFS通过 `nas_fs:timeout_ms` 配置1–600000 ms；原 `nas_ipc_connect` 保持ABI并采用默认值，新增 `nas_ipc_connect_timeout` 显式设置。非阻塞传输以同一个单调时钟截止点覆盖整轮请求/响应，不按碎片刷新。首次超时ETIMEDOUT并毒化，后续调用EIO，不重连或重放。该机制仅限制桥接等待，不新增服务端超时字段，不取消核心请求，也不保证后端操作和锁已停止；其他直接IPC客户端仍自行管理等待策略。
+
 checked与path_guarded均采用新增命令，不改变旧命令的JSON和回执摘要；entry_conflict（20）由C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 
 操作失败返回非空 `err`，目前为Zig错误名称，例如 `FileBusy`、`InvalidHandle`、`ReadOnlyHandle`、`InvalidRange`、`UnsupportedVersion`、`WalSessionFailed`；错误映射尚不是Samba errno ABI。失败响应的result各字段为null。非法JSON、未知字段/操作、超长/空帧、半帧EOF及响应发送失败均断开连接并清理句柄，不保证返回错误帧。

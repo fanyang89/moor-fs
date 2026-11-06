@@ -35,9 +35,11 @@ static int nas_connect(struct vfs_handle_struct *h, const char *service, const c
 {
     struct nas_ipc *client = NULL;
     const char *path = lp_parm_const_string(SNUM(h->conn), "nas_fs", "socket", NULL);
+    int timeout_ms = lp_parm_int(SNUM(h->conn), "nas_fs", "timeout_ms", 30000);
     if (!path || lp_smb2_leases() || lp_oplocks(SNUM(h->conn))) return nas_error(EINVAL);
     if (!lp_read_only(SNUM(h->conn)) && !lp_strict_sync(SNUM(h->conn))) return nas_error(EINVAL);
-    if (nas_error(nas_ipc_connect(path, &client)) != 0) return -1;
+    if (timeout_ms < 1 || timeout_ms > 600000) return nas_error(EINVAL);
+    if (nas_error(nas_ipc_connect_timeout(path, timeout_ms, &client)) != 0) return -1;
     SMB_VFS_HANDLE_SET_DATA(h, client, nas_free, struct nas_ipc, return -1);
     return 0;
 }

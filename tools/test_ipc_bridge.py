@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -31,6 +32,12 @@ def main():
         lib = c.CDLL(str(shared))
         lib.nas_ipc_connect.argtypes = [c.c_char_p, c.POINTER(c.c_void_p)]
         lib.nas_ipc_connect.restype = c.c_int
+        lib.nas_ipc_connect_timeout.argtypes = [
+            c.c_char_p,
+            c.c_uint32,
+            c.POINTER(c.c_void_p),
+        ]
+        lib.nas_ipc_connect_timeout.restype = c.c_int
         lib.nas_ipc_disconnect.argtypes = [c.c_void_p]
         lib.nas_ipc_disconnect.restype = None
         lib.nas_ipc_open.argtypes = [c.c_void_p, c.c_uint64, c.POINTER(c.c_uint64)]
@@ -563,8 +570,100 @@ def main():
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)
+
+            def stalled(listener, mode):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(5)
+                    size = struct.unpack("<I", exact(connection, 4))[0]
+                    request = json.loads(exact(connection, size))
+                    assert (
+                        "write" in request["operation"]
+                        if mode == "silent"
+                        else "open" in request["operation"]
+                    )
+                    if mode == "header":
+                        connection.sendall(b"\x00")
+                    elif mode in ("body", "trickle"):
+                        connection.sendall(struct.pack("<I", 200) + b"{")
+                    if mode == "trickle":
+                        # Keep making progress faster than the timeout. The
+                        # absolute deadline must not restart for each fragment.
+                        connection.settimeout(0.04)
+                        while True:
+                            try:
+                                assert connection.recv(1) == b""
+                                break
+                            except socket.timeout:
+                                try:
+                                    connection.sendall(b" ")
+                                except (BrokenPipeError, ConnectionResetError):
+                                    break
+                    else:
+                        assert connection.recv(1) == b""
+
+            for mode in ("silent", "header", "body", "trickle"):
+                path = directory / f"deadline-{mode}"
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.settimeout(5)
+                    listener.bind(str(path))
+                    listener.listen()
+                    future = pool.submit(stalled, listener, mode)
+                    client = c.c_void_p()
+                    assert (
+                        lib.nas_ipc_connect_timeout(
+                            str(path).encode(), 150, c.byref(client)
+                        )
+                        == 0
+                    )
+                    try:
+                        opened = c.c_uint64()
+                        started = time.monotonic()
+                        if mode == "silent":
+                            result = lib.nas_ipc_write(client, 7, 0, b"uncertain", 9)
+                        else:
+                            result = lib.nas_ipc_open(client, 42, c.byref(opened))
+                        assert result == errno.ETIMEDOUT, (mode, result)
+                        assert 0.1 <= time.monotonic() - started < 3
+                        started = time.monotonic()
+                        assert (
+                            lib.nas_ipc_open(client, 42, c.byref(opened)) == errno.EIO
+                        )
+                        assert time.monotonic() - started < 0.1
+                    finally:
+                        lib.nas_ipc_disconnect(client)
+                    future.result(timeout=5)
+            # A full Unix accept queue must fail promptly, not block connect.
+            path = directory / "backlog"
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                listener.listen(0)
+                first, second = c.c_void_p(), c.c_void_p()
+                for invalid in (0, 600001):
+                    assert (
+                        lib.nas_ipc_connect_timeout(
+                            str(path).encode(), invalid, c.byref(first)
+                        )
+                        == errno.EINVAL
+                        and first.value is None
+                    )
+                assert (
+                    lib.nas_ipc_connect_timeout(str(path).encode(), 150, c.byref(first))
+                    == 0
+                )
+                try:
+                    started = time.monotonic()
+                    assert (
+                        lib.nas_ipc_connect_timeout(
+                            str(path).encode(), 150, c.byref(second)
+                        )
+                        == errno.EAGAIN
+                    )
+                    assert second.value is None and time.monotonic() - started < 1
+                finally:
+                    lib.nas_ipc_disconnect(first)
         print(
-            "PASS: C IPC ABI fragmentation, error mapping, binary reads and poisoned-connection failures"
+            "PASS: C IPC ABI framing, mutations, absolute deadlines and poisoned-connection failures"
         )
 
 
