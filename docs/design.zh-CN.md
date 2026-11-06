@@ -1016,3 +1016,11 @@ create随后stat/open不是原子操作，后续失败可能留空文件；64KiB
 本地Debug/双CIFS Safe真实Raft SMB E2E通过：创建与排他创建、153610字节写、跨进程写者互斥/共享读取、稀疏写、截断、关闭checkpoint、sync-always未关闭句柄checkpoint、smbclient上传覆盖下载；破坏待提交WAL覆盖的数据后关闭返回NT_STATUS_IO_DEVICE_ERROR，重新打开WAL恢复一致。本机libsmbclient将该close错误映射为EINVAL，测试同时核验服务端状态。其SMB2转换丢弃O_SYNC，所以sync-always验证的是实际fsync回调，不是客户端write-through标志。普通fsync不对未触及基线全文件哈希。
 
 C ABI Debug/Safe测试核对写请求与创建错误映射、同步/关闭错误及短写确认毒化；底层Debug/Safe各110项通过。运行配置和验收范围见 `samba-vfs.zh-CN.md`。
+
+## 67. 原生VFS目录创建、改名和删除
+
+新增C ABI mkdir/rename/remove，统一解析Raft change回执并映射重名、非空目录、根保护、目录环等状态。VFS mkdirat/renameat/unlinkat通过核心提交，所有命名空间变更使用独立随机非零request ID，连接失败不自动重放。rename保持inode且拒绝覆盖其他目标；unlink区分文件/目录，核心拒绝活跃数据句柄删除。沿用核心metadata删除，不包含后端孤儿GC。
+
+本地Debug与双CIFS Safe真实Raft SMB E2E通过：mkdir、跨目录文件改名、目录改名、删除文件及空目录；非空目录、重名目标、目录环拒绝；改名期间保留的IPC读句柄继续读原内容，活跃句柄阻止SMB删除，关闭后成功。C ABI Debug/Safe核对请求及错误映射通过。
+
+目前路径查找与按inode提交仍分离，缺少预期父目录/名称CAS，并发移动时可能操作已移动的原inode；未宣称POSIX路径原子性。目录路径引用不算核心活跃数据句柄，完整SMB delete-on-close/share-mode、持久ACL/时间和跨节点fencing仍未完成。

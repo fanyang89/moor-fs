@@ -8,7 +8,7 @@ SMB3 smbclient → Samba 4.25.1 nas_fs VFS
                        → 双副本WAL/验证 → Linux CIFS → NAS
 ```
 
-这条测试入口不挂载FUSE。当前支持目录浏览、属性、读取，以及现有目录下创建文件、写入、截断和同步；mkdir、改名、删除尚未接入。原有FUSE入口继续可用。
+这条测试入口不挂载FUSE。当前支持目录浏览、属性、读取、创建文件和目录、写入、截断、同步、非覆盖改名及文件/空目录删除。原有FUSE入口继续可用。
 
 ## 构建
 
@@ -72,6 +72,12 @@ VFS接收到O_SYNC/O_DSYNC时执行同步；本机libsmbclient的SMB2参数转�
 
 ## 验证
 
+### 命名空间边界
+
+mkdir、rename、unlink/rmdir均通过核心有回执的Raft change执行，使用独立随机非零request ID；桥接连接失败不自动重放。rename按inode执行，不覆盖其他已有inode；不支持交换或其他rename标志。unlink/rmdir区分文件与目录，核心拒绝根删除、非空目录、目录环和本地活跃文件句柄删除。改名不改变inode，已打开的核心句柄继续有效。删除沿用核心元数据移除语义，不宣称已完成后端孤儿数据GC。
+
+路径解析与按inode提交分开执行，未加入预期父目录/名称的CAS；如果并发改变路径，操作可能作用于已被移动的原inode。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
+
 先构建模块，再运行：
 
 ```sh
@@ -92,9 +98,12 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 - 连接退出后日志无PANIC/INTERNAL ERROR，防止“下载成功但析构崩溃”被漏掉。
 - C ABI受控socket测试覆盖碎片回复、半帧EOF、空/超长帧、非法JSON、错误版本/关联号、缺失/零句柄、错误映射、任意二进制和非法hex；毒化后调用直接EIO，不发起重连。
 - C ABI写测试核对create/open/write/truncate/sync/close请求，创建错误映射、同步/关闭失败与短写确认毒化。
+- 命名空间E2E覆盖mkdir、跨目录文件改名、目录改名、删除文件/空目录、非空目录/重名目标/目录环拒绝；改名期间保留的IPC读句柄继续可读，活跃句柄阻止SMB删除，关闭后删除成功。C ABI核对mkdir/rename/remove请求与错误映射。
 
 本地核心Debug、双CIFS核心Safe、C ABI Debug/Safe及底层Debug/Safe各110项单测通过。两个SMB E2E均使用脚本构建的Safe桥接库和同一Samba模块，Samba自身使用其configure编译选项。日志：`/tmp/opencode/nas-vfs-local-debug.log`、`/tmp/opencode/nas-vfs-cifs-safe.log`、`/tmp/opencode/nas-ipc-abi-{debug,safe}.log`、`/tmp/opencode/nas-vfs-unit-{debug,safe}.log`。
 
 本轮读写日志：`/tmp/opencode/nas-vfs-write-local.log`、`/tmp/opencode/nas-vfs-write-cifs.log`、`/tmp/opencode/nas-write-abi-{debug,safe}.log`、`/tmp/opencode/nas-write-unit-{debug,safe}.log`。
 
-这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需原生命名空间操作、路径操作原子性、持久ACL/时间属性、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
+命名空间本地Debug/双CIFS Safe及C ABI Debug/Safe通过，日志：`/tmp/opencode/nas-namespace-{local,cifs,abi-debug,abi-safe}.log`。
+
+这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL/时间属性、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。

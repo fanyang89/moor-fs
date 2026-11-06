@@ -41,7 +41,7 @@ existing dual-replica WAL engine. See `docs/file-ipc.zh-CN.md` for framing,
 permissions, disconnect/restart semantics and limits. The interface also exposes
 stat, component lookup, bounded directory pages and receipt-backed namespace
 mutations. An experimental native Samba VFS supports reads, file creation,
-writes, truncation and sync, and connects directly to
+writes, truncation, sync, mkdir, non-overwriting rename and removal, and connects directly to
 this core, without FUSE:
 
 ```sh

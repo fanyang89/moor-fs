@@ -240,6 +240,65 @@ def main():
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)
+            lib.nas_ipc_mkdir.argtypes = lib.nas_ipc_create_file.argtypes
+            lib.nas_ipc_rename.argtypes = [
+                c.c_void_p,
+                c.c_uint64,
+                c.c_uint64,
+                c.c_char_p,
+                c.c_uint64,
+            ]
+            lib.nas_ipc_remove.argtypes = [c.c_void_p, c.c_uint64, c.c_uint64]
+            path = directory / "namespace"
+            mutations = [
+                (
+                    {"create": {"parent": 1, "name": "dir", "kind": "directory"}},
+                    "ok",
+                    42,
+                ),
+                (
+                    {"rename": {"inode": 42, "parent": 1, "name": "new"}},
+                    "already_exists",
+                    0,
+                ),
+                ({"rename": {"inode": 42, "parent": 1, "name": "new"}}, "cycle", 0),
+                ({"rename": {"inode": 42, "parent": 1, "name": "new"}}, "ok", 42),
+                ({"remove": {"inode": 42}}, "not_empty", 0),
+                ({"remove": {"inode": 1}}, "root_protected", 0),
+                ({"remove": {"inode": 42}}, "ok", 42),
+            ]
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                listener.listen()
+                future = pool.submit(
+                    serve,
+                    listener,
+                    [
+                        (
+                            {"change": {"request_id": 902, "mutation": mutation}},
+                            {"result": {"change": {"status": status, "inode": inode}}},
+                        )
+                        for mutation, status, inode in mutations
+                    ],
+                )
+                client = c.c_void_p()
+                assert lib.nas_ipc_connect(str(path).encode(), c.byref(client)) == 0
+                try:
+                    inode = c.c_uint64()
+                    assert (
+                        lib.nas_ipc_mkdir(client, 1, b"dir", 902, c.byref(inode)) == 0
+                        and inode.value == 42
+                    )
+                    for expected in (errno.EEXIST, errno.EINVAL, 0):
+                        assert (
+                            lib.nas_ipc_rename(client, 42, 1, b"new", 902) == expected
+                        )
+                    assert lib.nas_ipc_remove(client, 42, 902) == errno.ENOTEMPTY
+                    assert lib.nas_ipc_remove(client, 1, 902) == errno.EPERM
+                    assert lib.nas_ipc_remove(client, 42, 902) == 0
+                finally:
+                    lib.nas_ipc_disconnect(client)
+                future.result(timeout=5)
         print(
             "PASS: C IPC ABI fragmentation, error mapping, binary reads and poisoned-connection failures"
         )

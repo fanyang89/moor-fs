@@ -286,6 +286,63 @@ sync always = yes
         smb(f"put {source} vfs-read/put.dat", share="write")
         smb(f"get vfs-read/put.dat {directory / 'vfs-put-download'}")
         assert (directory / "vfs-put-download").read_bytes() == b"short"
+        smb("mkdir vfs-read/namespace", share="write")
+        folder = client.call({"lookup": {"parent": parent, "name": "namespace"}})[
+            "attributes"
+        ]["node"]["id"]
+        smb(f"put {source} vfs-read/namespace/first.dat", share="write")
+        original = client.call({"lookup": {"parent": folder, "name": "first.dat"}})[
+            "attributes"
+        ]["node"]["id"]
+        smb("rmdir vfs-read/namespace", share="write", success=False)
+        active = client.call({"open": {"inode": original, "writable": False}})["handle"]
+        smb("rename vfs-read/namespace/first.dat vfs-read/moved.dat", share="write")
+        client.call(
+            {"lookup": {"parent": folder, "name": "first.dat"}}, error="NotFound"
+        )
+        assert (
+            client.call({"lookup": {"parent": parent, "name": "moved.dat"}})[
+                "attributes"
+            ]["node"]["id"]
+            == original
+        )
+        smb("rename vfs-read/moved.dat vfs-read/put.dat", share="write", success=False)
+        smb(f"get vfs-read/moved.dat {directory / 'vfs-renamed'}")
+        assert (directory / "vfs-renamed").read_bytes() == b"short"
+        assert (
+            client.call({"read": {"handle": active, "offset": 0, "length": 5}})["hex"]
+            == b"short".hex()
+        )
+        smb("del vfs-read/moved.dat", share="write", success=False)
+        assert (
+            client.call({"lookup": {"parent": parent, "name": "moved.dat"}})[
+                "attributes"
+            ]["node"]["id"]
+            == original
+        )
+        client.call({"close": {"handle": active}})
+        smb("rename vfs-read/namespace vfs-read/renamed-dir", share="write")
+        assert (
+            client.call({"lookup": {"parent": parent, "name": "renamed-dir"}})[
+                "attributes"
+            ]["node"]["id"]
+            == folder
+        )
+        smb("mkdir vfs-read/renamed-dir/child", share="write")
+        smb(
+            "rename vfs-read/renamed-dir vfs-read/renamed-dir/child/cycle",
+            share="write",
+            success=False,
+        )
+        smb("rmdir vfs-read/renamed-dir/child", share="write")
+        smb("del vfs-read/moved.dat", share="write")
+        client.call(
+            {"lookup": {"parent": parent, "name": "moved.dat"}}, error="NotFound"
+        )
+        smb("rmdir vfs-read/renamed-dir", share="write")
+        client.call(
+            {"lookup": {"parent": parent, "name": "renamed-dir"}}, error="NotFound"
+        )
         # Damage bytes covered by pending WAL, so close must reject checkpointing.
         call(writer, "open", flags=os.O_RDWR)
         call(writer, "write", offset=0, hex=b"repair".hex())

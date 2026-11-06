@@ -133,27 +133,83 @@ static int nas_share_root(struct vfs_handle_struct *h, struct files_struct *root
     return vfs_set_share_root(root, path, &st);
 }
 
-static int nas_create_path(struct vfs_handle_struct *h, uint64_t base, const char *path, uint64_t *inode)
+static uint64_t nas_request_id(void)
 {
-    char *copy = talloc_strdup(talloc_tos(), path), *name, *slash;
-    struct nas_attr parent;
     uint64_t request = 0;
-    int error;
-    if (!copy) return nas_error(ENOMEM);
-    slash = strrchr(copy, '/');
-    name = slash ? slash + 1 : copy;
+    while (!request) generate_random_buffer((uint8_t *)&request, sizeof(request));
+    return request;
+}
+
+static int nas_resolve_parent(struct vfs_handle_struct *h, uint64_t *base, char *path, char **name)
+{
+    char *slash = strrchr(path, '/');
+    struct nas_attr parent;
+    *name = slash ? slash + 1 : path;
     if (slash) {
         *slash = '\0';
-        if (nas_resolve(h, base, copy[0] ? copy : "/", &parent)) {
-            TALLOC_FREE(copy);
-            return -1;
-        }
-        base = parent.inode;
+        if (nas_resolve(h, *base, path[0] ? path : "/", &parent)) return -1;
+        *base = parent.inode;
     }
-    while (!request) generate_random_buffer((uint8_t *)&request, sizeof(request));
-    error = nas_ipc_create_file(h->data, base, name, request, inode);
+    return 0;
+}
+
+static int nas_create_path(struct vfs_handle_struct *h, uint64_t base, const char *path, bool directory, uint64_t *inode)
+{
+    char *copy = talloc_strdup(talloc_tos(), path), *name;
+    int error;
+    if (!copy) return nas_error(ENOMEM);
+    if (nas_resolve_parent(h, &base, copy, &name)) {
+        TALLOC_FREE(copy);
+        return -1;
+    }
+    error = directory ? nas_ipc_mkdir(h->data, base, name, nas_request_id(), inode)
+                      : nas_ipc_create_file(h->data, base, name, nas_request_id(), inode);
     TALLOC_FREE(copy);
     return nas_error(error);
+}
+
+static int nas_mkdirat(struct vfs_handle_struct *h, struct files_struct *dir,
+    const struct smb_filename *name, mode_t mode)
+{
+    uint64_t inode;
+    if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
+    if (name->stream_name) return nas_error(ENOTSUP);
+    return nas_create_path(h, nas_inode(h, dir), name->base_name, true, &inode);
+}
+
+static int nas_renameat(struct vfs_handle_struct *h, struct files_struct *src,
+    const struct smb_filename *from, struct files_struct *dst,
+    const struct smb_filename *to, const struct vfs_rename_how *how)
+{
+    struct nas_attr attr;
+    uint64_t parent = nas_inode(h, dst);
+    char *copy, *name;
+    int error;
+    if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
+    if (from->stream_name || to->stream_name || (how->flags & ~VFS_RENAME_HOW_NO_REPLACE)) return nas_error(ENOTSUP);
+    if (nas_resolve(h, nas_inode(h, src), from->base_name, &attr)) return -1;
+    copy = talloc_strdup(talloc_tos(), to->base_name);
+    if (!copy) return nas_error(ENOMEM);
+    if (nas_resolve_parent(h, &parent, copy, &name)) {
+        TALLOC_FREE(copy);
+        return -1;
+    }
+    /* The core deliberately refuses replacement of a different inode. */
+    error = nas_ipc_rename(h->data, attr.inode, parent, name, nas_request_id());
+    TALLOC_FREE(copy);
+    return nas_error(error);
+}
+
+static int nas_unlinkat(struct vfs_handle_struct *h, struct files_struct *dir,
+    const struct smb_filename *name, int flags)
+{
+    struct nas_attr attr;
+    if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
+    if (name->stream_name || (flags & ~AT_REMOVEDIR)) return nas_error(ENOTSUP);
+    if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
+    if (attr.directory && !(flags & AT_REMOVEDIR)) return nas_error(EISDIR);
+    if (!attr.directory && (flags & AT_REMOVEDIR)) return nas_error(ENOTDIR);
+    return nas_error(nas_ipc_remove(h->data, attr.inode, nas_request_id()));
 }
 
 static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *dir,
@@ -173,7 +229,7 @@ static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *di
     if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) {
         uint64_t inode;
         if (errno != ENOENT || !(how->flags & O_CREAT) || fsp->fsp_flags.is_pathref) return -1;
-        if (nas_create_path(h, nas_inode(h, dir), name->base_name, &inode)) {
+        if (nas_create_path(h, nas_inode(h, dir), name->base_name, false, &inode)) {
             if (errno != EEXIST || (how->flags & O_EXCL)) return -1;
             if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
         } else if (nas_error(nas_ipc_stat(h->data, inode, &attr))) return -1;
@@ -467,6 +523,7 @@ NTSTATUS samba_init_module(TALLOC_CTX *ctx)
     f->open_share_root_fn = nas_share_root;
     f->stat_fn = nas_stat; f->lstat_fn = nas_stat; f->fstat_fn = nas_fstat; f->fstatat_fn = nas_fstatat;
     f->openat_fn = nas_openat; f->close_fn = nas_close;
+    f->mkdirat_fn = nas_mkdirat; f->renameat_fn = nas_renameat; f->unlinkat_fn = nas_unlinkat;
     f->fcntl_fn = nas_fcntl;
     f->pread_fn = nas_pread; f->pread_send_fn = nas_pread_send; f->pread_recv_fn = nas_pread_recv;
     f->pwrite_fn = nas_pwrite; f->pwrite_send_fn = nas_pwrite_send; f->pwrite_recv_fn = nas_pread_recv;
