@@ -109,6 +109,41 @@ fn syncData(io: Io, replica: Replica) !void {
     try replica.data.sync(io);
 }
 
+/// Fixed read-ahead avoids an SMB request per tiny record. The limit is the
+/// acknowledged in-session end, and the physical EOF is checked separately.
+const LogReader = struct {
+    io: Io,
+    file: File,
+    limit: u64,
+    position: u64 = 0,
+    used: usize = 0,
+    available: usize = 0,
+    buffer: [64 * 1024]u8 = undefined,
+
+    fn readExact(self: *LogReader, destination: []u8) !void {
+        var copied: usize = 0;
+        while (copied < destination.len) {
+            if (self.used == self.available) {
+                if (self.position >= self.limit) return error.WalChanged;
+                const bytes = self.buffer[0..@min(self.buffer.len, self.limit - self.position)];
+                if (try self.file.readPositionalAll(self.io, bytes, self.position) != bytes.len) return error.WalChanged;
+                self.position += bytes.len;
+                self.used = 0;
+                self.available = bytes.len;
+            }
+            const count = @min(destination.len - copied, self.available - self.used);
+            @memcpy(destination[copied..][0..count], self.buffer[self.used..][0..count]);
+            self.used += count;
+            copied += count;
+        }
+    }
+
+    fn checkEnd(self: *LogReader) !void {
+        var extra: [1]u8 = undefined;
+        if (try self.file.readPositionalAll(self.io, &extra, self.limit) != 0) return error.WalChanged;
+    }
+};
+
 /// Both operations are joined even if either fails. No sequential fallback.
 fn pair(io: Io, replicas: [2]Replica, comptime function: anytype, args: anytype) !void {
     var first = try io.concurrent(function, .{ io, replicas[0] } ++ args);
@@ -172,14 +207,6 @@ pub const Session = struct {
     /// Validate acknowledged in-session logs exactly (no torn-tail recovery),
     /// then compare their final effects before the enclosing store retires them.
     pub fn verifyPending(self: *Session, first: u64, baseline_size: u64) !void {
-        try self.verifyEvidence(first, baseline_size, null);
-    }
-
-    pub fn verifyRead(self: *Session, first: u64, baseline_size: u64, read: evidence_module.Read) !void {
-        try self.verifyEvidence(first, baseline_size, read);
-    }
-
-    fn verifyEvidence(self: *Session, first: u64, baseline_size: u64, read: ?evidence_module.Read) !void {
         if (self.failed) return error.WalSessionFailed;
         errdefer self.failed = true;
         const a = try readLog(self.allocator, self.io, self.replicas[0].log);
@@ -204,7 +231,56 @@ pub const Session = struct {
             sequence += 1;
         }
         const files = [2]File{ self.replicas[0].data, self.replicas[1].data };
-        if (read) |value| try evidence.verifyRead(self.io, files, value) else try evidence.verify(self.io, files);
+        try evidence.verify(self.io, files);
+    }
+
+    /// Stream both complete WALs, retaining only one frame per replica and the
+    /// caller's requested window. No persistent-log integrity cache is trusted.
+    pub fn verifyRead(self: *Session, first: u64, baseline_size: u64, read: evidence_module.Read) !void {
+        if (self.failed) return error.WalSessionFailed;
+        errdefer self.failed = true;
+        if (first == 0 or first > self.next) return error.WalChanged;
+        for (self.replicas) |replica| {
+            const stat = try replica.log.stat(self.io);
+            if (stat.kind != .file or stat.size > max_log) return error.WalCapacityExceeded;
+            if (stat.size != self.end) return error.WalChanged;
+        }
+        const observed_size = (try self.replicas[0].data.stat(self.io)).size;
+        var evidence = try evidence_module.ReadEvidence.init(self.allocator, baseline_size, observed_size, read);
+        defer evidence.deinit();
+        const capacity: usize = @intCast(@min(self.end, max_write + header_size));
+        const a = try self.allocator.alloc(u8, capacity);
+        defer self.allocator.free(a);
+        const b = try self.allocator.alloc(u8, capacity);
+        defer self.allocator.free(b);
+        var left: LogReader = .{ .io = self.io, .file = self.replicas[0].log, .limit = self.end };
+        var right: LogReader = .{ .io = self.io, .file = self.replicas[1].log, .limit = self.end };
+        var offset: u64 = 0;
+        var sequence = first;
+        while (offset < self.end) {
+            if (self.end - offset < header_size) return error.WalChanged;
+            try left.readExact(a[0..header_size]);
+            try right.readExact(b[0..header_size]);
+            if (!std.mem.eql(u8, a[0..header_size], b[0..header_size])) return error.WalDiverged;
+            // Authenticate the header, identity and length before using its size.
+            _ = try decode(a[0..header_size], 0, self.identity, sequence);
+            const length = header_size + std.mem.readInt(u32, a[40..44], .little);
+            if (length > self.end - offset) return error.WalChanged;
+            try left.readExact(a[header_size..length]);
+            try right.readExact(b[header_size..length]);
+            if (!std.mem.eql(u8, a[header_size..length], b[header_size..length])) return error.WalDiverged;
+            const record = (try decode(a[0..length], 0, self.identity, sequence)) orelse return error.WalChanged;
+            switch (record.operation) {
+                .write => try evidence.write(record.offset, record.payload),
+                .truncate => evidence.truncate(record.offset),
+            }
+            offset += length;
+            sequence = std.math.add(u64, sequence, 1) catch return error.WalSequenceExhausted;
+        }
+        if (sequence != self.next) return error.WalChanged;
+        try left.checkEnd();
+        try right.checkEnd();
+        try evidence.verify(self.io, .{ self.replicas[0].data, self.replicas[1].data });
     }
 
     fn mutate(self: *Session, operation: Operation, offset: u64, payload: []const u8) !void {

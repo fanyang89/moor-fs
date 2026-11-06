@@ -119,6 +119,10 @@ test "WAL evidence resolves overlaps truncation regrowth and sparse gaps against
         try t.expectEqual(size, try replica.data.readPositionalAll(t.io, &bytes, 0));
         try t.expectEqualSlices(u8, expected[0..size], bytes[0..size]);
     }
+    for ([_]usize{ 0, 3, size / 2, size, size + 10 }) |offset| {
+        const count = if (offset >= size) 0 else @min(@as(usize, 17), size - offset);
+        try store.verifyRead(offset, if (count == 0) "" else expected[offset..][0..count], 17);
+    }
     try store.sync();
 }
 
@@ -194,6 +198,60 @@ test "read evidence checks returned bytes rather than rereading healthy files" {
     try t.expectError(error.WalDataMismatch, store.verifyRead(2, "cXe", 3));
     try t.expectError(error.WalSessionFailed, store.sync());
     try f.expect("abcdefgh");
+}
+
+test "streaming read verification uses bounded scratch for a large active WAL" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    const payload = try t.allocator.alloc(u8, wal.max_write);
+    defer t.allocator.free(payload);
+    @memset(payload, 'X');
+    for (0..16) |_| try store.write(payload, 0);
+    try t.expect(store.session.end > 16 * 1024 * 1024);
+    // The former whole-log reader cannot fit even one log in this allocator.
+    const scratch = try t.allocator.alloc(u8, 4 * 1024 * 1024);
+    defer t.allocator.free(scratch);
+    var bounded = std.heap.FixedBufferAllocator.init(scratch);
+    store.session.allocator = bounded.allocator();
+    defer store.session.allocator = t.allocator;
+    try store.verifyRead(123, "X", 1);
+    try store.verifyRead(0, payload, payload.len);
+    try store.verifyRead(payload.len, "", 16);
+    try store.verifyRead(0, "", 0);
+}
+
+test "streaming verification rechecks WAL corruption outside the read window" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    try store.write("first", 0);
+    try store.write("other", 100);
+    try store.verifyRead(0, "first", 5);
+    for (store.session.replicas) |replica| try replica.log.writePositionalAll(t.io, "Q", 112 + 5 + 112);
+    try t.expectError(error.CorruptWal, store.verifyRead(0, "first", 5));
+    try t.expectError(error.WalSessionFailed, store.collect());
+    try t.expectEqual(@as(u64, 1), store.checkpoint.next);
+}
+
+test "streaming WAL frame length is authenticated and bounded before payload reads" {
+    for ([_]u32{ wal.max_write, wal.max_write + 1 }) |length| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        defer store.close();
+        try store.write("abc", 0);
+        for (store.session.replicas) |replica| {
+            var header: [112]u8 = undefined;
+            try t.expectEqual(header.len, try replica.log.readPositionalAll(t.io, &header, 0));
+            std.mem.writeInt(u32, header[40..44], length, .little);
+            std.crypto.hash.sha2.Sha256.hash(header[0..80], header[80..112], .{});
+            try replica.log.writePositionalAll(t.io, &header, 0);
+        }
+        try t.expectError(if (length == wal.max_write) error.WalChanged else error.CorruptWal, store.verifyRead(0, "abc", 3));
+    }
 }
 
 test "sealed baseline repairs either replica in place and preserves the source" {

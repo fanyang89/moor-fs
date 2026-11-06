@@ -8,6 +8,59 @@ const Range = struct { start: u64, end: u64, payload: ?[]const u8 };
 const Event = struct { position: u64, index: usize, start: bool };
 pub const Read = struct { offset: u64, bytes: []const u8, requested: usize };
 
+/// Streaming read verification retains only this request's expected bytes and
+/// the expected EOF byte. Untouched bytes keep their original caller value.
+pub const ReadEvidence = struct {
+    allocator: Allocator,
+    read: Read,
+    expected: []u8,
+    size: u64,
+    observed_size: u64,
+    tail: ?u8 = null,
+
+    pub fn init(allocator: Allocator, baseline_size: u64, observed_size: u64, read: Read) !ReadEvidence {
+        _ = try std.math.add(u64, read.offset, read.bytes.len);
+        return .{ .allocator = allocator, .read = read, .expected = try allocator.dupe(u8, read.bytes), .size = baseline_size, .observed_size = observed_size };
+    }
+
+    pub fn deinit(self: *ReadEvidence) void {
+        self.allocator.free(self.expected);
+    }
+
+    fn overlay(self: *ReadEvidence, start: u64, end: u64, payload: ?[]const u8) void {
+        if (self.observed_size > 0) {
+            const tail = self.observed_size - 1;
+            if (start <= tail and tail < end) self.tail = if (payload) |bytes| bytes[@intCast(tail - start)] else 0;
+        }
+        const lower = @max(start, self.read.offset);
+        const upper = @min(end, self.read.offset + self.expected.len);
+        if (lower >= upper) return;
+        const target = self.expected[@intCast(lower - self.read.offset)..@intCast(upper - self.read.offset)];
+        if (payload) |bytes| @memcpy(target, bytes[@intCast(lower - start)..][0..target.len]) else @memset(target, 0);
+    }
+
+    pub fn write(self: *ReadEvidence, offset: u64, payload: []const u8) !void {
+        if (payload.len == 0) return;
+        const end = try std.math.add(u64, offset, payload.len);
+        if (offset > self.size) self.overlay(self.size, offset, null);
+        self.overlay(offset, end, payload);
+        self.size = @max(self.size, end);
+    }
+
+    pub fn truncate(self: *ReadEvidence, length: u64) void {
+        self.overlay(@min(length, self.size), @max(length, self.size), null);
+        self.size = length;
+    }
+
+    pub fn verify(self: *const ReadEvidence, io: Io, files: [2]Io.File) !void {
+        if (self.size != self.observed_size) return error.WalDataSizeMismatch;
+        const count = if (self.read.offset >= self.size) 0 else @min(self.read.requested, self.size - self.read.offset);
+        if (count != self.read.bytes.len) return error.WalDataSizeMismatch;
+        try verifyBounds(io, files, self.size, self.tail);
+        if (!std.mem.eql(u8, self.expected, self.read.bytes)) return error.WalDataMismatch;
+    }
+};
+
 pub const Evidence = struct {
     allocator: Allocator,
     size: u64,
@@ -47,65 +100,34 @@ pub const Evidence = struct {
     /// Sweep interval boundaries with the latest operation winning overlaps.
     /// O(records log records), not quadratic for many small overlapping writes.
     pub fn verify(self: *const Evidence, io: Io, files: [2]Io.File) !void {
-        try self.verifyWindow(io, files, null);
-    }
-
-    /// Check the actual caller-visible bytes, not a second read that could hide
-    /// corruption in the already-filled buffer. An empty request checks size only.
-    pub fn verifyRead(self: *const Evidence, io: Io, files: [2]Io.File, read: Read) !void {
-        const expected = if (read.offset >= self.size) 0 else @min(read.requested, self.size - read.offset);
-        if (read.bytes.len != expected) return error.WalDataSizeMismatch;
-        try self.verifyWindow(io, files, read);
-    }
-
-    fn verifyWindow(self: *const Evidence, io: Io, files: [2]Io.File, read: ?Read) !void {
-        for (files) |file| {
-            if ((try file.stat(io)).size != self.size) return error.WalDataSizeMismatch;
-            // CIFS may retain the old inode size on an open writable handle
-            // after out-of-band server changes, even with cache=none/actimeo=0.
-            var byte: [1]u8 = undefined;
-            if (self.size > 0) {
-                if (try file.readPositionalAll(io, &byte, self.size - 1) != 1) return error.WalDataSizeMismatch;
-                // An open CIFS handle can zero-fill to its cached EOF after a
-                // server-side truncation. Check the byte too when WAL covers it.
-                var index = self.ranges.items.len;
-                while (index > 0) {
-                    index -= 1;
-                    const range = self.ranges.items[index];
-                    if (range.start <= self.size - 1 and range.end >= self.size) {
-                        try compare(range, self.size - 1, &byte);
-                        break;
-                    }
+        var tail: ?u8 = null;
+        if (self.size > 0) {
+            var index = self.ranges.items.len;
+            while (index > 0) {
+                index -= 1;
+                const range = self.ranges.items[index];
+                if (range.start <= self.size - 1 and range.end >= self.size) {
+                    tail = if (range.payload) |bytes| bytes[@intCast(self.size - 1 - range.start)] else 0;
+                    break;
                 }
             }
-            if (try file.readPositionalAll(io, &byte, self.size) != 0) return error.WalDataSizeMismatch;
         }
+        try verifyBounds(io, files, self.size, tail);
         var events: std.ArrayList(Event) = .empty;
         defer events.deinit(self.allocator);
-        const lower = if (read) |value| value.offset else 0;
-        const upper = if (read) |value| @min(self.size, try std.math.add(u64, value.offset, value.bytes.len)) else self.size;
         for (self.ranges.items, 0..) |range, index| {
-            const start = @max(range.start, lower);
-            const end = @min(range.end, upper);
-            if (start >= end) continue;
-            try events.append(self.allocator, .{ .position = start, .index = index, .start = true });
-            try events.append(self.allocator, .{ .position = end, .index = index, .start = false });
+            if (range.start >= self.size) continue;
+            try events.append(self.allocator, .{ .position = range.start, .index = index, .start = true });
+            try events.append(self.allocator, .{ .position = @min(range.end, self.size), .index = index, .start = false });
         }
         std.mem.sort(Event, events.items, {}, earlier);
         var active: std.PriorityQueue(usize, void, newer) = .empty;
         defer active.deinit(self.allocator);
-        var position: u64 = lower;
+        var position: u64 = 0;
         var cursor: usize = 0;
         while (cursor < events.items.len) {
             const next = events.items[cursor].position;
-            if (active.peek()) |index| {
-                if (position < next) {
-                    const range = self.ranges.items[index];
-                    if (read) |value| {
-                        try compare(range, position, value.bytes[@intCast(position - lower)..@intCast(next - lower)]);
-                    } else try verifyRange(io, files, range, position, next);
-                }
-            }
+            if (active.peek()) |index| if (position < next) try verifyRange(io, files, self.ranges.items[index], position, next);
             position = next;
             while (cursor < events.items.len and events.items[cursor].position == position) : (cursor += 1) {
                 const event = events.items[cursor];
@@ -118,6 +140,19 @@ pub const Evidence = struct {
         }
     }
 };
+
+fn verifyBounds(io: Io, files: [2]Io.File, size: u64, tail: ?u8) !void {
+    for (files) |file| {
+        if ((try file.stat(io)).size != size) return error.WalDataSizeMismatch;
+        // CIFS can retain stale size or zero-fill after server-side truncation.
+        var byte: [1]u8 = undefined;
+        if (size > 0) {
+            if (try file.readPositionalAll(io, &byte, size - 1) != 1) return error.WalDataSizeMismatch;
+            if (tail) |expected| if (byte[0] != expected) return error.WalDataMismatch;
+        }
+        if (try file.readPositionalAll(io, &byte, size) != 0) return error.WalDataSizeMismatch;
+    }
+}
 
 fn verifyRange(io: Io, files: [2]Io.File, range: Range, start: u64, end: u64) !void {
     var buffer: [64 * 1024]u8 = undefined;

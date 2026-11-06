@@ -913,6 +913,16 @@ handle size. Independent stat calls still validate size. It does not cache an
 authoritative content index or protect untouched/retired baseline ranges. See
 design sections 50–51.
 
+Read/size WAL validation now streams both complete logs with fixed read-ahead,
+retaining at most one 1 MiB record per replica plus a copy of the actual read
+window. It no longer retains full logs or builds/sorts per-record interval
+indexes for these requests. Later records overwrite the window's expected
+bytes and EOF evidence; every record is still authenticated, including records
+outside the request. A bounded-allocation test covers a WAL larger than 16 MiB
+within 4 MiB of verification heap scratch. Checkpoint/full-scrub validation keeps
+its existing interval algorithm. This reduces read-validation memory, not total
+WAL bytes transferred; NAS throughput has not been benchmarked. See section 52.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive
