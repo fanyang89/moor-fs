@@ -294,14 +294,45 @@ nas_fs:timeout_ms = 500
         smb(f"put {source} vfs-read/put.dat", share="write")
         smb(f"get vfs-read/put.dat {directory / 'vfs-put-download'}")
         assert (directory / "vfs-put-download").read_bytes() == b"short"
+        write_started = time.time_ns()
         smb(f"put {source} vfs-read/times.dat", share="write")
         timed_inode = client.call({"lookup": {"parent": parent, "name": "times.dat"}})[
             "attributes"
         ]["node"]["id"]
+
+        def current_times():
+            return client.call({"stat": {"inode": timed_inode}})["attributes"]["node"][
+                "times"
+            ]
+
+        def assert_modified_since(started):
+            times = current_times()
+            modified = times["mtime"]
+            nanos = modified["seconds"] * 1000000000 + modified["nanoseconds"]
+            assert started <= nanos <= time.time_ns(), times
+            assert times["ctime"] == modified
+            assert (
+                times["atime"]
+                == times["birthtime"]
+                == {"seconds": 1704067200, "nanoseconds": 0}
+            )
+            return times
+
+        assert_modified_since(write_started)
+        timed_writer = worker(url.replace("upload.dat", "times.dat"))
+        call(timed_writer, "open", flags=os.O_RDWR)
+        write_started = time.time_ns()
+        call(timed_writer, "write", offset=0, hex=b"clock".hex())
+        assert_modified_since(write_started)
+        truncate_started = time.time_ns()
+        call(timed_writer, "truncate", length=2)
+        assert_modified_since(truncate_started)
         dates = (
             "20:01:02-03:04:05 21:01:02-03:04:05 22:01:02-03:04:05 23:01:02-03:04:05"
         )
         smb(f"utimes vfs-read/times.dat {dates}", share="write")
+        # A later explicit timestamp must survive the writer's close checkpoint.
+        call(timed_writer, "close")
         expected_times = {
             field: {"seconds": calendar.timegm((year, 1, 2, 3, 4, 5)), "nanoseconds": 0}
             for field, year in (

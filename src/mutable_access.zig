@@ -204,6 +204,7 @@ pub const Access = struct {
         _ = try self.current();
         try self.data.write(bytes, offset);
         try self.validate();
+        if (bytes.len != 0) try self.touchModified();
     }
 
     pub fn truncate(self: *Access, length: u64) !void {
@@ -212,6 +213,26 @@ pub const Access = struct {
         _ = try self.current();
         try self.data.truncate(length);
         try self.validate();
+        try self.touchModified();
+    }
+
+    // Commit after the data operation, before acknowledging it. Recovery and
+    // checkpoints must not retimestamp data or overwrite a later explicit time.
+    // This is not atomic with the WAL: a failed call may still have changed data.
+    fn touchModified(self: *Access) !void {
+        const nanos = Io.Clock.real.now(self.io).toNanoseconds();
+        const time: m.Timestamp = .{
+            .seconds = @intCast(@divFloor(nanos, std.time.ns_per_s)),
+            .nanoseconds = @intCast(@mod(nanos, std.time.ns_per_s)),
+        };
+        if (!m.validTimestamp(time)) return error.InvalidTimestamp;
+        const inode = self.data.session.identity.inode;
+        const result = try self.metadata.apply(self.metadata.context, .{
+            .request_id = randomId(self.io),
+            .command = .{ .set_times = .{ .inode = inode, .mtime = time, .ctime = time } },
+        });
+        if (result.status != .ok) return error.MetadataConflict;
+        if (result.inode != inode) return error.InvalidResponse;
     }
 
     pub fn read(self: *Access, bytes: []u8, offset: u64) !usize {

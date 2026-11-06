@@ -63,7 +63,11 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 
 mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{inode}，以及rename_checked:{source:{inode,parent,name},parent,name}、remove_checked:{inode,parent,name}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；两种remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
 
-时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。时间更新独立于数据WAL，不隐含读写自动更新。
+时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。显式时间更新独立于数据WAL。
+
+核心Access在每次非空write和每次truncate完成双副本数据更新及验证后，以接入机实时时钟同一取样提交mtime/ctime，Raft确认后才返回成功。atime/birthtime保持原值，零字节write不更新；同长度truncate仍更新时间。时间提交失败或结果不确定会冻结共享会话，需释放全部句柄后重开。失败操作的数据可能已持久化，重开恢复不补造时间；WAL和时间没有跨存储原子性。sync/close、迁移、恢复、读和stat不自动改时间，因此不会覆盖后续显式设置值。创建及命名空间自动时间尚未接入。
+
+每个上述核心操作新增一次Raft提交和一个receipt，包括VFS拆分的每个64KiB写段；当前8192个集群共享回执没有GC，到达上限会使新时间提交失败并冻结写会话。这是当前原型的写入容量及延迟限制，不能将本轮视为已支持持续大文件写入。
 
 C ABI新增nas_ipc_set_times，mask位为atime=1、mtime=2、ctime=4、birthtime=8；零mask本地成功且不发送请求，无效mask/时间在发送前返回EINVAL。nas_attr新增nas_times，调用方及模块必须同步重建；新set_times命令要求统一升级全部Raft节点和核心。
 

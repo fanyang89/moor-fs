@@ -42,7 +42,8 @@ permissions, disconnect/restart semantics and limits. The interface also exposes
 stat, component lookup, bounded directory pages and receipt-backed namespace
 mutations. An experimental native Samba VFS supports reads, file creation,
 writes, truncation, sync, mkdir, non-overwriting rename, removal and explicit persistent
-SMB timestamp updates (automatic read/write timestamp maintenance is pending), and connects directly to
+SMB timestamp updates, plus automatic mtime/ctime updates on WAL writes and truncation,
+and connects directly to
 this core, without FUSE:
 
 ```sh
@@ -109,6 +110,13 @@ retained request receipts. Receipts are not
 silently evicted; at the receipt limit new request IDs are rejected, while known
 IDs remain replayable. An explicit deduplication retention protocol and capacity
 planning must replace these prototype limits before deployment.
+
+Each nonempty mutable WAL write and each truncate also commits mtime/ctime through
+Raft before returning success, consuming one receipt per core operation (including
+each 64 KiB native-VFS segment). This adds metadata latency and makes the receipt
+limit a write-volume limit too. Failed calls may have durable data without updated
+timestamps; data WAL and timestamp metadata are not one atomic transaction. Reads
+do not update atime, and automatic creation/namespace timestamps remain pending.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.

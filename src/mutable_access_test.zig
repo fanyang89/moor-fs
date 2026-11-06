@@ -353,6 +353,89 @@ test "mutable access serializes owners and reconciles acknowledged WAL after reo
     try t.expectEqualStrings("durable", buffer[0..7]);
 }
 
+test "mutable writes persist modification times without retimestamping checkpoints or recovery" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.seed("original");
+    var session = try f.open();
+    defer session.close();
+    const original = f.meta.state.get(2).?.times;
+    try t.expectEqualDeep(m.Times{}, original); // Migration is not a client write.
+    const before = std.Io.Clock.real.now(t.io).toNanoseconds();
+    try session.write("new", 0);
+    const after = std.Io.Clock.real.now(t.io).toNanoseconds();
+    const written = f.meta.state.get(2).?.times;
+    const written_ns = @as(i96, written.mtime.seconds) * std.time.ns_per_s + written.mtime.nanoseconds;
+    try t.expect(written_ns >= before and written_ns <= after);
+    try t.expectEqualDeep(written.mtime, written.ctime);
+    try t.expectEqualDeep(original.atime, written.atime);
+    try t.expectEqualDeep(original.birthtime, written.birthtime);
+    const explicit: m.Timestamp = .{ .seconds = 123, .nanoseconds = 456700 };
+    _ = try f.meta.state.apply(.{ .request_id = 100, .command = .{ .set_times = .{ .inode = 2, .mtime = explicit, .ctime = explicit } } });
+    const saved = f.meta.state.get(2).?.times;
+    try session.write("", 0);
+    var buffer: [8]u8 = undefined;
+    _ = try session.read(&buffer, 0);
+    _ = try session.size();
+    try session.sync();
+    try session.collect();
+    try t.expectEqualDeep(saved, f.meta.state.get(2).?.times);
+    session.close();
+    session = try f.open();
+    try t.expectEqualDeep(saved, f.meta.state.get(2).?.times);
+    try session.truncate(0);
+    const truncated = f.meta.state.get(2).?.times;
+    try t.expect(truncated.mtime.seconds > explicit.seconds);
+    try t.expectEqualDeep(truncated.mtime, truncated.ctime);
+    try t.expectEqualDeep(original.atime, truncated.atime);
+    try t.expectEqualDeep(original.birthtime, truncated.birthtime);
+    // Last release without checkpoint retains acknowledged timestamps too.
+    session.close();
+    session = try f.open();
+    try t.expectEqualDeep(truncated, f.meta.state.get(2).?.times);
+    try t.expectEqual(@as(u64, 0), try session.size());
+}
+
+test "timestamp metadata rejection and lost reply freeze writes while preserving recoverable data" {
+    for ([_]bool{ false, true }) |lost_reply| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var session = try f.open();
+        const original = f.meta.state.get(2).?.times;
+        f.meta.conflict = !lost_reply;
+        f.meta.lose_reply = lost_reply;
+        try t.expectError(if (lost_reply) error.ReplyLost else error.MetadataConflict, session.write("kept", 0));
+        const observed = f.meta.state.get(2).?.times;
+        if (lost_reply) {
+            try t.expect(observed.mtime.seconds > original.mtime.seconds);
+        } else {
+            try t.expectEqualDeep(original, observed);
+        }
+        var bytes: [4]u8 = undefined;
+        try t.expectError(error.WalSessionFailed, session.read(&bytes, 0));
+        try t.expectError(error.WalSessionFailed, session.truncate(0));
+        try t.expectError(error.WalSessionFailed, session.sync());
+        session.close();
+        f.meta.conflict = false;
+        session = try f.open();
+        defer session.close();
+        try t.expectEqual(@as(usize, 4), try session.read(&bytes, 0));
+        try t.expectEqualStrings("kept", &bytes);
+        // Recovery cannot invent the time of an interrupted operation.
+        try t.expectEqualDeep(observed, f.meta.state.get(2).?.times);
+    }
+}
+
+test "rejected data write does not update timestamps" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    const original = f.meta.state.get(2).?.times;
+    try t.expectError(error.InvalidRange, session.write("x", std.math.maxInt(u64)));
+    try t.expectEqualDeep(original, f.meta.state.get(2).?.times);
+}
+
 test "mutable attachment reply loss reopens the bound generation instead of recreating it" {
     var f = try Fixture.init();
     defer f.deinit();

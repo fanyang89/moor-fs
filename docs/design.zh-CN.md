@@ -1078,3 +1078,13 @@ Node新增Times，包含atime/mtime/ctime/birthtime，各自为i64 Unix秒与u32
 Debug/Safe各116项、桥接Debug/Safe、本地Debug/双CIFS Safe真实SMB E2E通过；配套模块和Safe FUSE兼容构建通过。覆盖逐请求LMDB重启、部分更新、旧回执不覆盖后续更新、旧记录默认值、非法快照不污染数据库、桥接纳秒和mask验证，以及SMB四字段/仅mtime/目录/只读拒绝和核心重启后allinfo一致。日志前缀为/tmp/opencode/nas-times-。
 
 本轮只保证显式设置的逻辑时间持久化。实测普通上传不触发Samba fntimes，创建及普通读写仍保留默认或此前显式时间；自动atime/mtime/ctime/birthtime需后续接入核心写入、检查点和恢复协议，不能依赖Samba隐式回调。时间不与数据WAL原子提交，不反映底层NAS宿主文件时间；Windows/macOS和物理NAS仍待验收。
+
+## 74. 核心写入和截断自动更新mtime/ctime
+
+Access.write非空写和Access.truncate在双副本WAL/数据更新及验证之后，以核心实时时钟同一取样执行set_times，更新mtime/ctime并等待Raft确认，再向调用方确认成功。每次truncate（含同长度）均更新；零字节write不更新。atime/birthtime保持原值。此路径由核心负责，原生VFS及WAL FUSE均经过它，不依赖Samba fntimes。
+
+自动时间提交失败、业务拒绝或回复丢失沿用Access冻结语义，所有共享句柄失败直至全部释放重开。数据可能已经持久化，不回滚。恢复不补造中断操作的时间：拒绝时可能留下旧时间，丢回复时可能已有新时间。fsync/close、检查点、迁移、恢复、读取、stat不更新时间，避免覆盖之后显式设定的值；不把“打开旧文件”误作新写。WAL与时间仍非原子提交，时钟回拨可能使时间倒退。
+
+代价：每个非空写/截断新增一次Raft提交并消耗一个receipt，64KiB拆分写每段都提交。8192个集群共享回执上限且尚无GC，现在也限制累计写操作量；耗尽后时间提交失败、写会话冻结，恢复checkpoint也可能因容量耗尽失败。后续必须解决自动时间的有界去重/持久化及回执生命周期，不能以提高上限代替协议。本轮尚不实现创建、目录变更和读atime的自动维护。
+
+验证：Debug/Safe各119项、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过，后者继续覆盖13种损坏、4个修复SIGKILL及6个基线生命周期SIGKILL。新增测试验证普通put、未关闭写句柄及截断自动时间，显式更新优先于随后close/checkpoint；单测覆盖时间被拒/丢回复冻结、恢复数据但不重设时间、非法写不更新、零写/迁移/检查点不覆盖。日志前缀/tmp/opencode/nas-auto-times-。
