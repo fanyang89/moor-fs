@@ -21,4 +21,5 @@ pub const Change = union(enum) {
     rename_checked: m.RenameChecked,
     remove_checked: m.Entry,
     path_guarded: m.GuardedChange,
+    set_times: m.TimeUpdate,
 };

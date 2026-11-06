@@ -257,6 +257,14 @@ def main():
             ]
             lib.nas_ipc_remove.argtypes = [c.c_void_p, c.c_uint64, c.c_uint64]
 
+            class Time(c.Structure):
+                _fields_ = [("seconds", c.c_int64), ("nanoseconds", c.c_uint32)]
+
+            class Times(c.Structure):
+                _fields_ = [
+                    (name, Time) for name in ("atime", "mtime", "ctime", "birthtime")
+                ]
+
             class Attr(c.Structure):
                 _fields_ = [
                     ("inode", c.c_uint64),
@@ -264,7 +272,17 @@ def main():
                     ("size", c.c_uint64),
                     ("directory", c.c_int),
                     ("name", c.c_char * 256),
+                    ("times", Times),
                 ]
+
+            lib.nas_ipc_stat.argtypes = [c.c_void_p, c.c_uint64, c.POINTER(Attr)]
+            lib.nas_ipc_set_times.argtypes = [
+                c.c_void_p,
+                c.c_uint64,
+                c.POINTER(Times),
+                c.c_uint32,
+                c.c_uint64,
+            ]
 
             lib.nas_ipc_rename_checked.argtypes = [
                 c.c_void_p,
@@ -434,6 +452,49 @@ def main():
                             },
                         ),
                         (
+                            {
+                                "change": {
+                                    "request_id": 905,
+                                    "mutation": {
+                                        "set_times": {
+                                            "inode": 44,
+                                            "atime": None,
+                                            "mtime": {
+                                                "seconds": 123,
+                                                "nanoseconds": 456700,
+                                            },
+                                            "ctime": None,
+                                            "birthtime": None,
+                                        }
+                                    },
+                                }
+                            },
+                            {"result": {"change": {"status": "ok", "inode": 44}}},
+                        ),
+                        (
+                            {"stat": {"inode": 44}},
+                            {
+                                "result": {
+                                    "attributes": {
+                                        "size": 0,
+                                        "node": {
+                                            "id": 44,
+                                            "parent": 1,
+                                            "name": "clock",
+                                            "kind": "file",
+                                            "replicas": "two",
+                                            "times": {
+                                                "mtime": {
+                                                    "seconds": 123,
+                                                    "nanoseconds": 456700,
+                                                }
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        ),
+                        (
                             combined_open,
                             {
                                 "result": {
@@ -550,6 +611,32 @@ def main():
                         == 0
                         and inode.value == 44
                         and opened.value == 10
+                    )
+                    times = Times(mtime=Time(seconds=123, nanoseconds=1000000000))
+                    assert (
+                        lib.nas_ipc_set_times(client, 44, c.byref(times), 0, 905) == 0
+                    )
+                    assert (
+                        lib.nas_ipc_set_times(client, 44, c.byref(times), 16, 905)
+                        == errno.EINVAL
+                    )
+                    assert (
+                        lib.nas_ipc_set_times(client, 44, c.byref(times), 2, 905)
+                        == errno.EINVAL
+                    )
+                    times.mtime.nanoseconds = 456700
+                    assert (
+                        lib.nas_ipc_set_times(client, 44, c.byref(times), 2, 905) == 0
+                    )
+                    queried = Attr()
+                    assert lib.nas_ipc_stat(client, 44, c.byref(queried)) == 0
+                    assert (
+                        queried.times.mtime.seconds == 123
+                        and queried.times.mtime.nanoseconds == 456700
+                    )
+                    assert (
+                        queried.times.birthtime.seconds == 1704067200
+                        and queried.name == b"clock"
                     )
                     assert (
                         lib.nas_ipc_create_open(

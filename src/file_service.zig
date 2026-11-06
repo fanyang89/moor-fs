@@ -106,6 +106,7 @@ pub const Service = struct {
             .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
             .rename => |op| .{ .rename = .{ .id = op.inode, .parent = op.parent, .name = op.name } },
             .rename_checked => |op| .{ .rename_checked = op },
+            .set_times => |op| .{ .set_times = op },
             .path_guarded => |op| blk: {
                 switch (op.mutation) {
                     .remove => |source| if (self.sessions.contains(source.inode)) return error.FileBusy,

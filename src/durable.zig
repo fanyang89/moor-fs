@@ -278,6 +278,13 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .set_times => |update| {
+                var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
+                const result = m.updateTimes(&node, update);
+                if (result != .ok) return .{ .status = result };
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = update.inode };
+            },
             .path_guarded => |r| {
                 if (!m.validPathGuards(r)) return .{ .status = .invalid_request };
                 for (r.ancestors) |entry| {

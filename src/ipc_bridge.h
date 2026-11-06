@@ -5,10 +5,13 @@
 #include <stddef.h>
 struct nas_ipc;
 #define NAS_MAX_PATH_GUARDS 32
+struct nas_time { int64_t seconds; uint32_t nanoseconds; };
+struct nas_times { struct nas_time atime, mtime, ctime, birthtime; };
 struct nas_attr {
     uint64_t inode, parent, size;
     int directory;
     char name[256];
+    struct nas_times times;
 };
 struct nas_page {
     struct nas_attr entries[16];
@@ -34,6 +37,8 @@ int nas_ipc_rename_guarded(struct nas_ipc *, const struct nas_attr *, uint64_t, 
 int nas_ipc_remove_guarded(struct nas_ipc *, const struct nas_attr *, const struct nas_attr *, size_t, uint64_t);
 int nas_ipc_create_guarded(struct nas_ipc *, uint64_t, const char *, int, const struct nas_attr *, size_t, uint64_t, uint64_t *);
 int nas_ipc_create_open(struct nas_ipc *, uint64_t, const char *, int, const struct nas_attr *, size_t, uint64_t, uint64_t *, uint64_t *);
+/* mask: atime=1, mtime=2, ctime=4, birthtime=8; omitted fields stay unchanged. */
+int nas_ipc_set_times(struct nas_ipc *, uint64_t, const struct nas_times *, uint32_t, uint64_t);
 int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
 int nas_ipc_write(struct nas_ipc *, uint64_t, uint64_t, const void *, size_t);
 int nas_ipc_truncate(struct nas_ipc *, uint64_t, uint64_t);

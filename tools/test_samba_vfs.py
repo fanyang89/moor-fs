@@ -12,6 +12,7 @@ import time
 import sys
 import select
 import errno
+import calendar
 
 from test_file_ipc import Client
 
@@ -129,6 +130,7 @@ nas_fs:timeout_ms = 500
             ],
             capture_output=True,
             text=True,
+            env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
             timeout=40,
         )
         if success:
@@ -292,6 +294,58 @@ nas_fs:timeout_ms = 500
         smb(f"put {source} vfs-read/put.dat", share="write")
         smb(f"get vfs-read/put.dat {directory / 'vfs-put-download'}")
         assert (directory / "vfs-put-download").read_bytes() == b"short"
+        smb(f"put {source} vfs-read/times.dat", share="write")
+        timed_inode = client.call({"lookup": {"parent": parent, "name": "times.dat"}})[
+            "attributes"
+        ]["node"]["id"]
+        dates = (
+            "20:01:02-03:04:05 21:01:02-03:04:05 22:01:02-03:04:05 23:01:02-03:04:05"
+        )
+        smb(f"utimes vfs-read/times.dat {dates}", share="write")
+        expected_times = {
+            field: {"seconds": calendar.timegm((year, 1, 2, 3, 4, 5)), "nanoseconds": 0}
+            for field, year in (
+                ("birthtime", 2020),
+                ("atime", 2021),
+                ("mtime", 2022),
+                ("ctime", 2023),
+            )
+        }
+        assert (
+            client.call({"stat": {"inode": timed_inode}})["attributes"]["node"]["times"]
+            == expected_times
+        )
+        smb("utimes vfs-read/times.dat -1 -1 19:01:02-03:04:05 -1", share="write")
+        expected_times["mtime"]["seconds"] = calendar.timegm((2019, 1, 2, 3, 4, 5))
+        assert (
+            client.call({"stat": {"inode": timed_inode}})["attributes"]["node"]["times"]
+            == expected_times
+        )
+        smb(f"utimes vfs-read {dates}", share="write")
+        assert (
+            client.call({"stat": {"inode": parent}})["attributes"]["node"]["times"][
+                "birthtime"
+            ]
+            == expected_times["birthtime"]
+        )
+        assert "NT_STATUS_ACCESS_DENIED" in smb(
+            f"utimes vfs-read/times.dat {dates}", success=False
+        )
+
+        def time_lines():
+            result = smb("allinfo vfs-read/times.dat")
+            return [
+                line
+                for line in result.splitlines()
+                if line.startswith(
+                    ("create_time:", "access_time:", "write_time:", "change_time:")
+                )
+            ]
+
+        saved_times = time_lines()
+        assert len(saved_times) == 4
+        for line, year in zip(saved_times, (2020, 2021, 2019, 2023)):
+            assert str(year) in line and "03:04:05" in line, line
         race = [
             worker(url.replace("upload.dat", "exclusive-race.dat")) for _ in range(2)
         ]
@@ -666,6 +720,23 @@ nas_fs:timeout_ms = 500
         )
         smb(f"get vfs-read/upload.dat {directory / 'vfs-after-timeout'}")
         assert (directory / "vfs-after-timeout").read_bytes() == b"repair"
+        client.close()
+        client = None
+        core.terminate()
+        core.wait(timeout=10)
+        (runtime / "core.sock").unlink()
+        runtime.rmdir()
+        core = spawn(core.args, "core-restarted.log")
+        deadline = time.monotonic() + 15
+        while not (runtime / "core.sock").exists():
+            assert core.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        client = Client(runtime / "core.sock")
+        assert (
+            client.call({"stat": {"inode": timed_inode}})["attributes"]["node"]["times"]
+            == expected_times
+        )
+        assert time_lines() == saved_times
         print(
             "PASS: native Samba VFS SMB3 reads/writes, namespace mutations, writer exclusion, checkpoints, corruption recovery and paused-core deadline without FUSE; host paths rejected",
             flush=True,

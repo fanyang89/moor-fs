@@ -37,6 +37,24 @@ pub const Kind = enum { directory, file };
 pub const Entry = struct { inode: u64, parent: u64, name: []const u8 };
 pub const RenameChecked = struct { source: Entry, parent: u64, name: []const u8 };
 pub const PathCheck = struct { source: Entry, ancestors: []const Entry };
+pub const Timestamp = struct { seconds: i64 = 1704067200, nanoseconds: u32 = 0 };
+pub const Times = struct { atime: Timestamp = .{}, mtime: Timestamp = .{}, ctime: Timestamp = .{}, birthtime: Timestamp = .{} };
+pub const TimeUpdate = struct { inode: u64, atime: ?Timestamp = null, mtime: ?Timestamp = null, ctime: ?Timestamp = null, birthtime: ?Timestamp = null };
+
+pub fn validTimestamp(value: Timestamp) bool {
+    return value.seconds >= -11644473600 and value.seconds <= 253402300799 and value.nanoseconds < 1000000000;
+}
+
+pub fn updateTimes(node: *Node, update: TimeUpdate) Status {
+    if (update.atime == null and update.mtime == null and update.ctime == null and update.birthtime == null) return .invalid_request;
+    inline for (.{ "atime", "mtime", "ctime", "birthtime" }) |field| {
+        if (@field(update, field)) |value| if (!validTimestamp(value)) return .invalid_request;
+    }
+    inline for (.{ "atime", "mtime", "ctime", "birthtime" }) |field| {
+        if (@field(update, field)) |value| @field(node.times, field) = value;
+    }
+    return .ok;
+}
 pub const max_path_guards = 32;
 pub const GuardedChange = struct {
     ancestors: []const Entry,
@@ -81,6 +99,7 @@ pub const Node = struct {
     replicas: Replicas,
     current_version: u64 = 0,
     mutable_file: ?MutableFile = null,
+    times: Times = .{},
 };
 pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
@@ -95,6 +114,7 @@ pub const Command = union(enum) {
     rename_checked: RenameChecked,
     remove_checked: Entry,
     path_guarded: GuardedChange,
+    set_times: TimeUpdate,
 };
 pub const Request = struct { version: u32 = 1, request_id: u64, command: Command };
 pub const Status = enum(u8) {
@@ -196,6 +216,11 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .set_times => |update| {
+                const i = self.find(update.inode) orelse return .{ .status = .not_found };
+                const result = updateTimes(&self.nodes.items[i], update);
+                return .{ .status = result, .inode = if (result == .ok) update.inode else 0 };
+            },
             .path_guarded => |c| {
                 if (!validPathGuards(c)) return .{ .status = .invalid_request };
                 for (c.ancestors) |entry| {
@@ -370,6 +395,9 @@ pub fn validateSnapshot(data: Snapshot) !void {
     if (root.id != root_id or root.parent != 0 or root.name.len != 0 or root.kind != .directory) return error.InvalidSnapshot;
     for (data.nodes, 0..) |node, i| {
         if (node.id == 0 or node.id >= data.next_id) return error.InvalidSnapshot;
+        inline for (.{ "atime", "mtime", "ctime", "birthtime" }) |field| {
+            if (!validTimestamp(@field(node.times, field))) return error.InvalidSnapshot;
+        }
         if (node.mutable_file) |file| {
             if (node.kind != .file or node.current_version != 0 or node.replicas != .two or mutableStatus(file, data.backends) != .ok) return error.InvalidSnapshot;
         }

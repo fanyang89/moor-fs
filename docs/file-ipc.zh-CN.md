@@ -63,6 +63,10 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 
 mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{inode}，以及rename_checked:{source:{inode,parent,name},parent,name}、remove_checked:{inode,parent,name}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；两种remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
 
+时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。时间更新独立于数据WAL，不隐含读写自动更新。
+
+C ABI新增nas_ipc_set_times，mask位为atime=1、mtime=2、ctime=4、birthtime=8；零mask本地成功且不发送请求，无效mask/时间在发送前返回EINVAL。nas_attr新增nas_times，调用方及模块必须同步重建；新set_times命令要求统一升级全部Raft节点和核心。
+
 `change.request_id`不同于外层关联号：它是全Raft集群共享的非零去重ID，调用者应生成随机u64并对同一修改保持ID和完整参数。重连后可重放；不同请求复用ID返回request_conflict。Raft结果在result.change.status中，包括ok、not_found、already_exists、not_empty等；这类业务拒绝的顶层err仍为null。FileBusy等本地前置拒绝不会写入Raft receipt，可在句柄释放后重试。receipt容量仍有上限，未实现GC。
 
 旧rename/remove保留按inode操作的语义。checked变体在同一次状态机执行/LMDB事务中核对源inode的parent和精确name，再修改；源inode消失或任一字段不同返回entry_conflict，并保存冲突回执。name应取lookup返回的规范名称，而不是用户输入的大小写别名。单独的checked变体仅保护最终源目录项。

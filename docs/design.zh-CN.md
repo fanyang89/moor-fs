@@ -1068,3 +1068,13 @@ Debug/Safe各115项通过：新增服务测试覆盖容量预检、写者排他�
 C ABI Debug/Safe受控socket测试覆盖无回复写、半头/半正文、持续碎片、超时后不重发、无效配置及满队列快速失败。真实Raft本地Debug/双CIFS Safe SMB E2E通过：已有读句柄下SIGSTOP核心，500 ms配置使请求有界失败；共享根检查先失败，Samba映射ACCESS_DENIED，日志确认Connection timed out。再次操作立即失败，SIGCONT后新连接读取一致；既有读写、路径和WAL损坏恢复用例继续通过。配套模块和Safe FUSE兼容构建通过。
 
 这是桥接等待上限，不是服务端取消或fencing。已收到的写/创建可能在超时后完成，后端锁可能直到核心恢复/操作完成才释放；不回滚。大SMB请求的多个IPC分段各自计时，不声称整个SMB请求或操作系统调度有同一总时限。
+
+## 73. SMB显式时间属性持久化
+
+Node新增Times，包含atime/mtime/ctime/birthtime，各自为i64 Unix秒与u32纳秒。set_times按inode更新非null字段，先验证整组再修改，适用于文件和目录；内存状态机与LMDB事务遵循同一规则，成功/拒绝回执沿用既有去重机制。合法秒范围[-11644473600,253402300799]、纳秒小于十亿；快照校验拒绝非法值。旧记录缺少字段时默认2024-01-01 UTC，旧命令序列化及回执摘要不变。
+
+常驻核心在服务锁内转交元数据修改。C ABI增加时间结构及masked setter，VFS stat返回持久值、fntimes处理省略字段和UTIME_NOW，只读共享拒绝设置。nas_attr及其数组布局改变，桥接/模块/调用方必须一起重建，所有Raft节点和核心统一升级；不支持混合旧二进制。
+
+Debug/Safe各116项、桥接Debug/Safe、本地Debug/双CIFS Safe真实SMB E2E通过；配套模块和Safe FUSE兼容构建通过。覆盖逐请求LMDB重启、部分更新、旧回执不覆盖后续更新、旧记录默认值、非法快照不污染数据库、桥接纳秒和mask验证，以及SMB四字段/仅mtime/目录/只读拒绝和核心重启后allinfo一致。日志前缀为/tmp/opencode/nas-times-。
+
+本轮只保证显式设置的逻辑时间持久化。实测普通上传不触发Samba fntimes，创建及普通读写仍保留默认或此前显式时间；自动atime/mtime/ctime/birthtime需后续接入核心写入、检查点和恢复协议，不能依赖Samba隐式回调。时间不与数据WAL原子提交，不反映底层NAS宿主文件时间；Windows/macOS和物理NAS仍待验收。

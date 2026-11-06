@@ -55,7 +55,7 @@ nt acl support = no
 
 这里的 `/` 是核心inode 1对应的**虚拟根**，不是导出宿主根。模块要求该路径；所有分量通过IPC查找，不读取宿主同名路径，不支持符号链接与命名流。模块连接时拒绝启用SMB2 leases或oplocks的配置。可写共享改为 `read only = no`，必须保留 `strict sync = yes`，否则连接被拒绝。
 
-当前仅同OS用户、单命名空间实验：smbd有效用户必须能进入核心0700目录并访问socket。尚无SMB用户到核心ACL的映射。属性由当前uid/gid、0444/0555权限（可写共享增加0222）、固定2024-01-01时间生成；磁盘空间是占位值，不是NAS容量统计。虚拟device ID固定，不支持在同一Samba实例混用独立元数据集群。
+当前仅同OS用户、单命名空间实验：smbd有效用户必须能进入核心0700目录并访问socket。尚无SMB用户到核心ACL的映射。权限由当前uid/gid、0444/0555模式（可写共享增加0222）生成；时间读取持久化元数据，未设置时默认2024-01-01。磁盘空间是占位值，不是NAS容量统计。虚拟device ID固定，不支持在同一Samba实例混用独立元数据集群。
 
 每个VFS连接持有独立IPC连接，每文件使用核心句柄。Samba要求的本机fd以 `/dev/null` 占位（写句柄使用O_RDWR），仅用于fd生命周期和F_GETFL/F_SETFL/F_GETFD/F_SETFD；不用于文件内容、命名空间、文件锁或属性。所有读取经核心验证。路径引用和目录不占核心数据句柄；数据文件真正open后才获取共享Access。
 
@@ -87,7 +87,7 @@ VFS改名/删除使用path_guarded命令：将查找返回的源inode、parent�
 
 文件/目录创建同样核对父目录到根的条件链，再在同一事务内创建并强制双副本策略。真实数据文件open使用open_guarded：leader ReadIndex后通过一次LMDB只读事务检查祖先和源，再建立核心句柄；此只读检查不产生Raft回执。核心锁覆盖检查到本地句柄登记，拒绝旧路径不会先迁移文件或占用写句柄。旧句柄仍可跨改名访问原inode。其他元数据写者可能在检查快照之后修改路径，此处不提供跨服务fencing。
 
-每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
+每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL、自动时间更新和跨节点fencing仍待实现。
 
 先构建模块，再运行：
 
@@ -119,7 +119,17 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 
 源目录项CAS验证：内存/LMDB对照与逐请求重启测试覆盖跨目录移动、名称变化、精确大小写、删除后名称复用、成功/冲突回执重放；真实Raft SMB/IPC混合测试确认移动后旧请求被拒、原文件和同名新文件均保留。Debug/Safe各111项单测、C ABI Debug/Safe及本地/双CIFS E2E通过，日志：`/tmp/opencode/nas-entry-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。新增checked命令要求Raft节点与核心/桥接统一升级，不支持混合旧二进制运行。
 
-这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL/时间属性、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
+这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL、自动时间更新、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
+
+### 显式时间属性
+
+文件和目录的atime、mtime、ctime、birthtime由Raft/LMDB持久化，VFS stat读取这些值。fntimes仅更新客户端提供的字段，省略字段保持原值；UTIME_NOW使用接入进程的实时时钟，同一次调用共用一个取样。只读共享拒绝设置。更新按inode执行并保存Raft回执，不因改名改变目标身份；不要求取得数据写句柄。
+
+内部保存有符号Unix秒和纳秒，允许秒范围[-11644473600,253402300799]、纳秒小于1000000000；SMB线上精度受协议限制。旧记录缺少时间字段时默认2024-01-01 UTC，新增节点当前也采用此默认值。普通上传实测不会自动调用fntimes；本轮不提供创建/读写/改名自动更新时间，也不保证时间与数据WAL原子持久化。底层NAS文件的宿主时间不是这些逻辑属性的来源。
+
+`nas_attr`增加时间字段，包含它的目录页与祖先数组布局也改变；必须一起重建桥接库、模块及C ABI调用方，并统一升级Raft节点与核心，不支持新旧二进制混用。
+
+验证：Debug/Safe各116项单测、桥接Debug/Safe、本地Debug和双CIFS Safe SMB E2E通过。单测覆盖逐请求LMDB重启、部分更新、回执重放、旧字段默认值及非法快照不修改数据库；桥接验证mask、范围、nullable字段及纳秒转换。SMB验证四时间设置、仅mtime更新、目录设置、只读拒绝、allinfo及核心重启后保留。日志：`/tmp/opencode/nas-times-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
 
 祖先条件验证：内存/LMDB逐请求重启和完整快照对照覆盖源祖先变化、旧祖先名称复用、目标目录变化、缺链及成功/拒绝回执重放；形状测试覆盖32项边界、超限、重复、环。真实SMB/IPC测试移动祖先目录后拒绝旧改名/删除，恢复路径后仍重放原拒绝；18层长名称目录的实际SMB改名验证超过旧4 KiB的Raft请求。Debug/Safe各113项、C ABI Debug/Safe、本地Debug/双CIFS Safe通过；日志：`/tmp/opencode/nas-ancestors-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
 

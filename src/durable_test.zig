@@ -203,6 +203,63 @@ test "guarded creation enforces replicas and path checks are read-only snapshots
     try t.expect(memory.lookup(2, "wrong") == null);
 }
 
+test "timestamps persist partial updates and receipts while rejecting invalid snapshots" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const initial: m.Request = .{ .request_id = 3, .command = .{ .set_times = .{
+        .inode = 3,
+        .atime = .{ .seconds = 1, .nanoseconds = 123456700 },
+        .mtime = .{ .seconds = 2 },
+        .ctime = .{ .seconds = 253402300799, .nanoseconds = 999999900 },
+        .birthtime = .{ .seconds = -11644473600 },
+    } } };
+    const commands = [_]m.Request{
+        create,
+        .{ .request_id = 2, .command = .{ .create = .{ .parent = 2, .name = "file", .kind = .file } } },
+        initial,
+        .{ .request_id = 4, .command = .{ .set_times = .{ .inode = 3, .mtime = .{ .seconds = 10, .nanoseconds = 999999999 } } } },
+        initial,
+        .{ .request_id = 6, .command = .{ .set_times = .{ .inode = 3, .atime = .{ .seconds = 99 }, .mtime = .{ .seconds = 0, .nanoseconds = 1000000000 } } } },
+        .{ .request_id = 7, .command = .{ .set_times = .{ .inode = 3, .mtime = .{ .seconds = -11644473601 } } } },
+        .{ .request_id = 8, .command = .{ .set_times = .{ .inode = 999, .mtime = .{} } } },
+        .{ .request_id = 9, .command = .{ .set_times = .{ .inode = 2, .atime = .{ .seconds = 100 } } } },
+        .{ .request_id = 10, .command = .{ .rename = .{ .id = 3, .parent = 1, .name = "moved" } } },
+        initial,
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .invalid_request, .invalid_request, .not_found, .ok, .ok, .ok };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqualDeep(initial.command.set_times.atime.?, memory.get(3).?.times.atime);
+    try t.expectEqual(@as(i64, 10), memory.get(3).?.times.mtime.seconds);
+    try t.expectEqual(@as(i64, 100), memory.get(2).?.times.atime.seconds);
+    const legacy = try std.json.parseFromSlice(m.Node, t.allocator, "{\"id\":99,\"parent\":1,\"name\":\"legacy\",\"kind\":\"file\",\"replicas\":\"two\"}", .{});
+    defer legacy.deinit();
+    try t.expectEqualDeep(m.Times{}, legacy.value.times);
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const before = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(before);
+    memory.nodes.items[2].times.atime.nanoseconds = 1000000000;
+    const invalid = try std.json.Stringify.valueAlloc(t.allocator, protocol.Image{ .index = 99, .term = 1, .state = memory.snapshot() }, .{});
+    defer t.allocator.free(invalid);
+    try t.expectError(error.InvalidSnapshot, store.restore(99, 1, invalid));
+    const after = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(after);
+    try t.expectEqualStrings(before, after);
+}
+
 test "directory pages use exclusive case-folded cursors and own their data" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

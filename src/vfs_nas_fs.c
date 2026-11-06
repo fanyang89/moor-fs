@@ -49,6 +49,9 @@ static void nas_disconnect(struct vfs_handle_struct *h)
     if (h->data != NULL) nas_free(&h->data);
 }
 
+static struct timespec nas_timespec(const struct nas_time *time)
+{ return (struct timespec){ .tv_sec = time->seconds, .tv_nsec = time->nanoseconds }; }
+
 static void nas_stat_value(struct vfs_handle_struct *h, const struct nas_attr *a, SMB_STRUCT_STAT *st)
 {
     ZERO_STRUCTP(st);
@@ -62,9 +65,10 @@ static void nas_stat_value(struct vfs_handle_struct *h, const struct nas_attr *a
     st->st_ex_size = a->size;
     st->st_ex_blksize = 65536;
     st->st_ex_blocks = (a->size + 511) / 512;
-    /* Metadata does not yet persist timestamps. Use a stable synthetic epoch. */
-    st->st_ex_atime.tv_sec = st->st_ex_mtime.tv_sec = 1704067200;
-    st->st_ex_ctime.tv_sec = st->st_ex_btime.tv_sec = 1704067200;
+    st->st_ex_atime = nas_timespec(&a->times.atime);
+    st->st_ex_mtime = nas_timespec(&a->times.mtime);
+    st->st_ex_ctime = nas_timespec(&a->times.ctime);
+    st->st_ex_btime = nas_timespec(&a->times.birthtime);
 }
 
 static uint64_t nas_inode(struct vfs_handle_struct *h, const struct files_struct *fsp)
@@ -172,6 +176,32 @@ static uint64_t nas_request_id(void)
     uint64_t request = 0;
     while (!request) generate_random_buffer((uint8_t *)&request, sizeof(request));
     return request;
+}
+
+static int nas_fntimes(struct vfs_handle_struct *h, struct files_struct *fsp, struct smb_file_time *ft)
+{
+    struct timespec input[4] = { ft->atime, ft->mtime, ft->ctime, ft->create_time };
+    struct nas_times times = {0};
+    struct nas_time *output[4] = { &times.atime, &times.mtime, &times.ctime, &times.birthtime };
+    struct timespec now;
+    bool have_now = false;
+    uint32_t mask = 0;
+    size_t i;
+    if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
+    for (i = 0; i < 4; i++) {
+        if (is_omit_timespec(&input[i])) continue;
+        if (input[i].tv_nsec == UTIME_NOW) {
+            if (!have_now && clock_gettime(CLOCK_REALTIME, &now) != 0) return -1;
+            have_now = true;
+            input[i] = now;
+        }
+        if (input[i].tv_nsec < 0 || input[i].tv_nsec >= 1000000000) return nas_error(EINVAL);
+        output[i]->seconds = input[i].tv_sec;
+        output[i]->nanoseconds = input[i].tv_nsec;
+        mask |= 1U << i;
+    }
+    if (!mask) return 0;
+    return nas_error(nas_ipc_set_times(h->data, nas_inode(h, fsp), &times, mask, nas_request_id()));
 }
 
 static int nas_resolve_parent(struct vfs_handle_struct *h, uint64_t *base, char *path, char **name,
@@ -577,6 +607,7 @@ NTSTATUS samba_init_module(TALLOC_CTX *ctx)
     f->stat_fn = nas_stat; f->lstat_fn = nas_stat; f->fstat_fn = nas_fstat; f->fstatat_fn = nas_fstatat;
     f->openat_fn = nas_openat; f->close_fn = nas_close;
     f->mkdirat_fn = nas_mkdirat; f->renameat_fn = nas_renameat; f->unlinkat_fn = nas_unlinkat;
+    f->fntimes_fn = nas_fntimes;
     f->fcntl_fn = nas_fcntl;
     f->pread_fn = nas_pread; f->pread_send_fn = nas_pread_send; f->pread_recv_fn = nas_pread_recv;
     f->pwrite_fn = nas_pwrite; f->pwrite_send_fn = nas_pwrite_send; f->pwrite_recv_fn = nas_pread_recv;

@@ -14,7 +14,9 @@ fn monotonicMillis() !i64 {
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &now) != 0) return error.ClockFailed;
     return now.tv_sec * 1000 + @divTrunc(now.tv_nsec, 1000000);
 }
-const Attr = extern struct { inode: u64, parent: u64, size: u64, directory: c_int, name: [256]u8 };
+const Time = extern struct { seconds: i64, nanoseconds: u32 };
+const Times = extern struct { atime: Time, mtime: Time, ctime: Time, birthtime: Time };
+const Attr = extern struct { inode: u64, parent: u64, size: u64, directory: c_int, name: [256]u8, times: Times };
 const Page = extern struct { entries: [16]Attr, count: usize, next: [256]u8 };
 const Client = struct {
     fd: c_int,
@@ -111,7 +113,12 @@ fn status(reply: Reply) c_int {
 
 fn attr(value: ns.Attributes, out: *Attr) c_int {
     if (value.node.name.len > 255 or value.size > std.math.maxInt(i64)) return c.EOVERFLOW;
-    out.* = .{ .inode = value.node.id, .parent = value.node.parent, .size = value.size, .directory = @intFromBool(value.node.kind == .directory), .name = @splat(0) };
+    out.* = .{ .inode = value.node.id, .parent = value.node.parent, .size = value.size, .directory = @intFromBool(value.node.kind == .directory), .name = @splat(0), .times = undefined };
+    inline for (.{ "atime", "mtime", "ctime", "birthtime" }) |field| {
+        const time = @field(value.node.times, field);
+        if (!m.validTimestamp(time)) return c.EOVERFLOW;
+        @field(out.times, field) = .{ .seconds = time.seconds, .nanoseconds = time.nanoseconds };
+    }
     @memcpy(out.name[0..value.node.name.len], value.node.name);
     return 0;
 }
@@ -302,6 +309,21 @@ export fn nas_ipc_create_open(client: *Client, parent: u64, name: [*:0]const u8,
     if (opened == 0) return protocol(client);
     handle.* = opened;
     return 0;
+}
+
+export fn nas_ipc_set_times(client: *Client, inode: u64, times: *const Times, mask: u32, request_id: u64) c_int {
+    if ((mask & ~@as(u32, 15)) != 0) return c.EINVAL;
+    if (mask == 0) return 0;
+    var update: m.TimeUpdate = .{ .inode = inode };
+    inline for (.{ "atime", "mtime", "ctime", "birthtime" }, 0..) |field, bit| {
+        if ((mask & (@as(u32, 1) << bit)) != 0) {
+            const time = @field(times, field);
+            const value: m.Timestamp = .{ .seconds = time.seconds, .nanoseconds = time.nanoseconds };
+            if (!m.validTimestamp(value)) return c.EINVAL;
+            @field(update, field) = value;
+        }
+    }
+    return change(client, .{ .set_times = update }, request_id, null);
 }
 
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {
