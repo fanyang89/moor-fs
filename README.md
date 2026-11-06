@@ -939,6 +939,15 @@ definitions, polling overhead and environment limits. Faster reopening also
 exposed stale CIFS WAL length: recovery now reads the actual bounded tail rather
 than treating stat as authoritative EOF, while rejecting complete corruption.
 
+The benchmark also records voter/FUSE CPU time and surviving-thread context
+switches, using three five-second idle windows and at least one second per load
+case. A same-host comparison found roughly 850–870 additional voluntary switches
+per second per voter with polling; idle CPU remained below 0.5% of one core per
+voter in the aggregated samples. With 16 MiB pending payload, sustained local
+small reads used about 92% of one FUSE core. These process counters exclude
+Samba/kernel CPU and do not measure power consumption; details are in the
+benchmark document.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

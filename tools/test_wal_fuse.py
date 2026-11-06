@@ -20,6 +20,7 @@ def test_wal_fuse(
     server_roots=None,
     faults=False,
     benchmark=False,
+    benchmark_voters=None,
 ):
     config = directory / "backends.json"
     roots = [Path(item["root"]) for item in json.loads(config.read_text())]
@@ -107,6 +108,8 @@ def test_wal_fuse(
                 first,
                 roots,
                 trace_logs=[Path(logs[-1].name), *sorted(directory.glob("node-*.log"))],
+                processes={"fuse": process.pid, **(benchmark_voters or {})},
+                min_seconds=1,
             )
         second, _ = mount()
         path = first / "wal-file"

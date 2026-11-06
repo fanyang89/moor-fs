@@ -566,6 +566,10 @@ def main():
                     server_roots=options.backend_server_roots,
                     faults=options.wal_faults,
                     benchmark=options.wal_benchmark,
+                    benchmark_voters={
+                        f"voter-{i + 1}": process.pid
+                        for i, process in processes.items()
+                    },
                 )
             if options.fuse or options.smb:
                 from test_fuse import test_mounts

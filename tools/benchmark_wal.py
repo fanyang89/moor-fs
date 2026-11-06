@@ -11,6 +11,8 @@ import statistics
 import time
 import uuid
 
+from process_metrics import difference, snapshot
+
 
 def trace_samples(paths, offsets):
     stages = {}
@@ -25,9 +27,14 @@ def trace_samples(paths, offsets):
     return stages
 
 
-def benchmark_wal(mount, roots, samples=7, trace_logs=()):
+def benchmark_wal(
+    mount, roots, samples=7, trace_logs=(), processes=None, min_seconds=0
+):
     if samples < 2:
         raise ValueError("at least two samples are required")
+    if not math.isfinite(min_seconds) or min_seconds < 0:
+        raise ValueError("minimum duration must be finite and nonnegative")
+    processes = processes or {}
     roots = [Path(root) / "mutable" for root in roots]
     before = [set(root.iterdir()) if root.exists() else set() for root in roots]
     path = Path(mount) / f"wal-benchmark-{uuid.uuid4().hex}"
@@ -70,12 +77,18 @@ def benchmark_wal(mount, roots, samples=7, trace_logs=()):
                 offsets = [path.stat().st_size for path in trace_logs]
                 elapsed = []
                 cpu = []
-                for _ in range(samples):
+                resources = snapshot(processes)
+                window_start = time.perf_counter()
+                while (
+                    len(elapsed) < samples
+                    or time.perf_counter() - window_start < min_seconds
+                ):
                     cpu_start = time.process_time_ns()
                     start = time.perf_counter_ns()
                     invoke()
                     elapsed.append((time.perf_counter_ns() - start) / 1e6)
                     cpu.append((time.process_time_ns() - cpu_start) / 1e6)
+                resources = difference(resources, snapshot(processes))
                 assert logs() == sizes, "measurement unexpectedly changed the WAL"
                 print(
                     json.dumps(
@@ -83,21 +96,41 @@ def benchmark_wal(mount, roots, samples=7, trace_logs=()):
                             "benchmark": "wal-fuse",
                             "phase": phase,
                             "platform": platform.platform(),
-                            "samples": samples,
+                            "samples": len(elapsed),
+                            "minimum_seconds": min_seconds,
                             "pending_payload_bytes": written,
                             "wal_bytes_per_replica": sizes,
                             "operation": operation,
                             "read_bytes": length,
                             "latency_ms": elapsed,
                             "median_ms": statistics.median(elapsed),
-                            "p95_ms": sorted(elapsed)[math.ceil(samples * 0.95) - 1],
+                            "p95_ms": sorted(elapsed)[
+                                math.ceil(len(elapsed) * 0.95) - 1
+                            ],
                             "client_cpu_ms": cpu,
                             "stage_samples_ns": trace_samples(trace_logs, offsets),
+                            "process_resources": resources,
                         }
                     ),
                     flush=True,
                 )
 
+        if processes:
+            for window in range(3):
+                resources = snapshot(processes)
+                time.sleep(5)
+                print(
+                    json.dumps(
+                        {
+                            "benchmark": "wal-idle",
+                            "window": window,
+                            "process_resources": difference(
+                                resources, snapshot(processes)
+                            ),
+                        }
+                    ),
+                    flush=True,
+                )
         measure("clean", 0)
         written = 0
         for mib in (1, 4, 16):
@@ -119,5 +152,14 @@ if __name__ == "__main__":
     parser.add_argument("--backend-roots", type=Path, nargs=2, required=True)
     parser.add_argument("--samples", type=int, default=7)
     parser.add_argument("--trace-logs", type=Path, nargs="*", default=[])
+    parser.add_argument("--process", type=int, action="append", default=[])
+    parser.add_argument("--min-seconds", type=float, default=0)
     args = parser.parse_args()
-    benchmark_wal(args.mount, args.backend_roots, args.samples, args.trace_logs)
+    benchmark_wal(
+        args.mount,
+        args.backend_roots,
+        args.samples,
+        args.trace_logs,
+        {f"process-{pid}": pid for pid in args.process},
+        args.min_seconds,
+    )
