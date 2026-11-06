@@ -974,6 +974,13 @@ revalidate. This removes one duplicate size/WAL scan from shared-session stat:
 with 16 MiB pending payload, median stat latency fell from 25.0/34.1 ms to
 12.6/18.8 ms (local/dual CIFS) in the same-host benchmark.
 
+Streaming verification now reads the two payloads concurrently for records of
+at least 128 KiB; smaller records keep serial read-ahead. Both reads are joined
+before checking results or freeing buffers, including error paths. Exact byte,
+checksum and EOF checks remain. A repeated same-host CIFS comparison measured
+16 MiB-pending small reads at 21.4 ms serial versus 15.6/18.2 ms in two parallel
+runs; the benchmark document preserves both runs and their variability.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

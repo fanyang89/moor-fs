@@ -256,6 +256,67 @@ const LogReader = struct {
     }
 };
 
+fn readPayloads(io: Io, left: *LogReader, right: *LogReader, a: []u8, b: []u8) !void {
+    if (a.len < 2 * left.buffer.len) {
+        try left.readExact(a);
+        try right.readExact(b);
+        return;
+    }
+    // Each reader owns its buffer. Join before inspecting either result so no
+    // worker can access a frame or reader after the caller frees its workspace.
+    var pending = try io.concurrent(LogReader.readExact, .{ left, a });
+    const second = right.readExact(b);
+    const first = pending.await(io);
+    try first;
+    try second;
+}
+
+test "parallel WAL payload reads join the healthy side when either side fails" {
+    const t = std.testing;
+    const Source = struct {
+        failing: File.Handle,
+        healthy_entered: Io.Event = .unset,
+        failure_ready: Io.Event = .unset,
+        healthy_completed: std.atomic.Value(bool) = .init(false),
+
+        fn read(context: ?*anyopaque, file: File, buffers: []const []u8, _: u64) File.ReadPositionalError!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (file.handle == self.failing) {
+                self.healthy_entered.waitUncancelable(t.io);
+                self.failure_ready.set(t.io);
+                return error.InputOutput;
+            }
+            self.healthy_entered.set(t.io);
+            self.failure_ready.waitUncancelable(t.io);
+            var count: usize = 0;
+            for (buffers) |buffer| {
+                @memset(buffer, 'X');
+                count += buffer.len;
+            }
+            self.healthy_completed.store(true, .release);
+            return count;
+        }
+    };
+    var vtable = Io.failing.vtable.*;
+    vtable.fileReadPositional = Source.read;
+    const a = try t.allocator.alloc(u8, 128 * 1024);
+    defer t.allocator.free(a);
+    const b = try t.allocator.alloc(u8, a.len);
+    defer t.allocator.free(b);
+    for (0..32) |iteration| {
+        var source: Source = .{ .failing = @intCast(iteration % 2) };
+        const io: Io = .{ .userdata = &source, .vtable = &vtable };
+        var left: LogReader = .{ .io = io, .file = .{ .handle = 0, .flags = .{ .nonblocking = false } }, .limit = a.len };
+        var right: LogReader = .{ .io = io, .file = .{ .handle = 1, .flags = .{ .nonblocking = false } }, .limit = b.len };
+        @memset(a, 0);
+        @memset(b, 0);
+        try t.expectError(error.InputOutput, readPayloads(t.io, &left, &right, a, b));
+        try t.expect(source.healthy_completed.load(.acquire));
+        try t.expect(std.mem.allEqual(u8, if (source.failing == 0) b else a, 'X'));
+        try t.expectEqual(@as(u64, a.len), if (source.failing == 0) right.position else left.position);
+    }
+}
+
 test "WAL reader preserves bytes across buffered direct and buffered transitions" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
@@ -423,8 +484,7 @@ pub const Session = struct {
             const length = header_size + std.mem.readInt(u32, a[40..44], .little);
             if (length > self.end - offset) return error.WalChanged;
             timing.add(1);
-            try left.readExact(a[header_size..length]);
-            try right.readExact(b[header_size..length]);
+            try readPayloads(self.io, &left, &right, a[header_size..length], b[header_size..length]);
             timing.add(2);
             if (!equalPayload(a[header_size..length], b[header_size..length])) return error.WalDiverged;
             timing.add(3);

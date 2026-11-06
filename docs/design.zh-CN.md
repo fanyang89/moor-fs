@@ -960,3 +960,11 @@ Client.acquire对既有会话原先调用size验证后只返回Shared，属性�
 本地trace中16 MiB dirty stat的78个样本对应78次size、78次wal-verify、156次ReadIndex，去掉一次重复大小验证而保留外层Get和current屏障。无trace同机Safe该场景median本地24.967→12.626 ms、双CIFS34.060→18.789 ms；FUSE每操作CPU25.000→12.532/21.333→11.296 ms。本地空日志样本略慢，统计限制和全表保留在基准文档。
 
 扩展E2E验证共享旧读句柄期间O_TRUNC后路径及两句柄为0、旧读句柄EOF；写者未关闭时新读句柄看到新大小和内容。既有stat损坏测试不放宽。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL、SMB/supervisor冷重挂通过，fmt/diff/Python编译通过。底层WAL算法、数据格式及C/Zig ABI未变。
+
+## 61. 双侧大记录读取并行与错误汇合
+
+Session.verifyRead对payload至少128 KiB的记录调用readPayloads并行读双侧：一侧提交Io.concurrent，当前线程读取另一侧，先await已提交任务，再处理任一侧结果。两侧各自拥有原LogReader与帧缓冲；失败也必须join后才允许函数返回和工作区释放。小记录保持原串行预读，头部认证在并行前，payload比较/完整认证/证据覆盖在双侧完成后。每次验证最多多一个读取任务，不跨记录流水化，不减少完整WAL检查。
+
+同机Safe双CIFS16 MiB待提交payload的4 KiB读，新跑串行对照median21.404 ms，两轮并行15.584/18.188 ms；FUSE每操作CPU11.087/10.938/12.000 ms，延迟改善但CPU不保证下降。本地相对上一轮12.493→11.270 ms，小日志收益有限。串行临时控制已移除，复测和统计限制全部记录在基准文档，不推断物理NAS收益。
+
+新增受控Io并发单测32次交替左右失败，验证两侧进入重叠、失败后健康侧仍完成填充和位置推进，返回前已join。Debug/Safe各106项单测，本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL、SMB/supervisor冷重挂通过。会话帧/预读/窗口缓冲上限不变，执行器资源另计；冻结、恢复、checkpoint和写入确认规则保持。

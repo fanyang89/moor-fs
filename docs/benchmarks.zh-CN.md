@@ -349,3 +349,31 @@ Debug/Safe各105项单测、本地Debug WAL FUSE、Safe双CIFS完整13项损坏/
 扩展现有E2E：保持旧读句柄时O_TRUNC打开写句柄，检查路径、读句柄和写句柄均看到0大小及EOF；写入新内容但未关闭写者时再打开读句柄，检查新句柄看到当前大小和内容。既有stat长度/WAL尾部损坏场景继续严格失败，不放宽断言。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过；Python编译和fmt/diff检查通过。本轮变更在FUSE私有共享会话获取逻辑，未改底层WAL算法或C/Zig ABI。
 
 原始日志：`/tmp/opencode/nas-size-once-trace-local-safe.log`、`/tmp/opencode/nas-size-once-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-size-once-fuse-debug.log`、`/tmp/opencode/nas-size-once-fault-safe.log`。最终为普通Safe构建。
+
+## 双侧大payload读取并行
+
+在 `eb8e0cc` 上，将payload至少128 KiB的双侧读取交给现有Io并发执行器：一侧作为任务启动，当前线程读取另一侧，然后await已启动任务，再检查两个结果。每个验证请求最多同时多一个读取任务，不跨记录流水化。阈值等于两倍预读缓冲，保证即使已有预读内容，大payload仍需要实际文件读取；小记录保持原串行路径。
+
+左右LogReader及帧缓冲分别归各自读取任务使用。即使当前线程一侧先失败，也不提前返回或释放帧缓冲，而是先join；任务启动失败时尚未启动另一侧读取，仍按原Session规则冻结。成功后才进行精确payload相等比较、SHA-256及证据覆盖；头部认证和最终精确EOF检查保持。会话分配器工作区上限不变，但Io执行器有额外调度资源，不能据此称总资源开销不变。
+
+### 无日志基准与复测
+
+同机Safe、关闭trace、每例至少七次且至少1秒。初轮并行完成后，临时关闭并行分支重建了串行对照，再恢复并行复测；最终代码保留并行，没有运行时切换开关。以下为双CIFS的4 KiB读取median / p95，单位ms：
+
+| 待提交payload | 串行对照 | 并行首轮 | 并行复测 |
+| --- | ---: | ---: | ---: |
+| 1 MiB | 3.411 / 3.683 | 3.200 / 3.658 | 3.290 / 3.611 |
+| 4 MiB | 6.512 / 7.099 | 5.352 / 6.044 | 6.005 / 7.077 |
+| 16 MiB | 21.404 / 24.604 | 15.584 / 16.525 | 18.188 / 19.706 |
+
+16 MiB对应样本数分别46/64/55，FUSE每操作CPU约11.087/10.938/12.000 ms。两轮并行的延迟均低于该串行对照，但复测没有首轮快，CPU也不一定降低。保留全部结果，不挑选最快轮次；小日志收益较小，不能推断所有环境/请求大小均改善。
+
+本地只做首轮对照，沿用上一节串行基线：1/4/16 MiB payload的median分别1.284/3.308/12.493 ms，改后1.273/3.263/11.270 ms；16 MiB的p95为13.143→11.693 ms，CPU每操作12.500→12.247 ms。变化量有限，尚未做独立物理NAS或跨机高延迟网络验证。总WAL传输字节不变，payload读取阶段计时现在覆盖两侧并行后的墙钟时间，不是两侧耗时相加。
+
+### 失败路径与回归
+
+新增并发读取单测使用受控Io回调，分别令左侧/右侧失败：失败侧等健康侧进入，健康侧收到失败就绪信号后填满目标；32次交替验证返回InputOutput之前健康侧已经完成、全部字节为预期值且读取位置已推进。它同时检验双侧实际重叠执行和错误返回前join，避免单侧失败导致后台任务继续访问已经释放的帧。
+
+Debug/Safe各106项单测、本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过。既有4 MiB会话校验分配器约束、窗口外损坏、重叠写/截断和预读/直读切换测试继续通过。最终恢复普通Safe构建，不改变写入确认、checkpoint、修复依据或Raft依赖。
+
+原始输出：`/tmp/opencode/nas-wal-parallel-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-wal-serial-control-cifs-safe.log`、`/tmp/opencode/nas-wal-parallel-repeat-cifs-safe.log`、`/tmp/opencode/nas-wal-parallel-unit-{debug,safe}.log`、`/tmp/opencode/nas-wal-parallel-fault-safe.log`。
