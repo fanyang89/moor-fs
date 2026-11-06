@@ -191,6 +191,24 @@ export fn nas_ipc_remove_checked(client: *Client, source: *const Attr, request_i
     return change(client, .{ .remove_checked = .{ .inode = source.inode, .parent = source.parent, .name = std.mem.sliceTo(&source.name, 0) } }, request_id, null);
 }
 
+fn entryValue(source: *const Attr) m.Entry {
+    return .{ .inode = source.inode, .parent = source.parent, .name = std.mem.sliceTo(&source.name, 0) };
+}
+
+export fn nas_ipc_rename_guarded(client: *Client, source: *const Attr, parent: u64, name: [*:0]const u8, ancestors: [*]const Attr, count: usize, request_id: u64) c_int {
+    if (count > m.max_path_guards) return c.ENAMETOOLONG;
+    var guards: [m.max_path_guards]m.Entry = undefined;
+    for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
+    return change(client, .{ .path_guarded = .{ .ancestors = guards[0..count], .mutation = .{ .rename = .{ .source = entryValue(source), .parent = parent, .name = std.mem.span(name) } } } }, request_id, null);
+}
+
+export fn nas_ipc_remove_guarded(client: *Client, source: *const Attr, ancestors: [*]const Attr, count: usize, request_id: u64) c_int {
+    if (count > m.max_path_guards) return c.ENAMETOOLONG;
+    var guards: [m.max_path_guards]m.Entry = undefined;
+    for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
+    return change(client, .{ .path_guarded = .{ .ancestors = guards[0..count], .mutation = .{ .remove = entryValue(source) } } }, request_id, null);
+}
+
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();

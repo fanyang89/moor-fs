@@ -2,6 +2,23 @@ const std = @import("std");
 const m = @import("metadata.zig");
 const testing = std.testing;
 
+test "path guard proofs reject missing links duplicates cycles and excessive depth" {
+    var ancestors: [m.max_path_guards + 1]m.Entry = undefined;
+    for (&ancestors, 0..) |*entry, i| entry.* = .{ .inode = i + 2, .parent = i + 1, .name = "directory" };
+    var guarded: m.GuardedChange = .{ .ancestors = ancestors[0..m.max_path_guards], .mutation = .{ .remove = .{ .inode = 99, .parent = m.max_path_guards + 1, .name = "file" } } };
+    try testing.expect(m.validPathGuards(guarded));
+    guarded.ancestors = &ancestors;
+    try testing.expect(!m.validPathGuards(guarded));
+    guarded.ancestors = ancestors[1..m.max_path_guards];
+    try testing.expect(!m.validPathGuards(guarded));
+    guarded.ancestors = ancestors[0..m.max_path_guards];
+    ancestors[0].parent = m.max_path_guards + 1;
+    try testing.expect(!m.validPathGuards(guarded));
+    ancestors[0].parent = 1;
+    ancestors[1].inode = ancestors[0].inode;
+    try testing.expect(!m.validPathGuards(guarded));
+}
+
 test "mutable binding validates CAS replicas identity and snapshot invariants" {
     var state = try m.State.init(testing.allocator);
     defer state.deinit();

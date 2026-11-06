@@ -76,7 +76,9 @@ VFS接收到O_SYNC/O_DSYNC时执行同步；本机libsmbclient的SMB2参数转�
 
 mkdir、rename、unlink/rmdir均通过核心有回执的Raft change执行，使用独立随机非零request ID；桥接连接失败不自动重放。rename按inode执行，不覆盖其他已有inode；不支持交换或其他rename标志。unlink/rmdir区分文件与目录，核心拒绝根删除、非空目录、目录环和本地活跃文件句柄删除。改名不改变inode，已打开的核心句柄继续有效。删除沿用核心元数据移除语义，不宣称已完成后端孤儿数据GC。
 
-VFS改名/删除使用checked命令：将查找返回的inode、parent和规范name交给Raft，在同一状态机执行/LMDB事务中比较后修改。查找后源目录项变化或消失返回entry_conflict，桥接映射ESTALE，不自动重试；成功与冲突回执均可按原request ID重放。这避免误操作被移动的原inode或旧名称下的新文件，但不锁定祖先目录链及目标目录的完整路径，也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
+VFS改名/删除使用path_guarded命令：将查找返回的源inode、parent、规范name，以及源/目标父目录到根的祖先目录条件交给Raft，在同一状态机执行/LMDB事务中全部比较后修改。源目录项或任一观察到的祖先变化/消失返回entry_conflict，桥接映射ESTALE，不自动重试；成功与冲突回执均可按原request ID重放。路径解析中同一目录出现矛盾观察值也在本地返回ESTALE。
+
+每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。创建/open尚未接入祖先条件事务，目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
 
 先构建模块，再运行：
 
@@ -109,3 +111,5 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 源目录项CAS验证：内存/LMDB对照与逐请求重启测试覆盖跨目录移动、名称变化、精确大小写、删除后名称复用、成功/冲突回执重放；真实Raft SMB/IPC混合测试确认移动后旧请求被拒、原文件和同名新文件均保留。Debug/Safe各111项单测、C ABI Debug/Safe及本地/双CIFS E2E通过，日志：`/tmp/opencode/nas-entry-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。新增checked命令要求Raft节点与核心/桥接统一升级，不支持混合旧二进制运行。
 
 这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL/时间属性、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
+
+祖先条件验证：内存/LMDB逐请求重启和完整快照对照覆盖源祖先变化、旧祖先名称复用、目标目录变化、缺链及成功/拒绝回执重放；形状测试覆盖32项边界、超限、重复、环。真实SMB/IPC测试移动祖先目录后拒绝旧改名/删除，恢复路径后仍重放原拒绝；18层长名称目录的实际SMB改名验证超过旧4 KiB的Raft请求。Debug/Safe各113项、C ABI Debug/Safe、本地Debug/双CIFS Safe通过；日志：`/tmp/opencode/nas-ancestors-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。

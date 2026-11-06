@@ -18,4 +18,5 @@ pub const Change = union(enum) {
     remove: struct { inode: u64 },
     rename_checked: m.RenameChecked,
     remove_checked: m.Entry,
+    path_guarded: m.GuardedChange,
 };

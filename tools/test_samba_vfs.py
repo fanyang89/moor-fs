@@ -367,6 +367,48 @@ sync always = yes
             share="write",
             success=False,
         )
+        smb(f"put {source} vfs-read/renamed-dir/child/probe.dat", share="write")
+        child = client.call({"lookup": {"parent": folder, "name": "child"}})[
+            "attributes"
+        ]["node"]["id"]
+        probe = client.call({"lookup": {"parent": child, "name": "probe.dat"}})[
+            "attributes"
+        ]["node"]["id"]
+        guards = [
+            {"inode": parent, "parent": 1, "name": "vfs-read"},
+            {"inode": folder, "parent": parent, "name": "renamed-dir"},
+            {"inode": child, "parent": folder, "name": "child"},
+        ]
+        observed = {"inode": probe, "parent": child, "name": "probe.dat"}
+        guarded_remove = {
+            "path_guarded": {"ancestors": guards, "mutation": {"remove": observed}}
+        }
+        smb("rename vfs-read/renamed-dir vfs-read/relocated", share="write")
+        client.change(51210, guarded_remove, status="entry_conflict")
+        client.change(
+            51211,
+            {
+                "path_guarded": {
+                    "ancestors": guards,
+                    "mutation": {
+                        "rename": {
+                            "source": observed,
+                            "parent": parent,
+                            "name": "wrong.dat",
+                        }
+                    },
+                }
+            },
+            status="entry_conflict",
+        )
+        smb(
+            f"get vfs-read/relocated/child/probe.dat {directory / 'vfs-ancestor-survivor'}"
+        )
+        assert (directory / "vfs-ancestor-survivor").read_bytes() == b"short"
+        smb("rename vfs-read/relocated vfs-read/renamed-dir", share="write")
+        # Even after the path is restored, the original refusal is replayed.
+        client.change(51210, guarded_remove, status="entry_conflict")
+        smb("del vfs-read/renamed-dir/child/probe.dat", share="write")
         smb("rmdir vfs-read/renamed-dir/child", share="write")
         smb("del vfs-read/moved.dat", share="write")
         client.call(
@@ -376,6 +418,39 @@ sync always = yes
         client.call(
             {"lookup": {"parent": parent, "name": "renamed-dir"}}, error="NotFound"
         )
+        # The ancestor proof exceeds the old 4 KiB Raft request ceiling while
+        # the client path remains below the VFS's 4096-byte path limit.
+        deep_parent, components, deep_dirs = parent, ["vfs-read"], []
+        for index in range(18):
+            component = "x" * 180 + str(index)
+            deep_parent = client.change(
+                51300 + index,
+                {
+                    "create": {
+                        "parent": deep_parent,
+                        "name": component,
+                        "kind": "directory",
+                    }
+                },
+            )
+            deep_dirs.append(deep_parent)
+            components.append(component)
+        deep_file = client.change(
+            51320,
+            {"create": {"parent": deep_parent, "name": "proof.dat", "kind": "file"}},
+        )
+        smb(
+            f"rename {'/'.join(components)}/proof.dat vfs-read/proof.dat", share="write"
+        )
+        assert (
+            client.call({"lookup": {"parent": parent, "name": "proof.dat"}})[
+                "attributes"
+            ]["node"]["id"]
+            == deep_file
+        )
+        smb("del vfs-read/proof.dat", share="write")
+        for index, inode in enumerate(reversed(deep_dirs)):
+            client.change(51330 + index, {"remove": {"inode": inode}})
         # Damage bytes covered by pending WAL, so close must reject checkpointing.
         call(writer, "open", flags=os.O_RDWR)
         call(writer, "write", offset=0, hex=b"repair".hex())

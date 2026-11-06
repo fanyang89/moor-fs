@@ -2,7 +2,7 @@ const std = @import("std");
 const raft = @import("raftz");
 const metadata = @import("metadata.zig");
 
-pub const max_command_bytes = 4096;
+pub const max_command_bytes = 65536;
 pub const max_snapshot_bytes = 8 * 1024 * 1024;
 pub const response_size = 10;
 

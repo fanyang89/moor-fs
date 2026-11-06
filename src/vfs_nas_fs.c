@@ -8,6 +8,7 @@
 #include "../third_party/samba/examples/VFS/skel_opaque.c"
 
 struct nas_file { uint64_t inode, handle; bool writable, sync; };
+struct nas_guards { struct nas_attr entries[NAS_MAX_PATH_GUARDS]; size_t count; };
 struct nas_dir {
     struct nas_ipc *client;
     uint64_t inode;
@@ -72,7 +73,22 @@ static uint64_t nas_inode(struct vfs_handle_struct *h, const struct files_struct
 
 /* No symlinks exist in the core. Paths are component-walked, bounded, and never
  * interpreted by the host filesystem. The share root is the virtual '/'. */
-static int nas_resolve(struct vfs_handle_struct *h, uint64_t base, const char *path, struct nas_attr *out)
+static int nas_guard(struct nas_guards *guards, const struct nas_attr *attr)
+{
+    size_t i;
+    if (!guards || !attr->directory || attr->inode == 1) return 0;
+    for (i = 0; i < guards->count; i++) {
+        const struct nas_attr *prior = &guards->entries[i];
+        if (prior->inode != attr->inode) continue;
+        return prior->parent == attr->parent && strcmp(prior->name, attr->name) == 0 ? 0 : ESTALE;
+    }
+    if (guards->count == NAS_MAX_PATH_GUARDS) return ENAMETOOLONG;
+    guards->entries[guards->count++] = *attr;
+    return 0;
+}
+
+static int nas_resolve_guarded(struct vfs_handle_struct *h, uint64_t base, const char *path,
+    struct nas_attr *out, struct nas_guards *guards)
 {
     char *copy, *save = NULL, *part;
     int error;
@@ -80,6 +96,17 @@ static int nas_resolve(struct vfs_handle_struct *h, uint64_t base, const char *p
     if (path[0] == '/') base = 1;
     error = nas_ipc_stat(h->data, base, out);
     if (error) return nas_error(error);
+    if (guards) {
+        struct nas_attr ancestor = *out;
+        size_t depth = 0;
+        while (ancestor.inode != 1) {
+            if (depth++ == NAS_MAX_PATH_GUARDS) return nas_error(ENAMETOOLONG);
+            error = nas_guard(guards, &ancestor);
+            if (error) return nas_error(error);
+            error = nas_ipc_stat(h->data, ancestor.parent, &ancestor);
+            if (error) return nas_error(error);
+        }
+    }
     copy = talloc_strdup(talloc_tos(), path);
     if (!copy) return nas_error(ENOMEM);
     for (part = strtok_r(copy, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
@@ -91,10 +118,15 @@ static int nas_resolve(struct vfs_handle_struct *h, uint64_t base, const char *p
             error = nas_ipc_lookup(h->data, out->inode, part, out);
         }
         if (error) break;
+        error = nas_guard(guards, out);
+        if (error) break;
     }
     TALLOC_FREE(copy);
     return nas_error(error);
 }
+
+static int nas_resolve(struct vfs_handle_struct *h, uint64_t base, const char *path, struct nas_attr *out)
+{ return nas_resolve_guarded(h, base, path, out, NULL); }
 
 static int nas_stat(struct vfs_handle_struct *h, struct smb_filename *name)
 {
@@ -140,15 +172,18 @@ static uint64_t nas_request_id(void)
     return request;
 }
 
-static int nas_resolve_parent(struct vfs_handle_struct *h, uint64_t *base, char *path, char **name)
+static int nas_resolve_parent(struct vfs_handle_struct *h, uint64_t *base, char *path, char **name,
+    struct nas_guards *guards)
 {
     char *slash = strrchr(path, '/');
     struct nas_attr parent;
     *name = slash ? slash + 1 : path;
     if (slash) {
         *slash = '\0';
-        if (nas_resolve(h, *base, path[0] ? path : "/", &parent)) return -1;
+        if (nas_resolve_guarded(h, *base, path[0] ? path : "/", &parent, guards)) return -1;
         *base = parent.inode;
+    } else if (guards) {
+        if (nas_resolve_guarded(h, *base, ".", &parent, guards)) return -1;
     }
     return 0;
 }
@@ -158,7 +193,7 @@ static int nas_create_path(struct vfs_handle_struct *h, uint64_t base, const cha
     char *copy = talloc_strdup(talloc_tos(), path), *name;
     int error;
     if (!copy) return nas_error(ENOMEM);
-    if (nas_resolve_parent(h, &base, copy, &name)) {
+    if (nas_resolve_parent(h, &base, copy, &name, NULL)) {
         TALLOC_FREE(copy);
         return -1;
     }
@@ -182,20 +217,21 @@ static int nas_renameat(struct vfs_handle_struct *h, struct files_struct *src,
     const struct smb_filename *to, const struct vfs_rename_how *how)
 {
     struct nas_attr attr;
+    struct nas_guards guards = {0};
     uint64_t parent = nas_inode(h, dst);
     char *copy, *name;
     int error;
     if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
     if (from->stream_name || to->stream_name || (how->flags & ~VFS_RENAME_HOW_NO_REPLACE)) return nas_error(ENOTSUP);
-    if (nas_resolve(h, nas_inode(h, src), from->base_name, &attr)) return -1;
+    if (nas_resolve_guarded(h, nas_inode(h, src), from->base_name, &attr, &guards)) return -1;
     copy = talloc_strdup(talloc_tos(), to->base_name);
     if (!copy) return nas_error(ENOMEM);
-    if (nas_resolve_parent(h, &parent, copy, &name)) {
+    if (nas_resolve_parent(h, &parent, copy, &name, &guards)) {
         TALLOC_FREE(copy);
         return -1;
     }
     /* The core deliberately refuses replacement of a different inode. */
-    error = nas_ipc_rename_checked(h->data, &attr, parent, name, nas_request_id());
+    error = nas_ipc_rename_guarded(h->data, &attr, parent, name, guards.entries, guards.count, nas_request_id());
     TALLOC_FREE(copy);
     return nas_error(error);
 }
@@ -204,12 +240,13 @@ static int nas_unlinkat(struct vfs_handle_struct *h, struct files_struct *dir,
     const struct smb_filename *name, int flags)
 {
     struct nas_attr attr;
+    struct nas_guards guards = {0};
     if (lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
     if (name->stream_name || (flags & ~AT_REMOVEDIR)) return nas_error(ENOTSUP);
-    if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
+    if (nas_resolve_guarded(h, nas_inode(h, dir), name->base_name, &attr, &guards)) return -1;
     if (attr.directory && !(flags & AT_REMOVEDIR)) return nas_error(EISDIR);
     if (!attr.directory && (flags & AT_REMOVEDIR)) return nas_error(ENOTDIR);
-    return nas_error(nas_ipc_remove_checked(h->data, &attr, nas_request_id()));
+    return nas_error(nas_ipc_remove_guarded(h->data, &attr, guards.entries, guards.count, nas_request_id()));
 }
 
 static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *dir,

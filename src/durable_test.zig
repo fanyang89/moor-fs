@@ -106,6 +106,57 @@ test "checked namespace mutations reject stale entries and retain receipts acros
     try t.expectEqual(@as(u64, 5), memory.lookup(1, "moved").?.id);
 }
 
+test "ancestor guards atomically protect source and destination paths across restart" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const source: m.Entry = .{ .inode = 4, .parent = 3, .name = "file" };
+    const old = [_]m.Entry{
+        .{ .inode = 2, .parent = 1, .name = "photos" },
+        .{ .inode = 3, .parent = 2, .name = "nested" },
+        .{ .inode = 5, .parent = 1, .name = "destination" },
+    };
+    var updated = old;
+    updated[0].name = "moved";
+    var current = updated;
+    current[2].name = "new-destination";
+    const stale: m.Request = .{ .request_id = 6, .command = .{ .path_guarded = .{ .ancestors = &old, .mutation = .{ .remove = source } } } };
+    const remove: m.Request = .{ .request_id = 12, .command = .{ .path_guarded = .{ .ancestors = &current, .mutation = .{ .remove = .{ .inode = 4, .parent = 5, .name = "file" } } } } };
+    const commands = [_]m.Request{
+        create,
+        .{ .request_id = 2, .command = .{ .create = .{ .parent = 2, .name = "nested", .kind = .directory } } },
+        .{ .request_id = 3, .command = .{ .create = .{ .parent = 3, .name = "file", .kind = .file } } },
+        .{ .request_id = 4, .command = .{ .create = .{ .parent = 1, .name = "destination", .kind = .directory } } },
+        .{ .request_id = 5, .command = .{ .rename = .{ .id = 2, .parent = 1, .name = "moved" } } },
+        stale,
+        .{ .request_id = 7, .command = .{ .create = .{ .parent = 1, .name = "photos", .kind = .directory } } },
+        stale,
+        .{ .request_id = 8, .command = .{ .rename = .{ .id = 5, .parent = 1, .name = "new-destination" } } },
+        .{ .request_id = 9, .command = .{ .path_guarded = .{ .ancestors = &updated, .mutation = .{ .rename = .{ .source = source, .parent = 5, .name = "file" } } } } },
+        .{ .request_id = 10, .command = .{ .path_guarded = .{ .ancestors = current[1..], .mutation = .{ .remove = source } } } },
+        .{ .request_id = 11, .command = .{ .path_guarded = .{ .ancestors = &current, .mutation = .{ .rename = .{ .source = source, .parent = 5, .name = "file" } } } } },
+        remove,
+        .{ .request_id = 13, .command = .{ .create = .{ .parent = 5, .name = "file", .kind = .file } } },
+        remove,
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .entry_conflict, .ok, .entry_conflict, .ok, .entry_conflict, .invalid_request, .ok, .ok, .ok, .ok };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqual(@as(u64, 6), memory.lookup(1, "photos").?.id);
+    try t.expectEqual(@as(u64, 7), memory.lookup(5, "file").?.id);
+}
+
 test "directory pages use exclusive case-folded cursors and own their data" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

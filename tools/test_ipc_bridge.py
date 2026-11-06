@@ -272,6 +272,23 @@ def main():
                 c.c_uint64,
             ]
             source = {"inode": 42, "parent": 1, "name": "old"}
+            lib.nas_ipc_rename_guarded.argtypes = [
+                c.c_void_p,
+                c.POINTER(Attr),
+                c.c_uint64,
+                c.c_char_p,
+                c.POINTER(Attr),
+                c.c_size_t,
+                c.c_uint64,
+            ]
+            lib.nas_ipc_remove_guarded.argtypes = [
+                c.c_void_p,
+                c.POINTER(Attr),
+                c.POINTER(Attr),
+                c.c_size_t,
+                c.c_uint64,
+            ]
+            ancestors = [{"inode": 2, "parent": 1, "name": "destination"}]
             path = directory / "namespace"
             mutations = [
                 (
@@ -296,6 +313,23 @@ def main():
                 ),
                 ({"remove_checked": source}, "entry_conflict", 0),
                 ({"remove_checked": source}, "ok", 42),
+                (
+                    {
+                        "path_guarded": {
+                            "ancestors": ancestors,
+                            "mutation": {
+                                "rename": {"source": source, "parent": 2, "name": "new"}
+                            },
+                        }
+                    },
+                    "entry_conflict",
+                    0,
+                ),
+                (
+                    {"path_guarded": {"ancestors": [], "mutation": {"remove": source}}},
+                    "ok",
+                    42,
+                ),
             ]
             with socket.socket(socket.AF_UNIX) as listener:
                 listener.bind(str(path))
@@ -338,6 +372,28 @@ def main():
                         == errno.ESTALE
                     )
                     assert lib.nas_ipc_remove_checked(client, c.byref(attr), 902) == 0
+                    guards = (Attr * 1)(
+                        Attr(inode=2, parent=1, directory=1, name=b"destination")
+                    )
+                    # Oversized proofs fail locally without sending or poisoning.
+                    assert (
+                        lib.nas_ipc_remove_guarded(
+                            client, c.byref(attr), guards, 33, 902
+                        )
+                        == errno.ENAMETOOLONG
+                    )
+                    assert (
+                        lib.nas_ipc_rename_guarded(
+                            client, c.byref(attr), 2, b"new", guards, 1, 902
+                        )
+                        == errno.ESTALE
+                    )
+                    assert (
+                        lib.nas_ipc_remove_guarded(
+                            client, c.byref(attr), guards, 0, 902
+                        )
+                        == 0
+                    )
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)

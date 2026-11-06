@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 struct nas_ipc;
+#define NAS_MAX_PATH_GUARDS 32
 struct nas_attr {
     uint64_t inode, parent, size;
     int directory;
@@ -27,6 +28,8 @@ int nas_ipc_rename(struct nas_ipc *, uint64_t, uint64_t, const char *, uint64_t)
 int nas_ipc_remove(struct nas_ipc *, uint64_t, uint64_t);
 int nas_ipc_rename_checked(struct nas_ipc *, const struct nas_attr *, uint64_t, const char *, uint64_t);
 int nas_ipc_remove_checked(struct nas_ipc *, const struct nas_attr *, uint64_t);
+int nas_ipc_rename_guarded(struct nas_ipc *, const struct nas_attr *, uint64_t, const char *, const struct nas_attr *, size_t, uint64_t);
+int nas_ipc_remove_guarded(struct nas_ipc *, const struct nas_attr *, const struct nas_attr *, size_t, uint64_t);
 int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
 int nas_ipc_write(struct nas_ipc *, uint64_t, uint64_t, const void *, size_t);
 int nas_ipc_truncate(struct nas_ipc *, uint64_t, uint64_t);

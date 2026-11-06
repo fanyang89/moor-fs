@@ -261,6 +261,17 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .path_guarded => |r| {
+                if (!m.validPathGuards(r)) return .{ .status = .invalid_request };
+                for (r.ancestors) |entry| {
+                    const node = (try self.readNode(txn, allocator, entry.inode)) orelse return .{ .status = .entry_conflict };
+                    if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .{ .status = .entry_conflict };
+                }
+                return self.execute(txn, allocator, meta, switch (r.mutation) {
+                    .rename => |op| .{ .rename_checked = op },
+                    .remove => |op| .{ .remove_checked = op },
+                });
+            },
             .rename_checked => |r| {
                 const node = (try self.readNode(txn, allocator, r.source.inode)) orelse return .{ .status = .entry_conflict };
                 if (node.parent != r.source.parent or !std.mem.eql(u8, node.name, r.source.name)) return .{ .status = .entry_conflict };

@@ -36,6 +36,37 @@ pub const Replicas = enum { one, two };
 pub const Kind = enum { directory, file };
 pub const Entry = struct { inode: u64, parent: u64, name: []const u8 };
 pub const RenameChecked = struct { source: Entry, parent: u64, name: []const u8 };
+pub const max_path_guards = 32;
+pub const GuardedChange = struct {
+    ancestors: []const Entry,
+    mutation: union(enum) { rename: RenameChecked, remove: Entry },
+};
+
+/// A bounded proof must connect both affected parents to the immutable root.
+pub fn validPathGuards(change: GuardedChange) bool {
+    if (change.ancestors.len > max_path_guards) return false;
+    for (change.ancestors, 0..) |entry, i| {
+        if (entry.inode <= root_id or !validName(entry.name)) return false;
+        for (change.ancestors[0..i]) |earlier| if (entry.inode == earlier.inode) return false;
+    }
+    const parents: [2]u64 = switch (change.mutation) {
+        .rename => |op| .{ op.source.parent, op.parent },
+        .remove => |op| .{ op.parent, root_id },
+    };
+    for (parents) |parent| {
+        var current = parent;
+        var steps: usize = 0;
+        while (current != root_id) {
+            if (steps >= change.ancestors.len) return false;
+            const entry = for (change.ancestors) |entry| {
+                if (entry.inode == current) break entry;
+            } else return false;
+            current = entry.parent;
+            steps += 1;
+        }
+    }
+    return true;
+}
 pub const Node = struct {
     id: u64,
     parent: u64,
@@ -57,6 +88,7 @@ pub const Command = union(enum) {
     mutable_file: MutableUpdate,
     rename_checked: RenameChecked,
     remove_checked: Entry,
+    path_guarded: GuardedChange,
 };
 pub const Request = struct { version: u32 = 1, request_id: u64, command: Command };
 pub const Status = enum(u8) {
@@ -158,6 +190,17 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .path_guarded => |c| {
+                if (!validPathGuards(c)) return .{ .status = .invalid_request };
+                for (c.ancestors) |entry| {
+                    const node = self.get(entry.inode) orelse return .{ .status = .entry_conflict };
+                    if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .{ .status = .entry_conflict };
+                }
+                return self.execute(switch (c.mutation) {
+                    .rename => |op| .{ .rename_checked = op },
+                    .remove => |op| .{ .remove_checked = op },
+                });
+            },
             .rename_checked => |c| {
                 const node = self.get(c.source.inode) orelse return .{ .status = .entry_conflict };
                 if (node.parent != c.source.parent or !std.mem.eql(u8, node.name, c.source.name)) return .{ .status = .entry_conflict };

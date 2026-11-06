@@ -63,9 +63,13 @@ mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{i
 
 `change.request_id`不同于外层关联号：它是全Raft集群共享的非零去重ID，调用者应生成随机u64并对同一修改保持ID和完整参数。重连后可重放；不同请求复用ID返回request_conflict。Raft结果在result.change.status中，包括ok、not_found、already_exists、not_empty等；这类业务拒绝的顶层err仍为null。FileBusy等本地前置拒绝不会写入Raft receipt，可在句柄释放后重试。receipt容量仍有上限，未实现GC。
 
-旧rename/remove保留按inode操作的语义。原生VFS使用checked变体：Raft状态机在同一次执行/LMDB事务中核对源inode的parent和精确name，再修改；源inode消失或任一字段不同返回entry_conflict，并保存冲突回执。name应取lookup返回的规范名称，而不是用户输入的大小写别名。该校验保护最终源目录项，不锁定祖先目录链或目标目录的完整路径，也不检测移走后又移回相同位置的历史。
+旧rename/remove保留按inode操作的语义。checked变体在同一次状态机执行/LMDB事务中核对源inode的parent和精确name，再修改；源inode消失或任一字段不同返回entry_conflict，并保存冲突回执。name应取lookup返回的规范名称，而不是用户输入的大小写别名。单独的checked变体仅保护最终源目录项。
 
-checked变体采用新增命令，不改变旧命令的JSON和回执摘要；新增status为entry_conflict（20），C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
+原生VFS现在使用 `path_guarded:{ancestors:[{inode,parent,name},...],mutation:{rename:{source:{inode,parent,name},parent,name}}}` 或同一封装下的 `mutation:{remove:{inode,parent,name}}`。ancestors最多32项，不含根inode 1、不允许重复inode，必须把源父目录及改名目标父目录连接到根；缺链、环或超限返回invalid_request。Raft先核对所有祖先仍为目录且parent/name完全匹配，再执行源checked修改，全部在一次状态机执行/LMDB事务中完成。祖先移动、改名、删除或源变化返回entry_conflict。允许附带其他遍历过的目录条件，任何一个变化都会拒绝操作。
+
+Raft命令JSON上限由4 KiB提高到64 KiB，以容纳32项有界路径条件及JSON转义；Unix IPC帧上限仍为132096字节。VFS以当前回调的目录fd身份为起点，收集到根的链和路径遍历结果；超过32个不同目录在本地返回ENAMETOOLONG。检查当前目录项状态，不检测移动后又移回的历史，也不回溯Samba此前取得目录fd时的路径状态。创建/open仍不使用祖先条件事务。
+
+checked与path_guarded均采用新增命令，不改变旧命令的JSON和回执摘要；entry_conflict（20）由C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 
 操作失败返回非空 `err`，目前为Zig错误名称，例如 `FileBusy`、`InvalidHandle`、`ReadOnlyHandle`、`InvalidRange`、`UnsupportedVersion`、`WalSessionFailed`；错误映射尚不是Samba errno ABI。失败响应的result各字段为null。非法JSON、未知字段/操作、超长/空帧、半帧EOF及响应发送失败均断开连接并清理句柄，不保证返回错误帧。
 

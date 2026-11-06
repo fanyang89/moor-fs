@@ -105,6 +105,13 @@ pub const Service = struct {
             .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
             .rename => |op| .{ .rename = .{ .id = op.inode, .parent = op.parent, .name = op.name } },
             .rename_checked => |op| .{ .rename_checked = op },
+            .path_guarded => |op| blk: {
+                switch (op.mutation) {
+                    .remove => |source| if (self.sessions.contains(source.inode)) return error.FileBusy,
+                    .rename => {},
+                }
+                break :blk .{ .path_guarded = op };
+            },
             .remove_checked => |op| blk: {
                 if (self.sessions.contains(op.inode)) return error.FileBusy;
                 break :blk .{ .remove_checked = op };
