@@ -22,6 +22,7 @@ pub const Client = struct {
             .get => |id| .{ .node = try self.namespaceRead(?m.Node, arena, "Get", .{ .id = id }) },
             .lookup => |lookup| .{ .node = try self.namespaceRead(?m.Node, arena, "Lookup", lookup) },
             .list => |list| .{ .page = try self.namespaceRead(ns.Page, arena, "List", list) },
+            .check_path => |check| .{ .checked = try self.namespaceRead(m.Status, arena, "CheckPath", check) },
         };
     }
 

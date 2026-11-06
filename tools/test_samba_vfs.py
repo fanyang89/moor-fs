@@ -380,10 +380,93 @@ sync always = yes
             {"inode": child, "parent": folder, "name": "child"},
         ]
         observed = {"inode": probe, "parent": child, "name": "probe.dat"}
+        guarded_reader = client.call(
+            {
+                "open_guarded": {
+                    "path": {"source": observed, "ancestors": guards},
+                    "writable": False,
+                }
+            }
+        )["handle"]
         guarded_remove = {
             "path_guarded": {"ancestors": guards, "mutation": {"remove": observed}}
         }
+        unopened = client.change(
+            51214,
+            {
+                "path_guarded": {
+                    "ancestors": guards,
+                    "mutation": {
+                        "create": {
+                            "parent": child,
+                            "name": "unopened.dat",
+                            "kind": "file",
+                        }
+                    },
+                }
+            },
+        )
         smb("rename vfs-read/renamed-dir vfs-read/relocated", share="write")
+        client.call(
+            {
+                "open_guarded": {
+                    "path": {
+                        "source": {
+                            "inode": unopened,
+                            "parent": child,
+                            "name": "unopened.dat",
+                        },
+                        "ancestors": guards,
+                    },
+                    "writable": True,
+                }
+            },
+            error="EntryConflict",
+        )
+        assert (
+            client.call({"stat": {"inode": unopened}})["attributes"]["node"][
+                "mutable_file"
+            ]
+            is None
+        )
+        for writable in (False, True):
+            client.call(
+                {
+                    "open_guarded": {
+                        "path": {"source": observed, "ancestors": guards},
+                        "writable": writable,
+                    }
+                },
+                error="EntryConflict",
+            )
+        # A previously established handle retains inode identity after rename.
+        assert (
+            client.call({"read": {"handle": guarded_reader, "offset": 0, "length": 5}})[
+                "hex"
+            ]
+            == b"short".hex()
+        )
+        client.call({"close": {"handle": guarded_reader}})
+        for index, kind in enumerate(("file", "directory")):
+            client.change(
+                51212 + index,
+                {
+                    "path_guarded": {
+                        "ancestors": guards,
+                        "mutation": {
+                            "create": {
+                                "parent": child,
+                                "name": "must-not-create",
+                                "kind": kind,
+                            }
+                        },
+                    }
+                },
+                status="entry_conflict",
+            )
+        client.call(
+            {"lookup": {"parent": child, "name": "must-not-create"}}, error="NotFound"
+        )
         client.change(51210, guarded_remove, status="entry_conflict")
         client.change(
             51211,
@@ -406,6 +489,16 @@ sync always = yes
         )
         assert (directory / "vfs-ancestor-survivor").read_bytes() == b"short"
         smb("rename vfs-read/relocated vfs-read/renamed-dir", share="write")
+        opened = client.call(
+            {
+                "open_guarded": {
+                    "path": {"source": observed, "ancestors": guards},
+                    "writable": True,
+                }
+            }
+        )["handle"]
+        client.call({"close": {"handle": opened}})
+        smb("del vfs-read/renamed-dir/child/unopened.dat", share="write")
         # Even after the path is restored, the original refusal is replayed.
         client.change(51210, guarded_remove, status="entry_conflict")
         smb("del vfs-read/renamed-dir/child/probe.dat", share="write")
@@ -439,6 +532,8 @@ sync always = yes
             51320,
             {"create": {"parent": deep_parent, "name": "proof.dat", "kind": "file"}},
         )
+        smb(f"get {'/'.join(components)}/proof.dat {directory / 'vfs-deep-read'}")
+        assert (directory / "vfs-deep-read").read_bytes() == b""
         smb(
             f"rename {'/'.join(components)}/proof.dat vfs-read/proof.dat", share="write"
         )

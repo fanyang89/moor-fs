@@ -191,14 +191,14 @@ static int nas_resolve_parent(struct vfs_handle_struct *h, uint64_t *base, char 
 static int nas_create_path(struct vfs_handle_struct *h, uint64_t base, const char *path, bool directory, uint64_t *inode)
 {
     char *copy = talloc_strdup(talloc_tos(), path), *name;
+    struct nas_guards guards = {0};
     int error;
     if (!copy) return nas_error(ENOMEM);
-    if (nas_resolve_parent(h, &base, copy, &name, NULL)) {
+    if (nas_resolve_parent(h, &base, copy, &name, &guards)) {
         TALLOC_FREE(copy);
         return -1;
     }
-    error = directory ? nas_ipc_mkdir(h->data, base, name, nas_request_id(), inode)
-                      : nas_ipc_create_file(h->data, base, name, nas_request_id(), inode);
+    error = nas_ipc_create_guarded(h->data, base, name, directory, guards.entries, guards.count, nas_request_id(), inode);
     TALLOC_FREE(copy);
     return nas_error(error);
 }
@@ -258,22 +258,29 @@ static int nas_openat(struct vfs_handle_struct *h, const struct files_struct *di
     int fd, error;
     uint64_t opened = 0;
     bool writable = !fsp->fsp_flags.is_pathref && ((how->flags & O_ACCMODE) != O_RDONLY);
+    struct nas_guards guards = {0};
+    struct nas_guards *proof = fsp->fsp_flags.is_pathref ? NULL : &guards;
     if ((how->resolve & ~(VFS_OPEN_HOW_WITH_BACKUP_INTENT | VFS_OPEN_HOW_RESOLVE_NO_XDEV)) != 0) return nas_error(ENOTSUP);
     if (name->stream_name) return nas_error(ENOENT);
     if ((writable || (how->flags & (O_CREAT | O_TRUNC))) && lp_read_only(SNUM(h->conn))) return nas_error(EROFS);
     if (how->flags & O_APPEND) return nas_error(ENOTSUP);
     if ((how->flags & O_TRUNC) && !writable) return nas_error(EACCES);
-    if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) {
+    if (nas_resolve_guarded(h, nas_inode(h, dir), name->base_name, &attr, proof)) {
         uint64_t inode;
         if (errno != ENOENT || !(how->flags & O_CREAT) || fsp->fsp_flags.is_pathref) return -1;
         if (nas_create_path(h, nas_inode(h, dir), name->base_name, false, &inode)) {
             if (errno != EEXIST || (how->flags & O_EXCL)) return -1;
-            if (nas_resolve(h, nas_inode(h, dir), name->base_name, &attr)) return -1;
-        } else if (nas_error(nas_ipc_stat(h->data, inode, &attr))) return -1;
+            guards.count = 0;
+            if (nas_resolve_guarded(h, nas_inode(h, dir), name->base_name, &attr, proof)) return -1;
+        } else {
+            guards.count = 0;
+            if (nas_resolve_guarded(h, nas_inode(h, dir), name->base_name, &attr, proof)) return -1;
+            if (attr.inode != inode) return nas_error(ESTALE);
+        }
     } else if ((how->flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) return nas_error(EEXIST);
     if ((how->flags & O_DIRECTORY) && !attr.directory) return nas_error(ENOTDIR);
     if (!attr.directory && !fsp->fsp_flags.is_pathref) {
-        error = writable ? nas_ipc_open_write(h->data, attr.inode, &opened) : nas_ipc_open(h->data, attr.inode, &opened);
+        error = nas_ipc_open_guarded(h->data, &attr, writable, guards.entries, guards.count, &opened);
         if (nas_error(error)) return -1;
         if (how->flags & O_TRUNC) {
             error = nas_ipc_truncate(h->data, opened, 0);

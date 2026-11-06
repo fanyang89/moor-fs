@@ -72,7 +72,7 @@ fn protocol(client: *Client) c_int {
 
 fn status(reply: Reply) c_int {
     const name = reply.err orelse return 0;
-    const errors = .{ .{ "NotFound", c.ENOENT }, .{ "FileBusy", c.EBUSY }, .{ "InvalidHandle", c.EBADF }, .{ "ReadOnlyHandle", c.EACCES }, .{ "NotFile", c.EISDIR }, .{ "InvalidName", c.EINVAL }, .{ "InvalidRange", c.EINVAL } };
+    const errors = .{ .{ "NotFound", c.ENOENT }, .{ "FileBusy", c.EBUSY }, .{ "InvalidHandle", c.EBADF }, .{ "ReadOnlyHandle", c.EACCES }, .{ "NotFile", c.EISDIR }, .{ "InvalidName", c.EINVAL }, .{ "InvalidRange", c.EINVAL }, .{ "InvalidRequest", c.EINVAL }, .{ "EntryConflict", c.ESTALE } };
     inline for (errors) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return c.EIO;
 }
@@ -149,10 +149,10 @@ export fn nas_ipc_list(client: *Client, parent: u64, after: [*:0]const u8, out: 
     return 0;
 }
 
-fn open(client: *Client, inode: u64, writable: bool, out: *u64) c_int {
+fn open(client: *Client, operation: anytype, out: *u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const reply = client.call(arena.allocator(), .{ .open = .{ .inode = inode, .writable = writable } }) catch |err| return failure(err);
+    const reply = client.call(arena.allocator(), operation) catch |err| return failure(err);
     if (status(reply) != 0) return status(reply);
     out.* = reply.result.handle orelse return protocol(client);
     if (out.* == 0) return protocol(client);
@@ -160,11 +160,11 @@ fn open(client: *Client, inode: u64, writable: bool, out: *u64) c_int {
 }
 
 export fn nas_ipc_open(client: *Client, inode: u64, out: *u64) c_int {
-    return open(client, inode, false, out);
+    return open(client, .{ .open = .{ .inode = inode, .writable = false } }, out);
 }
 
 export fn nas_ipc_open_write(client: *Client, inode: u64, out: *u64) c_int {
-    return open(client, inode, true, out);
+    return open(client, .{ .open = .{ .inode = inode, .writable = true } }, out);
 }
 
 export fn nas_ipc_create_file(client: *Client, parent: u64, name: [*:0]const u8, request_id: u64, out: *u64) c_int {
@@ -195,6 +195,14 @@ fn entryValue(source: *const Attr) m.Entry {
     return .{ .inode = source.inode, .parent = source.parent, .name = std.mem.sliceTo(&source.name, 0) };
 }
 
+export fn nas_ipc_open_guarded(client: *Client, source: *const Attr, writable: c_int, ancestors: [*]const Attr, count: usize, out: *u64) c_int {
+    if (count > m.max_path_guards) return c.ENAMETOOLONG;
+    if (writable != 0 and writable != 1) return c.EINVAL;
+    var guards: [m.max_path_guards]m.Entry = undefined;
+    for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
+    return open(client, .{ .open_guarded = .{ .path = .{ .source = entryValue(source), .ancestors = guards[0..count] }, .writable = writable == 1 } }, out);
+}
+
 export fn nas_ipc_rename_guarded(client: *Client, source: *const Attr, parent: u64, name: [*:0]const u8, ancestors: [*]const Attr, count: usize, request_id: u64) c_int {
     if (count > m.max_path_guards) return c.ENAMETOOLONG;
     var guards: [m.max_path_guards]m.Entry = undefined;
@@ -207,6 +215,14 @@ export fn nas_ipc_remove_guarded(client: *Client, source: *const Attr, ancestors
     var guards: [m.max_path_guards]m.Entry = undefined;
     for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
     return change(client, .{ .path_guarded = .{ .ancestors = guards[0..count], .mutation = .{ .remove = entryValue(source) } } }, request_id, null);
+}
+
+export fn nas_ipc_create_guarded(client: *Client, parent: u64, name: [*:0]const u8, directory: c_int, ancestors: [*]const Attr, count: usize, request_id: u64, out: *u64) c_int {
+    if (count > m.max_path_guards) return c.ENAMETOOLONG;
+    if (directory != 0 and directory != 1) return c.EINVAL;
+    var guards: [m.max_path_guards]m.Entry = undefined;
+    for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
+    return change(client, .{ .path_guarded = .{ .ancestors = guards[0..count], .mutation = .{ .create = .{ .parent = parent, .name = std.mem.span(name), .kind = if (directory == 1) .directory else .file } } } }, request_id, out);
 }
 
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {

@@ -127,6 +127,23 @@ pub const Store = struct {
         return self.find(&txn, parent, name);
     }
 
+    /// A single read transaction observes the complete path at one instant.
+    /// Callers serving remote reads must first complete the Raft read barrier.
+    pub fn checkPath(self: *Store, check: m.PathCheck) !m.Status {
+        if (!m.validPathGuards(.{ .ancestors = check.ancestors, .mutation = .{ .remove = check.source } })) return .invalid_request;
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        for (check.ancestors) |entry| {
+            const node = (try self.readNode(&txn, arena.allocator(), entry.inode)) orelse return .entry_conflict;
+            if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .entry_conflict;
+        }
+        const node = (try self.readNode(&txn, arena.allocator(), check.source.inode)) orelse return .entry_conflict;
+        if (node.parent != check.source.parent or !std.mem.eql(u8, node.name, check.source.name)) return .entry_conflict;
+        return if (node.kind == .file) .ok else .not_file;
+    }
+
     pub fn getBackend(self: *Store, id: u64) !?m.Backend {
         return self.record(m.Backend, self.backends_db, id);
     }
@@ -268,6 +285,7 @@ pub const Store = struct {
                     if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .{ .status = .entry_conflict };
                 }
                 return self.execute(txn, allocator, meta, switch (r.mutation) {
+                    .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
                     .rename => |op| .{ .rename_checked = op },
                     .remove => |op| .{ .remove_checked = op },
                 });

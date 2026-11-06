@@ -157,6 +157,52 @@ test "ancestor guards atomically protect source and destination paths across res
     try t.expectEqual(@as(u64, 7), memory.lookup(5, "file").?.id);
 }
 
+test "guarded creation enforces replicas and path checks are read-only snapshots" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const old = [_]m.Entry{.{ .inode = 2, .parent = 1, .name = "photos" }};
+    const current = [_]m.Entry{.{ .inode = 2, .parent = 1, .name = "moved" }};
+    const creation: m.Request = .{ .request_id = 3, .command = .{ .path_guarded = .{ .ancestors = &old, .mutation = .{ .create = .{ .parent = 2, .name = "file", .kind = .file } } } } };
+    const commands = [_]m.Request{
+        create,
+        .{ .request_id = 2, .command = .{ .set_replicas = .{ .id = 2, .replicas = .one } } },
+        creation,
+        .{ .request_id = 4, .command = .{ .rename = .{ .id = 2, .parent = 1, .name = "moved" } } },
+        .{ .request_id = 5, .command = .{ .path_guarded = .{ .ancestors = &old, .mutation = .{ .create = .{ .parent = 2, .name = "wrong", .kind = .file } } } } },
+        .{ .request_id = 6, .command = .{ .path_guarded = .{ .ancestors = &current, .mutation = .{ .create = .{ .parent = 2, .name = "directory", .kind = .directory } } } } },
+        creation,
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .entry_conflict, .ok, .ok };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const before = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(before);
+        const check: m.PathCheck = .{ .ancestors = &old, .source = .{ .inode = 3, .parent = 2, .name = "file" } };
+        try t.expectEqual(@as(m.Status, if (index == 3) .ok else .entry_conflict), try store.checkPath(check));
+        if (index >= 4) {
+            try t.expectEqual(m.Status.ok, try store.checkPath(.{ .ancestors = &current, .source = check.source }));
+            try t.expectEqual(m.Status.entry_conflict, try store.checkPath(.{ .ancestors = &current, .source = .{ .inode = 3, .parent = 2, .name = "FILE" } }));
+        }
+        if (index >= 6) try t.expectEqual(m.Status.not_file, try store.checkPath(.{ .ancestors = &current, .source = .{ .inode = 4, .parent = 2, .name = "directory" } }));
+        try t.expectEqual(m.Status.invalid_request, try store.checkPath(.{ .ancestors = &.{}, .source = check.source }));
+        const after = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(after);
+        try t.expectEqualStrings(before, after);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, after, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqual(m.Replicas.two, memory.get(3).?.replicas);
+    try t.expectEqual(m.Replicas.two, memory.get(4).?.replicas);
+    try t.expect(memory.lookup(2, "wrong") == null);
+}
+
 test "directory pages use exclusive case-folded cursors and own their data" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

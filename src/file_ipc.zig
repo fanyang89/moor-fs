@@ -13,6 +13,7 @@ const Request = struct {
     request: u64,
     operation: union(enum) {
         open: struct { inode: u64, writable: bool },
+        open_guarded: ns.OpenGuarded,
         read: struct { handle: u64, offset: u64, length: u32 },
         write: struct { handle: u64, offset: u64, hex: []const u8 },
         truncate: struct { handle: u64, length: u64 },
@@ -40,6 +41,10 @@ fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allo
     switch (request.operation) {
         .open => |op| {
             const opened = try service.open(owner, op.inode, op.writable);
+            return .{ .handle = opened.handle, .size = opened.size };
+        },
+        .open_guarded => |op| {
+            const opened = try service.openGuarded(owner, arena, op);
             return .{ .handle = opened.handle, .size = opened.size };
         },
         .read => |op| {

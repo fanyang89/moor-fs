@@ -66,7 +66,7 @@ IPC桥接同步阻塞，单次数据帧64KiB，较大的SMB读写拆分调用。
 
 核心统一执行每inode单写者互斥，允许共享读者；写确认仍遵循双WAL持久化后更新双完整文件的协议。支持O_EXCL、O_TRUNC、稀疏写和ftruncate，拒绝O_APPEND。关闭写句柄和fsync沿用核心checkpoint流程，验证失败向SMB返回错误。普通fsync验证待提交WAL覆盖范围，不对未触及的基线字节做全文件哈希。
 
-创建是有Raft回执的metadata create，随后stat/open，不是原子create+open；后续打开失败或结果不确定时可能留下空文件。大写请求拆成多个64KiB操作，中途失败可能已有前缀持久化，甚至失败操作也可能在恢复中重放；错误不表示整个SMB写请求回滚，连接失败后不自动重试。
+文件和目录创建使用带祖先条件及Raft回执的create。文件创建后重新解析路径，要求inode与创建回执一致，再执行open_guarded；不是原子create+open，后续打开失败或结果不确定时可能留下空文件，不回滚，也不会打开名称被复用后的其他inode。大写请求拆成多个64KiB操作，中途失败可能已有前缀持久化，甚至失败操作也可能在恢复中重放；错误不表示整个SMB写请求回滚，连接失败后不自动重试。
 
 VFS接收到O_SYNC/O_DSYNC时执行同步；本机libsmbclient的SMB2参数转换丢弃O_SYNC，所以测试采用 `sync always = yes` 共享验证Samba实际fsync回调及句柄关闭前checkpoint更新，不宣称已经验证客户端write-through标志。
 
@@ -78,7 +78,9 @@ mkdir、rename、unlink/rmdir均通过核心有回执的Raft change执行，使�
 
 VFS改名/删除使用path_guarded命令：将查找返回的源inode、parent、规范name，以及源/目标父目录到根的祖先目录条件交给Raft，在同一状态机执行/LMDB事务中全部比较后修改。源目录项或任一观察到的祖先变化/消失返回entry_conflict，桥接映射ESTALE，不自动重试；成功与冲突回执均可按原request ID重放。路径解析中同一目录出现矛盾观察值也在本地返回ESTALE。
 
-每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。创建/open尚未接入祖先条件事务，目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
+文件/目录创建同样核对父目录到根的条件链，再在同一事务内创建并强制双副本策略。真实数据文件open使用open_guarded：leader ReadIndex后通过一次LMDB只读事务检查祖先和源，再建立核心句柄；此只读检查不产生Raft回执。核心锁覆盖检查到本地句柄登记，拒绝旧路径不会先迁移文件或占用写句柄。旧句柄仍可跨改名访问原inode。其他元数据写者可能在检查快照之后修改路径，此处不提供跨服务fencing。
+
+每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL/时间、跨节点fencing仍待实现。
 
 先构建模块，再运行：
 
@@ -113,3 +115,5 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL/时间属性、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
 
 祖先条件验证：内存/LMDB逐请求重启和完整快照对照覆盖源祖先变化、旧祖先名称复用、目标目录变化、缺链及成功/拒绝回执重放；形状测试覆盖32项边界、超限、重复、环。真实SMB/IPC测试移动祖先目录后拒绝旧改名/删除，恢复路径后仍重放原拒绝；18层长名称目录的实际SMB改名验证超过旧4 KiB的Raft请求。Debug/Safe各113项、C ABI Debug/Safe、本地Debug/双CIFS Safe通过；日志：`/tmp/opencode/nas-ancestors-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
+
+创建/open条件验证：Debug/Safe各114项、桥接Debug/Safe、本地及双CIFS E2E通过。单测覆盖守卫创建强制双副本、祖先改变后拒绝、回执重放，以及CheckPath前后完整快照不变；E2E验证旧路径拒绝创建文件/目录、拒绝读/写open（包括已有会话）、不迁移尚未打开的文件、原读句柄跨改名可用、路径恢复后可取得写句柄，18层长路径SMB读取成功。日志：`/tmp/opencode/nas-create-open-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。

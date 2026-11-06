@@ -108,7 +108,7 @@ pub const Service = struct {
             .path_guarded => |op| blk: {
                 switch (op.mutation) {
                     .remove => |source| if (self.sessions.contains(source.inode)) return error.FileBusy,
-                    .rename => {},
+                    .rename, .create => {},
                 }
                 break :blk .{ .path_guarded = op };
             },
@@ -127,6 +127,23 @@ pub const Service = struct {
     pub fn open(self: *Service, owner: u64, inode: u64, writable: bool) !Opened {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        return self.openLocked(owner, inode, writable);
+    }
+
+    pub fn openGuarded(self: *Service, owner: u64, arena: std.mem.Allocator, op: ns.OpenGuarded) !Opened {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const reply = try self.namespaceQuery(owner, arena, .{ .check_path = op.path });
+        switch (reply.checked) {
+            .ok => {},
+            .entry_conflict => return error.EntryConflict,
+            .not_file => return error.NotFile,
+            else => return error.InvalidRequest,
+        }
+        return self.openLocked(owner, op.path.source.inode, op.writable);
+    }
+
+    fn openLocked(self: *Service, owner: u64, inode: u64, writable: bool) !Opened {
         if (!self.connections.contains(owner)) return error.InvalidConnection;
         if (self.handles.count() >= self.max_handles) return error.HandleLimit;
         const key = try self.id();

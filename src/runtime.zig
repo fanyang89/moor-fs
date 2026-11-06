@@ -130,6 +130,7 @@ pub const Runtime = struct {
         try self.server.registerUnary("/nas.fs.Metadata/Get", grpc.UnaryHandler.bind(Runtime, self, get));
         try self.server.registerUnary("/nas.fs.Metadata/Lookup", grpc.UnaryHandler.bind(Runtime, self, lookup));
         try self.server.registerUnary("/nas.fs.Metadata/List", grpc.UnaryHandler.bind(Runtime, self, list));
+        try self.server.registerUnary("/nas.fs.Metadata/CheckPath", grpc.UnaryHandler.bind(Runtime, self, checkPath));
         try self.server.registerUnary("/nas.fs.Metadata/Backend", grpc.UnaryHandler.bind(Runtime, self, backend));
         try self.server.registerUnary("/nas.fs.Metadata/Version", grpc.UnaryHandler.bind(Runtime, self, version));
         try self.server.registerUnary("/nas.fs.Metadata/Status", grpc.UnaryHandler.bind(Runtime, self, status));
@@ -260,6 +261,15 @@ pub const Runtime = struct {
         const page = self.store.list(allocator, parsed.value) catch |err| return fail(allocator, err);
         defer page.deinit(allocator);
         return reply(allocator, page);
+    }
+
+    fn checkPath(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        const data = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
+        const parsed = std.json.parseFromSlice(metadata.PathCheck, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
+        defer parsed.deinit();
+        self.readBarrier() catch |err| return fail(allocator, err);
+        const result = self.store.checkPath(parsed.value) catch |err| return fail(allocator, err);
+        return reply(allocator, result);
     }
 };
 

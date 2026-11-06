@@ -289,6 +289,30 @@ def main():
                 c.c_uint64,
             ]
             ancestors = [{"inode": 2, "parent": 1, "name": "destination"}]
+            lib.nas_ipc_create_guarded.argtypes = [
+                c.c_void_p,
+                c.c_uint64,
+                c.c_char_p,
+                c.c_int,
+                c.POINTER(Attr),
+                c.c_size_t,
+                c.c_uint64,
+                c.POINTER(c.c_uint64),
+            ]
+            lib.nas_ipc_open_guarded.argtypes = [
+                c.c_void_p,
+                c.POINTER(Attr),
+                c.c_int,
+                c.POINTER(Attr),
+                c.c_size_t,
+                c.POINTER(c.c_uint64),
+            ]
+            guarded_open = {
+                "open_guarded": {
+                    "path": {"source": source, "ancestors": []},
+                    "writable": True,
+                }
+            }
             path = directory / "namespace"
             mutations = [
                 (
@@ -343,6 +367,36 @@ def main():
                             {"result": {"change": {"status": status, "inode": inode}}},
                         )
                         for mutation, status, inode in mutations
+                    ]
+                    + [
+                        (
+                            {
+                                "change": {
+                                    "request_id": 903,
+                                    "mutation": {
+                                        "path_guarded": {
+                                            "ancestors": ancestors,
+                                            "mutation": {
+                                                "create": {
+                                                    "parent": 2,
+                                                    "name": "new",
+                                                    "kind": kind,
+                                                }
+                                            },
+                                        }
+                                    },
+                                }
+                            },
+                            {"result": {"change": {"status": status, "inode": inode}}},
+                        )
+                        for kind, status, inode in [
+                            ("file", "entry_conflict", 0),
+                            ("directory", "ok", 43),
+                        ]
+                    ]
+                    + [
+                        (guarded_open, {"err": "EntryConflict"}),
+                        (guarded_open, {"result": {"handle": 9}}),
                     ],
                 )
                 client = c.c_void_p()
@@ -393,6 +447,32 @@ def main():
                             client, c.byref(attr), guards, 0, 902
                         )
                         == 0
+                    )
+                    assert (
+                        lib.nas_ipc_create_guarded(
+                            client, 2, b"new", 0, guards, 1, 903, c.byref(inode)
+                        )
+                        == errno.ESTALE
+                    )
+                    assert (
+                        lib.nas_ipc_create_guarded(
+                            client, 2, b"new", 1, guards, 1, 903, c.byref(inode)
+                        )
+                        == 0
+                        and inode.value == 43
+                    )
+                    assert (
+                        lib.nas_ipc_open_guarded(
+                            client, c.byref(attr), 1, guards, 0, c.byref(inode)
+                        )
+                        == errno.ESTALE
+                    )
+                    assert (
+                        lib.nas_ipc_open_guarded(
+                            client, c.byref(attr), 1, guards, 0, c.byref(inode)
+                        )
+                        == 0
+                        and inode.value == 9
                     )
                 finally:
                     lib.nas_ipc_disconnect(client)

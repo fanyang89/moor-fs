@@ -36,10 +36,15 @@ pub const Replicas = enum { one, two };
 pub const Kind = enum { directory, file };
 pub const Entry = struct { inode: u64, parent: u64, name: []const u8 };
 pub const RenameChecked = struct { source: Entry, parent: u64, name: []const u8 };
+pub const PathCheck = struct { source: Entry, ancestors: []const Entry };
 pub const max_path_guards = 32;
 pub const GuardedChange = struct {
     ancestors: []const Entry,
-    mutation: union(enum) { rename: RenameChecked, remove: Entry },
+    mutation: union(enum) {
+        rename: RenameChecked,
+        remove: Entry,
+        create: struct { parent: u64, name: []const u8, kind: Kind },
+    },
 };
 
 /// A bounded proof must connect both affected parents to the immutable root.
@@ -52,6 +57,7 @@ pub fn validPathGuards(change: GuardedChange) bool {
     const parents: [2]u64 = switch (change.mutation) {
         .rename => |op| .{ op.source.parent, op.parent },
         .remove => |op| .{ op.parent, root_id },
+        .create => |op| .{ op.parent, root_id },
     };
     for (parents) |parent| {
         var current = parent;
@@ -197,6 +203,7 @@ pub const State = struct {
                     if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .{ .status = .entry_conflict };
                 }
                 return self.execute(switch (c.mutation) {
+                    .create => |op| .{ .create = .{ .parent = op.parent, .name = op.name, .kind = op.kind, .replicas = .two } },
                     .rename => |op| .{ .rename_checked = op },
                     .remove => |op| .{ .remove_checked = op },
                 });

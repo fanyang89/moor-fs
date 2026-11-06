@@ -38,6 +38,7 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 | 操作 | 字段 | 成功result |
 | --- | --- | --- |
 | open | inode:u64, writable:bool | handle, size |
+| open_guarded | path:{source:{inode,parent,name},ancestors:[{inode,parent,name},...]}, writable:bool | handle, size |
 | read | handle:u64, offset:u64, length:u32 | count, hex；EOF返回0/空串 |
 | write | handle:u64, offset:u64, hex:string | count |
 | truncate | handle:u64, length:u64 | 全null |
@@ -65,9 +66,13 @@ mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{i
 
 旧rename/remove保留按inode操作的语义。checked变体在同一次状态机执行/LMDB事务中核对源inode的parent和精确name，再修改；源inode消失或任一字段不同返回entry_conflict，并保存冲突回执。name应取lookup返回的规范名称，而不是用户输入的大小写别名。单独的checked变体仅保护最终源目录项。
 
-原生VFS现在使用 `path_guarded:{ancestors:[{inode,parent,name},...],mutation:{rename:{source:{inode,parent,name},parent,name}}}` 或同一封装下的 `mutation:{remove:{inode,parent,name}}`。ancestors最多32项，不含根inode 1、不允许重复inode，必须把源父目录及改名目标父目录连接到根；缺链、环或超限返回invalid_request。Raft先核对所有祖先仍为目录且parent/name完全匹配，再执行源checked修改，全部在一次状态机执行/LMDB事务中完成。祖先移动、改名、删除或源变化返回entry_conflict。允许附带其他遍历过的目录条件，任何一个变化都会拒绝操作。
+原生VFS使用 `path_guarded:{ancestors:[{inode,parent,name},...],mutation:{rename:{source:{inode,parent,name},parent,name}}}`，同一封装还支持 `mutation:{remove:{inode,parent,name}}` 和 `mutation:{create:{parent,name,kind}}`。ancestors最多32项，不含根inode 1、不允许重复inode，必须把源父目录及改名目标父目录（创建时为目标父目录）连接到根；缺链、环或超限返回invalid_request。Raft先核对所有祖先仍为目录且parent/name完全匹配，再修改，全部在一次状态机执行/LMDB事务中完成。创建文件和目录都强制双副本策略，不继承外部单副本父目录。祖先移动、改名、删除或源变化返回entry_conflict。允许附带其他遍历过的目录条件，任何一个变化都会拒绝操作。
 
-Raft命令JSON上限由4 KiB提高到64 KiB，以容纳32项有界路径条件及JSON转义；Unix IPC帧上限仍为132096字节。VFS以当前回调的目录fd身份为起点，收集到根的链和路径遍历结果；超过32个不同目录在本地返回ENAMETOOLONG。检查当前目录项状态，不检测移动后又移回的历史，也不回溯Samba此前取得目录fd时的路径状态。创建/open仍不使用祖先条件事务。
+Raft命令JSON上限由4 KiB提高到64 KiB，以容纳32项有界路径条件及JSON转义；Unix IPC帧上限仍为132096字节。VFS以当前回调的目录fd身份为起点，收集到根的链和路径遍历结果；超过32个不同目录在本地返回ENAMETOOLONG。检查当前目录项状态，不检测移动后又移回的历史，也不回溯Samba此前取得目录fd时的路径状态。
+
+open_guarded通过新增只读RPC `CheckPath` 执行leader ReadIndex屏障后，在一次LMDB只读事务中核对全部祖先与源文件；不写Raft日志或receipt。核心持有本地服务锁完成检查到句柄登记，拒绝路径时尚未分配句柄或触发文件迁移。冲突返回顶层err=EntryConflict（C ABI ESTALE）；非法证明返回InvalidRequest，目录源返回NotFile。已打开句柄之后仍按inode工作，不持续绑定路径。其他服务或直接元数据客户端仍可在检查快照之后改名：本接口不提供跨节点命名空间锁或fencing。旧open保持纯inode语义。
+
+创建和open仍是两步，创建后的路径重查必须指向创建回执的同一inode，之后再open_guarded；失败可能留下已经创建的条目，不回滚，也不会打开复用该名称的不同inode。
 
 checked与path_guarded均采用新增命令，不改变旧命令的JSON和回执摘要；entry_conflict（20）由C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 

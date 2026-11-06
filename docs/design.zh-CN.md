@@ -1042,3 +1042,13 @@ VFS在当前回调内，从目录fd起点向上收集到根的链，并记录源
 Debug/Safe各113项通过：内存/LMDB逐请求重启、完整快照对照验证源祖先移动、名称复用、目标目录变化、缺链、成功及冲突回执；形状测试检查32项边界、超限、环与重复。C ABI核对guarded请求、ESTALE和本地超限后连接仍可用。本地Debug/双CIFS Safe真实Raft SMB+IPC验证祖先移动后拒绝旧改名/删除，恢复路径后拒绝回执仍可重放；18层长名称目录的实际SMB改名通过，覆盖超过旧4 KiB的命令。
 
 保护范围从当前VFS回调的目录fd身份开始，不回溯此前Samba取得该fd时的路径；仍不检测移走后移回历史，不覆盖创建/open的祖先事务，也未补齐跨服务活跃句柄保护、delete-on-close/share-mode或fencing。
+
+## 70. 创建事务与只读路径校验open
+
+path_guarded新增create变体，内存/LMDB在同一次执行/事务中验证目标父目录到根的条件后创建文件或目录，强制two副本而不继承外部单副本父目录。VFS创建使用此入口；文件创建后重新解析原路径并要求inode与创建回执一致，再打开，避免名称复用后打开另一inode。旧命令序列化和回执摘要不变。
+
+新增CheckPath只读RPC：leader ReadIndex屏障后，单LMDB读事务核对祖先、源inode位置/规范名及文件类型。IPC open_guarded在服务锁内完成该检查到句柄登记；失败前不分配句柄或迁移文件，冲突返回EntryConflict→ESTALE。检查不写Raft日志/receipt，也不改变快照。VFS真实读写数据句柄使用open_guarded，路径引用仍只保存inode。旧inode open继续可用。
+
+Debug/Safe各114项通过：内存/LMDB逐请求重启、快照对照验证创建策略、拒绝和回执；CheckPath检查前后完整快照相同。C ABI Debug/Safe验证create/open请求及冲突映射。本地Debug/双CIFS Safe真实Raft SMB+IPC测试确认祖先移动后旧路径创建文件/目录均拒绝，旧路径读写open（含已有会话）拒绝且不迁移尚未打开文件，已打开读句柄继续可用，路径恢复后可取得写句柄；18层长路径SMB读取与原有读写/改名/损坏恢复通过。
+
+create+open仍是两步，后续失败可留下空条目，不回滚。open路径观察时点是ReadIndex之后的读事务；本地服务锁排除本服务的交错修改，外部元数据客户端仍可能在快照后改变路径，不构成跨服务fencing。32目录条件上限、当前回调目录fd起点与不检测移走后移回历史等边界保持。
