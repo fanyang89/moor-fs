@@ -926,3 +926,11 @@ Safe关闭诊断日志，用相同至少七次/至少1秒操作窗口及三段5�
 额外本地trace测得ReadIndex提交后的等待约1.052 ms；Pending.wait的1 ms休眠检查还保留，因此该观测不等于上游实际ReadIndex RTT。本轮仅切换驱动，不混入调用方等待机制优化或日志验证改动。PR测试时仍未合并，依赖固定完整提交，不浮动追踪分支。
 
 Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故障矩阵和默认staging SMB通过，包含leader切换、无quorum拒绝、13项损坏、10项SIGKILL及冷重挂。上游PR已有测试说明与本次nas-fs集成验证分别记录；未代替用户推送或评论PR。
+
+## 57. 元数据回调完成的通知式等待
+
+第56节定位的Pending.wait每1 ms检查原子done标志现已替换为std.Io.Mutex和Condition。提案/ReadIndex回调持锁写入结果、置done并signal，wait持锁检查状态并在条件等待返回后重查。完成先于等待不会丢失通知；同一互斥区保证等待者返回前回调已完成结果发布和通知阶段，不会在释放栈上Pending之后继续写其状态。沿用grpc-lite阻塞同步Io后端，不增加线程池、独立超时或取消路径；超时、leader变化、停机仍经raftz原有回调完成。
+
+固定raftz e506a28不变，Safe无诊断日志本地/CIFS空WAL4 KiB读median由1.305/3.079 ms降至0.513/2.234 ms，stat由3.684/5.860 ms降至1.323/3.175 ms。16 MiB活跃payload的小读约27.4/39.1 ms，结果仍受日志验证和运行波动影响。额外本地trace的ReadIndex等待约0.034 ms，原1.052 ms台阶消失；该计时仍含回调及调度成本，不是纯RTT。详细前后表、两次运行总延迟差异和原始日志在基准文档。
+
+新增2项单测，Debug/Safe各100项通过，覆盖完成先到、响应借用缓冲复制、畸形响应、超时/停机/leader错误，以及128次真实线程并发完成和结果可见性。本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL、默认staging SMB通过，包含无quorum拒绝、leader切换、关闭和恢复。未修改WAL认证、数据格式、Raft tick或依赖提交。

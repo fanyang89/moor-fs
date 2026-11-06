@@ -264,37 +264,116 @@ pub const Runtime = struct {
 };
 
 const Pending = struct {
-    done: std.atomic.Value(bool) = .init(false),
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    done: bool = false,
     failure: ?raft.Error = null,
     response: [protocol.response_size]u8 = undefined,
 
     fn proposed(ctx: *anyopaque, result: raft.ProposalResult) void {
         const self: *Pending = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(io());
+        defer self.mutex.unlock(io());
         switch (result) {
             .ok => |bytes| {
                 if (bytes.len == self.response.len) @memcpy(&self.response, bytes) else self.failure = error.Fatal;
             },
             .err => |err| self.failure = err,
         }
-        self.done.store(true, .release);
+        self.done = true;
+        self.condition.signal(io());
     }
 
     fn read(ctx: *anyopaque, result: raft.ReadIndexResult) void {
         const self: *Pending = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(io());
+        defer self.mutex.unlock(io());
         switch (result) {
             .ok => {},
             .err => |err| self.failure = err,
         }
-        self.done.store(true, .release);
+        self.done = true;
+        self.condition.signal(io());
     }
 
     fn wait(self: *Pending) void {
-        while (!self.done.load(.acquire)) {
-            const duration: std.os.linux.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
-            _ = std.os.linux.nanosleep(&duration, null);
-        }
+        self.mutex.lockUncancelable(io());
+        defer self.mutex.unlock(io());
+        while (!self.done) self.condition.waitUncancelable(io(), &self.mutex);
+    }
+
+    fn io() std.Io {
+        // Only blocking synchronization, matching grpc-lite's syncIo backend.
+        return std.Io.Threaded.global_single_threaded.io();
     }
 };
+
+test "pending completion before wait preserves results and failures" {
+    const t = std.testing;
+    var read: Pending = .{};
+    Pending.read(&read, .ok);
+    read.wait();
+    try t.expect(read.failure == null);
+    for ([_]raft.Error{ error.ShuttingDown, error.LostLeadership, error.Timeout }) |failure| {
+        var pending: Pending = .{};
+        Pending.read(&pending, .{ .err = failure });
+        pending.wait();
+        try t.expectEqual(failure, pending.failure.?);
+    }
+    var bytes: [protocol.response_size]u8 = @splat(0x5a);
+    var proposal: Pending = .{};
+    Pending.proposed(&proposal, .{ .ok = &bytes });
+    @memset(&bytes, 0);
+    proposal.wait();
+    try t.expect(proposal.failure == null);
+    try t.expect(std.mem.allEqual(u8, &proposal.response, 0x5a));
+    var malformed: Pending = .{};
+    Pending.proposed(&malformed, .{ .ok = "" });
+    malformed.wait();
+    try t.expectEqual(error.Fatal, malformed.failure.?);
+}
+
+test "pending concurrent callback wakes waiter and publishes response" {
+    const t = std.testing;
+    const Waiter = struct {
+        pending: *Pending,
+        started: std.Io.Event = .unset,
+        failure: ?raft.Error = null,
+        response: [protocol.response_size]u8 = undefined,
+
+        fn run(self: *@This()) void {
+            self.started.set(Pending.io());
+            self.pending.wait();
+            self.failure = self.pending.failure;
+            self.response = self.pending.response;
+        }
+    };
+    for (0..128) |iteration| {
+        var pending: Pending = .{ .response = @splat(0) };
+        var waiter: Waiter = .{ .pending = &pending };
+        const thread = try std.Thread.spawn(.{}, Waiter.run, .{&waiter});
+        waiter.started.waitUncancelable(Pending.io());
+        const bytes: [protocol.response_size]u8 = @splat(@intCast(iteration));
+        switch (iteration % 4) {
+            0 => Pending.proposed(&pending, .{ .ok = &bytes }),
+            1 => Pending.read(&pending, .ok),
+            2 => Pending.read(&pending, .{ .err = error.ShuttingDown }),
+            3 => Pending.proposed(&pending, .{ .err = error.LostLeadership }),
+            else => unreachable,
+        }
+        thread.join();
+        switch (iteration % 4) {
+            0 => {
+                try t.expect(waiter.failure == null);
+                try t.expectEqualSlices(u8, &bytes, &waiter.response);
+            },
+            1 => try t.expect(waiter.failure == null),
+            2 => try t.expectEqual(error.ShuttingDown, waiter.failure.?),
+            3 => try t.expectEqual(error.LostLeadership, waiter.failure.?),
+            else => unreachable,
+        }
+    }
+}
 
 fn reply(allocator: std.mem.Allocator, value: anytype) !grpc.UnaryResponse {
     const json = try std.json.Stringify.valueAlloc(allocator, value, .{});

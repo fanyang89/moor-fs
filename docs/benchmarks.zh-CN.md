@@ -207,3 +207,38 @@ PR版本的其他操作：空日志stat本地3.684/3.996 ms、CIFS5.860/6.334 ms
 Debug/Safe各98项nas-fs单测通过；本地Debug WAL FUSE、Safe双CIFS完整WAL故障矩阵以及默认staging SMB通过，覆盖leader切换、无quorum拒绝、恢复、13项损坏、10项SIGKILL及冷重挂。直接测试PR在nas-fs里的集成，不把PR说明中的上游测试结果当成本轮重跑。
 
 原始日志：`/tmp/opencode/nas-event-pr7-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-event-pr7-trace-local-safe.log`、`/tmp/opencode/nas-event-pr7-unit-{debug,safe}.log`、`/tmp/opencode/nas-event-pr7-wal-fault-safe.log`、`/tmp/opencode/nas-event-pr7-staging-safe.log`。最终恢复为普通Safe构建，未推送或评论上游PR。
+
+## nas-fs回调完成通知：移除Pending的1 ms观察粒度
+
+在固定raftz PR提交不变的前提下，将Pending的原子完成标志加nanosleep循环替换为 `std.Io.Mutex` / `std.Io.Condition`。回调持锁拷贝响应或错误、设置done、signal并解锁；wait持锁检查done，未完成则条件等待，醒来再次检查。回调先完成时状态仍保留，等待与通知交错不会丢失唤醒；等待者重新取得锁后才允许返回并释放栈上Pending，避免只发布原子done就使通知者继续访问失效对象。
+
+使用与grpc-lite阻塞同步相同的Io后端，不启动额外线程池。等待不可取消，不新增独立超时：raftz仍负责请求超时、leader变化和停机回调，调用方保持Pending存活直到收到完成通知。提案与ReadIndex使用相同机制，quorum语义、逻辑tick和WAL校验不变。
+
+### 无诊断日志对照
+
+对照基线为上一节PR集成 `8edd35a` 的日志；本轮仍为Safe、同机、本地/双loopback CIFS、每例至少七次且至少1秒。各轮并非交错重复试验，数字用于定位趋势而非SLA。下表延迟为median / p95，单位ms：
+
+| 后端 | 操作/待提交payload | 原Pending轮询 | 通知等待 | 本轮样本数 |
+| --- | --- | ---: | ---: | ---: |
+| 本地 | stat / 0 | 3.684 / 3.996 | 1.323 / 1.638 | 736 |
+| 本地 | read 4 KiB / 0 | 1.305 / 1.434 | 0.513 / 0.635 | 1883 |
+| 本地 | read 1 MiB / 0 | 3.886 / 4.221 | 2.117 / 2.431 | 468 |
+| 本地 | read 4 KiB / 1 MiB | 3.158 / 3.665 | 2.326 / 2.641 | 422 |
+| 本地 | read 4 KiB / 4 MiB | 7.506 / 7.865 | 7.086 / 7.545 | 141 |
+| 本地 | read 4 KiB / 16 MiB | 26.837 / 28.169 | 27.432 / 28.282 | 37 |
+| 双CIFS | stat / 0 | 5.860 / 6.334 | 3.175 / 3.805 | 311 |
+| 双CIFS | read 4 KiB / 0 | 3.079 / 3.551 | 2.234 / 2.696 | 439 |
+| 双CIFS | read 1 MiB / 0 | 9.152 / 9.777 | 6.365 / 7.308 | 157 |
+| 双CIFS | read 4 KiB / 1 MiB | 5.449 / 6.983 | 5.635 / 6.200 | 180 |
+| 双CIFS | read 4 KiB / 4 MiB | 15.567 / 16.582 | 14.721 / 16.076 | 68 |
+| 双CIFS | read 4 KiB / 16 MiB | 42.547 / 43.301 | 39.125 / 43.119 | 26 |
+
+小日志/空日志延迟降低，大日志结果仍有波动，不宣称各负载均改善。空闲三个5秒窗口中，每voterCPU仍约单核0.3–0.5%，全进程自愿切换约1010–1030/秒，没有显著变化；本次消除的是请求进行中的完成轮询，不是其他线程的空闲周期工作。
+
+额外的本地trace运行得到空WAL小读median约0.250 ms，current阶段约0.148 ms，ReadIndex提交后等待约0.034 ms，原约1.052 ms的观察台阶已消失。该次trace运行的总延迟比无日志运行还低，反映不同运行间调度/缓存等差异；不混合两组数据，也不据此声称启用日志更快。屏障计时仍包含回调通知和等待线程被调度的时间，并非纯网络RTT。
+
+### 验证
+
+新增两项单测：回调先完成时保留成功、ShuttingDown/LostLeadership/Timeout错误、拷贝借用响应及拒绝畸形响应；128次真实线程并发完成覆盖提案/ReadIndex成功及停机/失去leader错误，等待返回后验证结果可见。Debug/Safe各100项单测通过。本地Debug WAL FUSE、Safe双CIFS完整13项损坏和10项SIGKILL，以及默认staging SMB回归通过，保留无quorum拒绝、leader切换、关闭和恢复检查。
+
+原始日志在 `/tmp/opencode/nas-pending-notify-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-pending-notify-trace-local-safe.log`、`/tmp/opencode/nas-pending-notify-unit-{debug,safe}.log`、`/tmp/opencode/nas-pending-notify-wal-fault-safe.log` 和 `/tmp/opencode/nas-pending-notify-staging-safe.log`。最终构建恢复为普通Safe。下一步数据路径分析仍应针对大WAL完整认证的CPU/I/O成本。

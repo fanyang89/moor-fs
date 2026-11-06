@@ -933,10 +933,11 @@ Stage tracing (`-Dlatency-trace=true`) identified the metadata ReadIndex wait.
 The runtime now uses raftz's event-driven `Raftor.run()` from PR #7, pinned at
 `e506a2818f610b3d3aeebb786da11378ceb391ad`; the local 1 ms poll loop is removed.
 Requests, gRPC inbound messages and shutdown notify the driver, while logical
-ticks remain at 100 ms. In untraced same-host Safe runs, clean 4 KiB reads took
-about 1.3 ms locally and 3.1 ms over dual loopback CIFS, versus 2.5/4.4 ms with
-the previous poll driver. A 16 MiB pending payload still cost about 27/43 ms
-per small read. Full WAL authentication remains. Faster reopening also
+ticks remain at 100 ms. Metadata handlers now wait on callback notifications
+rather than polling completion every millisecond. In untraced same-host Safe
+runs, clean 4 KiB reads took about 0.51 ms locally and 2.23 ms over dual loopback
+CIFS, versus 1.31/3.08 ms before this handler-side change. Large pending WALs
+still dominate data-path costs; full WAL authentication remains. Faster reopening also
 exposed stale CIFS WAL length: recovery now reads the actual bounded tail rather
 than treating stat as authoritative EOF, while rejecting complete corruption.
 
@@ -945,8 +946,8 @@ switches, using three five-second idle windows and at least one second per load
 case. Event-driven execution reduced whole-voter voluntary switches from about
 1950/s to 1010–1020/s, but measured idle CPU remained similar (roughly 0.3–0.5%
 of one core per voter). Remaining switches include other process threads.
-With 16 MiB pending payload, sustained local small reads used about 95% of one
-FUSE core. These counters exclude Samba/kernel CPU and do not measure power
+With 16 MiB pending payload, the PR-only comparison used about 95% of one
+FUSE core for sustained local small reads. These counters exclude Samba/kernel CPU and do not measure power
 consumption. The benchmark document records the PR pin, comparison and limits.
 
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
