@@ -14,6 +14,7 @@ const Request = struct {
     operation: union(enum) {
         open: struct { inode: u64, writable: bool },
         open_guarded: ns.OpenGuarded,
+        create_open: ns.CreateOpen,
         read: struct { handle: u64, offset: u64, length: u32 },
         write: struct { handle: u64, offset: u64, hex: []const u8 },
         truncate: struct { handle: u64, length: u64 },
@@ -46,6 +47,10 @@ fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allo
         .open_guarded => |op| {
             const opened = try service.openGuarded(owner, arena, op);
             return .{ .handle = opened.handle, .size = opened.size };
+        },
+        .create_open => |op| {
+            const result = try service.createOpen(owner, arena, op);
+            return .{ .change = result.change, .handle = if (result.opened) |opened| opened.handle else null, .size = if (result.opened) |opened| opened.size else null };
         },
         .read => |op| {
             if (op.length > max_data or op.offset > std.math.maxInt(u64) - @as(u64, op.length)) return error.InvalidRange;

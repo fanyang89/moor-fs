@@ -96,7 +96,10 @@ sync always = yes
         process.stdin.flush()
         assert select.select([process.stdout], [], [], 25)[0], "SMB worker timed out"
         result = json.loads(process.stdout.readline())
-        assert result["errno"] == error, (op, result)
+        assert result["errno"] in (error if isinstance(error, tuple) else (error,)), (
+            op,
+            result,
+        )
         return result
 
     def spawn(command, name):
@@ -286,6 +289,59 @@ sync always = yes
         smb(f"put {source} vfs-read/put.dat", share="write")
         smb(f"get vfs-read/put.dat {directory / 'vfs-put-download'}")
         assert (directory / "vfs-put-download").read_bytes() == b"short"
+        race = [
+            worker(url.replace("upload.dat", "exclusive-race.dat")) for _ in range(2)
+        ]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda process: call(
+                        process,
+                        "open",
+                        error=(0, errno.EEXIST),
+                        flags=os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                    ),
+                    race,
+                )
+            )
+        assert sorted(result["errno"] for result in results) == [0, errno.EEXIST]
+        winner = next(
+            process for process, result in zip(race, results) if result["errno"] == 0
+        )
+        loser = next(
+            process for process, result in zip(race, results) if result["errno"] != 0
+        )
+        call(loser, "open", flags=os.O_WRONLY, error=errno.EACCES)
+        call(winner, "write", offset=0, hex=b"won".hex())
+        call(winner, "close")
+        call(loser, "open", flags=os.O_RDONLY)
+        assert call(loser, "read", offset=0, length=3)["hex"] == b"won".hex()
+        call(loser, "close")
+        combined_request = {
+            "create_open": {
+                "request_id": 51400,
+                "parent": parent,
+                "name": "combined.dat",
+                "ancestors": [{"inode": parent, "parent": 1, "name": "vfs-read"}],
+                "writable": True,
+            }
+        }
+        combined = client.call(combined_request)
+        assert combined["change"]["status"] == "ok" and combined["size"] == 0
+        client.call(combined_request, error="FileBusy")
+        client.call(
+            {"write": {"handle": combined["handle"], "offset": 0, "hex": b"kept".hex()}}
+        )
+        client.call({"close": {"handle": combined["handle"]}})
+        replay = client.call(combined_request)
+        assert (
+            replay["change"] == combined["change"]
+            and replay["handle"] != combined["handle"]
+            and replay["size"] == 4
+        )
+        client.call({"close": {"handle": replay["handle"]}})
+        smb(f"get vfs-read/combined.dat {directory / 'vfs-combined'}")
+        assert (directory / "vfs-combined").read_bytes() == b"kept"
         smb("mkdir vfs-read/namespace", share="write")
         folder = client.call({"lookup": {"parent": parent, "name": "namespace"}})[
             "attributes"

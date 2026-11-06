@@ -24,6 +24,7 @@ pub const Service = struct {
     const Session = struct { file: access.Access, refs: usize = 0, writer: bool = false };
     const Handle = struct { owner: u64, inode: u64, session: *Session, writable: bool };
     pub const Opened = struct { handle: u64, size: u64 };
+    pub const CreatedOpen = struct { change: m.Result, opened: ?Opened = null };
 
     // IDs are never reused during this service lifetime. A restarted transport
     // must reject all connections from its previous instance.
@@ -133,6 +134,25 @@ pub const Service = struct {
     pub fn openGuarded(self: *Service, owner: u64, arena: std.mem.Allocator, op: ns.OpenGuarded) !Opened {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        return self.openGuardedLocked(owner, arena, op);
+    }
+
+    pub fn createOpen(self: *Service, owner: u64, arena: std.mem.Allocator, op: ns.CreateOpen) !CreatedOpen {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.connections.contains(owner)) return error.InvalidConnection;
+        if (self.namespace == null) return error.NamespaceUnavailable;
+        // Reject predictable local resource failures before committing a name.
+        if (self.handles.count() >= self.max_handles) return error.HandleLimit;
+        if (self.next_id == std.math.maxInt(u64)) return error.IdExhausted;
+        try self.handles.ensureUnusedCapacity(self.allocator, 1);
+        const result = try self.metadata.apply(self.metadata.context, .{ .request_id = op.request_id, .command = .{ .path_guarded = .{ .ancestors = op.ancestors, .mutation = .{ .create = .{ .parent = op.parent, .name = op.name, .kind = .file } } } } });
+        if (result.status != .ok) return .{ .change = result };
+        const opened = try self.openGuardedLocked(owner, arena, .{ .path = .{ .ancestors = op.ancestors, .source = .{ .inode = result.inode, .parent = op.parent, .name = op.name } }, .writable = op.writable });
+        return .{ .change = result, .opened = opened };
+    }
+
+    fn openGuardedLocked(self: *Service, owner: u64, arena: std.mem.Allocator, op: ns.OpenGuarded) !Opened {
         const reply = try self.namespaceQuery(owner, arena, .{ .check_path = op.path });
         switch (reply.checked) {
             .ok => {},

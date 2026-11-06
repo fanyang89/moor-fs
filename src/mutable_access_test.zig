@@ -3,6 +3,7 @@ const t = std.testing;
 const access = @import("mutable_access.zig");
 const objects = @import("objects.zig");
 const m = @import("metadata.zig");
+const ns = @import("namespace.zig");
 
 const Metadata = struct {
     state: m.State,
@@ -12,6 +13,22 @@ const Metadata = struct {
 
     fn api(self: *Metadata) access.Metadata {
         return .{ .context = self, .get = get, .version = version, .backend = backend, .apply = apply };
+    }
+
+    fn namespaceQuery(ctx: *anyopaque, _: std.mem.Allocator, query: ns.Query) !ns.Reply {
+        const self: *Metadata = @ptrCast(@alignCast(ctx));
+        const check = switch (query) {
+            .check_path => |value| value,
+            else => return error.UnexpectedQuery,
+        };
+        if (!m.validPathGuards(.{ .ancestors = check.ancestors, .mutation = .{ .remove = check.source } })) return .{ .checked = .invalid_request };
+        for (check.ancestors) |entry| {
+            const node = self.state.get(entry.inode) orelse return .{ .checked = .entry_conflict };
+            if (node.kind != .directory or node.parent != entry.parent or !std.mem.eql(u8, node.name, entry.name)) return .{ .checked = .entry_conflict };
+        }
+        const node = self.state.get(check.source.inode) orelse return .{ .checked = .entry_conflict };
+        if (node.parent != check.source.parent or !std.mem.eql(u8, node.name, check.source.name)) return .{ .checked = .entry_conflict };
+        return .{ .checked = if (node.kind == .file) .ok else .not_file };
     }
 
     fn get(ctx: *anyopaque, id: u64) !access.Head {
@@ -242,6 +259,54 @@ test "file service namespace enforces replicas and guards removal while renamed 
     try t.expectEqualDeep(removed, try service.change(owner, 902, .{ .remove = .{ .inode = created.inode } }));
     service.disconnect(owner);
     try t.expectError(error.InvalidConnection, service.change(owner, 904, .{ .create = .{ .parent = 1, .name = "disconnected", .kind = .file } }));
+}
+
+test "create-open preflights capacity and replays metadata without replaying handles" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .namespace = .{ .context = &f.meta, .query = Metadata.namespaceQuery },
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const owner = try service.connect();
+    const request: ns.CreateOpen = .{ .request_id = 910, .parent = 1, .name = "created", .ancestors = &.{}, .writable = true };
+    service.max_handles = 0;
+    try t.expectError(error.HandleLimit, service.createOpen(owner, t.allocator, request));
+    try t.expect(f.meta.state.lookup(1, "created") == null);
+    service.max_handles = 1024;
+    const created = try service.createOpen(owner, t.allocator, request);
+    try t.expectEqual(m.Status.ok, created.change.status);
+    const writer = created.opened.?;
+    try service.write(owner, writer.handle, "keep", 0);
+    try t.expectError(error.FileBusy, service.open(owner, created.change.inode, true));
+    try t.expectError(error.FileBusy, service.createOpen(owner, t.allocator, request));
+    try service.close(owner, writer.handle);
+    const replay = try service.createOpen(owner, t.allocator, request);
+    try t.expectEqual(created.change.inode, replay.change.inode);
+    try t.expect(replay.opened.?.handle != writer.handle);
+    try t.expectEqual(@as(u64, 4), replay.opened.?.size);
+    try service.close(owner, replay.opened.?.handle);
+    _ = try service.change(owner, 911, .{ .rename = .{ .inode = created.change.inode, .parent = 1, .name = "moved" } });
+    _ = try service.change(owner, 912, .{ .create = .{ .parent = 1, .name = "created", .kind = .file } });
+    try t.expectError(error.EntryConflict, service.createOpen(owner, t.allocator, request));
+    try t.expectEqual(@as(usize, 0), service.handles.count());
+    var failed = request;
+    failed.request_id = 913;
+    failed.name = "backend-failed";
+    service.migration_pair = .{ 1, 1 };
+    try t.expectError(error.InvalidReplicaPolicy, service.createOpen(owner, t.allocator, failed));
+    const retained = f.meta.state.lookup(1, failed.name).?.id;
+    try t.expectEqual(@as(usize, 0), service.handles.count());
+    try t.expectEqual(@as(usize, 0), service.sessions.count());
+    service.migration_pair = .{ 1, 2 };
+    const recovered = try service.createOpen(owner, t.allocator, failed);
+    try t.expectEqual(retained, recovered.change.inode);
+    try service.close(owner, recovered.opened.?.handle);
 }
 
 test "mutable access migrates immutable contents once and preserves historical objects" {

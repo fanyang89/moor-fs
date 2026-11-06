@@ -32,6 +32,7 @@ int nas_ipc_remove_checked(struct nas_ipc *, const struct nas_attr *, uint64_t);
 int nas_ipc_rename_guarded(struct nas_ipc *, const struct nas_attr *, uint64_t, const char *, const struct nas_attr *, size_t, uint64_t);
 int nas_ipc_remove_guarded(struct nas_ipc *, const struct nas_attr *, const struct nas_attr *, size_t, uint64_t);
 int nas_ipc_create_guarded(struct nas_ipc *, uint64_t, const char *, int, const struct nas_attr *, size_t, uint64_t, uint64_t *);
+int nas_ipc_create_open(struct nas_ipc *, uint64_t, const char *, int, const struct nas_attr *, size_t, uint64_t, uint64_t *, uint64_t *);
 int nas_ipc_read(struct nas_ipc *, uint64_t, uint64_t, void *, size_t, size_t *);
 int nas_ipc_write(struct nas_ipc *, uint64_t, uint64_t, const void *, size_t);
 int nas_ipc_truncate(struct nas_ipc *, uint64_t, uint64_t);

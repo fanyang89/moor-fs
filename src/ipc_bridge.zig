@@ -72,7 +72,7 @@ fn protocol(client: *Client) c_int {
 
 fn status(reply: Reply) c_int {
     const name = reply.err orelse return 0;
-    const errors = .{ .{ "NotFound", c.ENOENT }, .{ "FileBusy", c.EBUSY }, .{ "InvalidHandle", c.EBADF }, .{ "ReadOnlyHandle", c.EACCES }, .{ "NotFile", c.EISDIR }, .{ "InvalidName", c.EINVAL }, .{ "InvalidRange", c.EINVAL }, .{ "InvalidRequest", c.EINVAL }, .{ "EntryConflict", c.ESTALE } };
+    const errors = .{ .{ "NotFound", c.ENOENT }, .{ "FileBusy", c.EBUSY }, .{ "InvalidHandle", c.EBADF }, .{ "ReadOnlyHandle", c.EACCES }, .{ "NotFile", c.EISDIR }, .{ "InvalidName", c.EINVAL }, .{ "InvalidRange", c.EINVAL }, .{ "InvalidRequest", c.EINVAL }, .{ "EntryConflict", c.ESTALE }, .{ "HandleLimit", c.EMFILE }, .{ "IdExhausted", c.EOVERFLOW } };
     inline for (errors) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return c.EIO;
 }
@@ -225,10 +225,32 @@ export fn nas_ipc_create_guarded(client: *Client, parent: u64, name: [*:0]const 
     return change(client, .{ .path_guarded = .{ .ancestors = guards[0..count], .mutation = .{ .create = .{ .parent = parent, .name = std.mem.span(name), .kind = if (directory == 1) .directory else .file } } } }, request_id, out);
 }
 
+export fn nas_ipc_create_open(client: *Client, parent: u64, name: [*:0]const u8, writable: c_int, ancestors: [*]const Attr, count: usize, request_id: u64, inode: *u64, handle: *u64) c_int {
+    inode.* = 0;
+    handle.* = 0;
+    if (count > m.max_path_guards) return c.ENAMETOOLONG;
+    if (writable != 0 and writable != 1) return c.EINVAL;
+    var guards: [m.max_path_guards]m.Entry = undefined;
+    for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const reply = client.call(arena.allocator(), .{ .create_open = .{ .request_id = request_id, .parent = parent, .name = std.mem.span(name), .ancestors = guards[0..count], .writable = writable == 1 } }) catch |err| return failure(err);
+    const err = changeResult(client, reply, inode);
+    if (err != 0) return err;
+    const opened = reply.result.handle orelse return protocol(client);
+    if (opened == 0) return protocol(client);
+    handle.* = opened;
+    return 0;
+}
+
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const reply = client.call(arena.allocator(), .{ .change = .{ .request_id = request_id, .mutation = mutation } }) catch |err| return failure(err);
+    return changeResult(client, reply, out);
+}
+
+fn changeResult(client: *Client, reply: Reply, out: ?*u64) c_int {
     if (status(reply) != 0) return status(reply);
     const result = reply.result.change orelse return protocol(client);
     switch (result.status) {

@@ -39,6 +39,7 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 | --- | --- | --- |
 | open | inode:u64, writable:bool | handle, size |
 | open_guarded | path:{source:{inode,parent,name},ancestors:[{inode,parent,name},...]}, writable:bool | handle, size |
+| create_open | request_id:u64, parent:u64, name:string, ancestors:[{inode,parent,name},...], writable:bool | change:{status,inode}, handle, size |
 | read | handle:u64, offset:u64, length:u32 | count, hex；EOF返回0/空串 |
 | write | handle:u64, offset:u64, hex:string | count |
 | truncate | handle:u64, length:u64 | 全null |
@@ -72,7 +73,11 @@ Raft命令JSON上限由4 KiB提高到64 KiB，以容纳32项有界路径条件�
 
 open_guarded通过新增只读RPC `CheckPath` 执行leader ReadIndex屏障后，在一次LMDB只读事务中核对全部祖先与源文件；不写Raft日志或receipt。核心持有本地服务锁完成检查到句柄登记，拒绝路径时尚未分配句柄或触发文件迁移。冲突返回顶层err=EntryConflict（C ABI ESTALE）；非法证明返回InvalidRequest，目录源返回NotFile。已打开句柄之后仍按inode工作，不持续绑定路径。其他服务或直接元数据客户端仍可在检查快照之后改名：本接口不提供跨节点命名空间锁或fencing。旧open保持纯inode语义。
 
-创建和open仍是两步，创建后的路径重查必须指向创建回执的同一inode，之后再open_guarded；失败可能留下已经创建的条目，不回滚，也不会打开复用该名称的不同inode。
+原生VFS新建文件使用create_open：在一次IPC、同一个核心服务锁内完成容量预检、guarded create、对创建回执inode执行CheckPath、打开并登记首个句柄。本服务的其他open/rename/remove不能插入这段区间。创建目录继续使用change.path_guarded.create；已有文件继续open_guarded。已有名称返回change.already_exists且handle=null；VFS非O_EXCL调用可再按已有路径打开。
+
+create_open.request_id只标识guarded create元数据命令，不是句柄去重ID；writable控制本次打开，不进入创建回执摘要。重放成功回执会尝试重新打开原inode，并重新核验原路径、祖先及单写者限制；返回新句柄、不截断、不复用旧句柄。被移动或删除的原inode不会替换为同名新文件。容量/ID耗尽等可预知本地错误在提交创建前返回；metadata业务拒绝在result.change中，后续打开错误在顶层err中。
+
+创建与后端打开仍非跨存储原子事务：创建提交后发生后端、分配或通信错误可能留下条目，不回滚；丢失成功响应也不能推断失败。桥接不自动重试。服务断线清理连接句柄，重试须使用新的连接句柄并明确处理元数据回执和当前路径状态。
 
 checked与path_guarded均采用新增命令，不改变旧命令的JSON和回执摘要；entry_conflict（20）由C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 

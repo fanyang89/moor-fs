@@ -1052,3 +1052,11 @@ path_guarded新增create变体，内存/LMDB在同一次执行/事务中验证�
 Debug/Safe各114项通过：内存/LMDB逐请求重启、快照对照验证创建策略、拒绝和回执；CheckPath检查前后完整快照相同。C ABI Debug/Safe验证create/open请求及冲突映射。本地Debug/双CIFS Safe真实Raft SMB+IPC测试确认祖先移动后旧路径创建文件/目录均拒绝，旧路径读写open（含已有会话）拒绝且不迁移尚未打开文件，已打开读句柄继续可用，路径恢复后可取得写句柄；18层长路径SMB读取与原有读写/改名/损坏恢复通过。
 
 create+open仍是两步，后续失败可留下空条目，不回滚。open路径观察时点是ReadIndex之后的读事务；本地服务锁排除本服务的交错修改，外部元数据客户端仍可能在快照后改变路径，不构成跨服务fencing。32目录条件上限、当前回调目录fd起点与不检测移走后移回历史等边界保持。
+
+## 71. 单次IPC与本地临界区内的创建并打开
+
+新增create_open操作，将容量/ID预检、guarded create回执、创建inode的原路径CheckPath、后端打开与首个句柄登记放在一次IPC和同一个Service锁中。VFS新建文件直接取得inode和句柄，不再在创建与打开之间暴露本服务客户端的插入窗口；目录创建仍走guarded create，已有文件走guarded open。非O_EXCL遇到已有名称时，VFS保留查找后打开的语义。
+
+request_id去重的是创建元数据命令，writable仅控制本次句柄。回执重放会重新验证同一inode的原路径和祖先，再分配新句柄；不重放旧句柄、不截断已有内容，当前写者仍导致FileBusy，已移动或被替换路径导致EntryConflict。可预知本地容量不足在创建前拒绝，提交后的后端或分配失败不删除条目、不回滚。此机制仅提供本服务临界区，不是Raft与NAS的跨存储原子事务或跨服务fencing；桥接继续不自动重试不确定请求。
+
+Debug/Safe各115项通过：新增服务测试覆盖容量预检、写者排他、回执重放新句柄/内容保留、移动及名称复用拒绝、后端打开失败无句柄/会话泄漏、修复后复用原inode。C ABI Debug/Safe验证组合请求及EEXIST/有效句柄/异常毒化。本地Debug/双CIFS Safe真实Raft SMB E2E通过，两个独立客户端同时O_EXCL只有一方成功并持有写句柄，释放后另一方能读取；组合请求回执重放仍保留数据，既有深路径、损坏和WAL恢复用例继续通过。

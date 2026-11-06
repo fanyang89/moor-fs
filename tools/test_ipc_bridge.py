@@ -299,6 +299,18 @@ def main():
                 c.c_uint64,
                 c.POINTER(c.c_uint64),
             ]
+            lib.nas_ipc_create_open.argtypes = lib.nas_ipc_create_guarded.argtypes + [
+                c.POINTER(c.c_uint64)
+            ]
+            combined_open = {
+                "create_open": {
+                    "request_id": 904,
+                    "parent": 2,
+                    "name": "new",
+                    "writable": True,
+                    "ancestors": ancestors,
+                }
+            }
             lib.nas_ipc_open_guarded.argtypes = [
                 c.c_void_p,
                 c.POINTER(Attr),
@@ -397,6 +409,32 @@ def main():
                     + [
                         (guarded_open, {"err": "EntryConflict"}),
                         (guarded_open, {"result": {"handle": 9}}),
+                        (
+                            combined_open,
+                            {
+                                "result": {
+                                    "change": {"status": "already_exists", "inode": 0}
+                                }
+                            },
+                        ),
+                        (
+                            combined_open,
+                            {
+                                "result": {
+                                    "change": {"status": "ok", "inode": 44},
+                                    "handle": 10,
+                                }
+                            },
+                        ),
+                        (
+                            combined_open,
+                            {
+                                "result": {
+                                    "change": {"status": "ok", "inode": 44},
+                                    "handle": 0,
+                                }
+                            },
+                        ),
                     ],
                 )
                 client = c.c_void_p()
@@ -474,6 +512,54 @@ def main():
                         == 0
                         and inode.value == 9
                     )
+                    opened = c.c_uint64()
+                    assert (
+                        lib.nas_ipc_create_open(
+                            client,
+                            2,
+                            b"new",
+                            1,
+                            guards,
+                            1,
+                            904,
+                            c.byref(inode),
+                            c.byref(opened),
+                        )
+                        == errno.EEXIST
+                    )
+                    assert opened.value == 0 and inode.value == 0
+                    assert (
+                        lib.nas_ipc_create_open(
+                            client,
+                            2,
+                            b"new",
+                            1,
+                            guards,
+                            1,
+                            904,
+                            c.byref(inode),
+                            c.byref(opened),
+                        )
+                        == 0
+                        and inode.value == 44
+                        and opened.value == 10
+                    )
+                    assert (
+                        lib.nas_ipc_create_open(
+                            client,
+                            2,
+                            b"new",
+                            1,
+                            guards,
+                            1,
+                            904,
+                            c.byref(inode),
+                            c.byref(opened),
+                        )
+                        == errno.EIO
+                    )
+                    assert opened.value == 0
+                    assert lib.nas_ipc_open(client, 44, c.byref(opened)) == errno.EIO
                 finally:
                     lib.nas_ipc_disconnect(client)
                 future.result(timeout=5)

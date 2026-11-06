@@ -66,7 +66,9 @@ IPC桥接同步阻塞，单次数据帧64KiB，较大的SMB读写拆分调用。
 
 核心统一执行每inode单写者互斥，允许共享读者；写确认仍遵循双WAL持久化后更新双完整文件的协议。支持O_EXCL、O_TRUNC、稀疏写和ftruncate，拒绝O_APPEND。关闭写句柄和fsync沿用核心checkpoint流程，验证失败向SMB返回错误。普通fsync验证待提交WAL覆盖范围，不对未触及的基线字节做全文件哈希。
 
-文件和目录创建使用带祖先条件及Raft回执的create。文件创建后重新解析路径，要求inode与创建回执一致，再执行open_guarded；不是原子create+open，后续打开失败或结果不确定时可能留下空文件，不回滚，也不会打开名称被复用后的其他inode。大写请求拆成多个64KiB操作，中途失败可能已有前缀持久化，甚至失败操作也可能在恢复中重放；错误不表示整个SMB写请求回滚，连接失败后不自动重试。
+文件和目录创建使用带祖先条件及Raft回执的create。新文件通过create_open在一次IPC、同一核心服务锁内创建并取得首个句柄，排除其他本地客户端插入的open/rename/remove；核心检查创建回执inode及原路径，不会打开名称被复用后的其他inode。已有名称且非O_EXCL时，VFS仍走已有文件的guarded open。目录创建无数据句柄，继续使用guarded create。
+
+这不是跨Raft与后端文件系统的原子事务：后续打开失败或结果不确定时可能留下空文件，不回滚。创建回执可以重放，但每次打开都生成新的连接所属句柄，不重放旧句柄、不截断已有内容；当前写者占用或路径变化仍会拒绝。桥接不自动重试不确定请求。大写请求拆成多个64KiB操作，中途失败可能已有前缀持久化，甚至失败操作也可能在恢复中重放；错误不表示整个SMB写请求回滚。
 
 VFS接收到O_SYNC/O_DSYNC时执行同步；本机libsmbclient的SMB2参数转换丢弃O_SYNC，所以测试采用 `sync always = yes` 共享验证Samba实际fsync回调及句柄关闭前checkpoint更新，不宣称已经验证客户端write-through标志。
 
@@ -117,3 +119,5 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 祖先条件验证：内存/LMDB逐请求重启和完整快照对照覆盖源祖先变化、旧祖先名称复用、目标目录变化、缺链及成功/拒绝回执重放；形状测试覆盖32项边界、超限、重复、环。真实SMB/IPC测试移动祖先目录后拒绝旧改名/删除，恢复路径后仍重放原拒绝；18层长名称目录的实际SMB改名验证超过旧4 KiB的Raft请求。Debug/Safe各113项、C ABI Debug/Safe、本地Debug/双CIFS Safe通过；日志：`/tmp/opencode/nas-ancestors-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
 
 创建/open条件验证：Debug/Safe各114项、桥接Debug/Safe、本地及双CIFS E2E通过。单测覆盖守卫创建强制双副本、祖先改变后拒绝、回执重放，以及CheckPath前后完整快照不变；E2E验证旧路径拒绝创建文件/目录、拒绝读/写open（包括已有会话）、不迁移尚未打开的文件、原读句柄跨改名可用、路径恢复后可取得写句柄，18层长路径SMB读取成功。日志：`/tmp/opencode/nas-create-open-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。
+
+合并创建验证：Debug/Safe各115项、C ABI Debug/Safe、本地/双CIFS E2E通过。单测验证容量不足不提交创建、首次写者排他、回执重放返回新句柄且保留内容、路径移动/名称复用拒绝、后端打开失败后条目保留且无句柄/会话泄漏、修复配置后重试复用同一inode；真实两个SMB客户端并发O_EXCL仅一个成功，成功方持有写句柄，关闭后另一客户端可读。真实Raft create_open回执重放不截断；桥接验证EEXIST和成功响应必须含非零句柄，异常后毒化。日志：`/tmp/opencode/nas-combined-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。

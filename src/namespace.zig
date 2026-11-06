@@ -8,6 +8,7 @@ pub const Page = struct { entries: []const m.Node, next: ?[]const u8 };
 pub const Query = union(enum) { get: u64, lookup: Lookup, list: List, check_path: m.PathCheck };
 pub const Reply = union(enum) { node: ?m.Node, page: Page, checked: m.Status };
 pub const OpenGuarded = struct { path: m.PathCheck, writable: bool };
+pub const CreateOpen = struct { request_id: u64, parent: u64, name: []const u8, ancestors: []const m.Entry, writable: bool };
 pub const Api = struct {
     context: *anyopaque,
     query: *const fn (*anyopaque, std.mem.Allocator, Query) anyerror!Reply,
