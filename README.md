@@ -960,6 +960,13 @@ still checked, with no cache or format change. In same-host untraced runs,
 (local/dual CIFS), with about 13 ms FUSE CPU per operation. See the benchmark
 document for stage timings and portability limits.
 
+The streaming reader now drains any prefetched bytes, then reads large remaining
+payload spans directly into the existing frame buffer. Small spans retain the
+64 KiB read-ahead path. This reduces user-space read calls and copies without
+changing WAL transfer bytes, memory bounds or integrity checks. In the same-host
+16 MiB pending-payload benchmark, small reads fell further from 13.1/25.6 ms to
+12.4/17.5 ms (local/dual CIFS); actual SMB packet counts were not measured.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

@@ -228,6 +228,15 @@ const LogReader = struct {
         while (copied < destination.len) {
             if (self.used == self.available) {
                 if (self.position >= self.limit) return error.WalChanged;
+                // Large frame tails go straight into the caller's bounded frame
+                // buffer, avoiding a 64 KiB SMB request and copy per block.
+                if (destination.len - copied >= self.buffer.len) {
+                    const bytes = destination[copied..];
+                    if (bytes.len > self.limit - self.position) return error.WalChanged;
+                    if (try self.file.readPositionalAll(self.io, bytes, self.position) != bytes.len) return error.WalChanged;
+                    self.position += bytes.len;
+                    return;
+                }
                 const bytes = self.buffer[0..@min(self.buffer.len, self.limit - self.position)];
                 if (try self.file.readPositionalAll(self.io, bytes, self.position) != bytes.len) return error.WalChanged;
                 self.position += bytes.len;
@@ -246,6 +255,48 @@ const LogReader = struct {
         if (try self.file.readPositionalAll(self.io, &extra, self.limit) != 0) return error.WalChanged;
     }
 };
+
+test "WAL reader preserves bytes across buffered direct and buffered transitions" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(t.io, "log", .{ .read = true });
+    defer file.close(t.io);
+    const source = try t.allocator.alloc(u8, 4 * 65536 + 379);
+    defer t.allocator.free(source);
+    for (source, 0..) |*byte, i| byte.* = @truncate(i * 31 + i / 251);
+    try file.writePositionalAll(t.io, source, 0);
+    const actual = try t.allocator.alloc(u8, source.len);
+    defer t.allocator.free(actual);
+    var reader: LogReader = .{ .io = t.io, .file = file, .limit = source.len };
+    var offset: usize = 0;
+    for ([_]usize{ 112, 3 * 65536 + 17, 3, 65536 - 128, 375 }) |length| {
+        try reader.readExact(actual[offset..][0..length]);
+        try t.expectEqualSlices(u8, source[offset..][0..length], actual[offset..][0..length]);
+        offset += length;
+    }
+    try t.expectEqual(source.len, offset);
+    try reader.checkEnd();
+    try file.writePositionalAll(t.io, "extra", source.len);
+    try t.expectError(error.WalChanged, reader.checkEnd());
+}
+
+test "WAL reader direct reads reject session limit overruns and physical short reads" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(t.io, "log", .{ .read = true });
+    defer file.close(t.io);
+    try file.setLength(t.io, 3 * 65536);
+    const bytes = try t.allocator.alloc(u8, 3 * 65536 + 1);
+    defer t.allocator.free(bytes);
+    var reader: LogReader = .{ .io = t.io, .file = file, .limit = 3 * 65536 };
+    try t.expectError(error.WalChanged, reader.readExact(bytes));
+    try t.expectEqual(@as(u64, 0), reader.position);
+    try reader.readExact(bytes[0..112]);
+    try file.setLength(t.io, 65536 + 8);
+    try t.expectError(error.WalChanged, reader.readExact(bytes[0 .. 2 * 65536]));
+}
 
 /// Both operations are joined even if either fails. No sequential fallback.
 fn pair(io: Io, replicas: [2]Replica, comptime function: anytype, args: anytype) !void {

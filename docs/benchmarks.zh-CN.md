@@ -287,3 +287,34 @@ Debug/Safe各98项nas-fs单测通过；本地Debug WAL FUSE、Safe双CIFS完整W
 Debug/Safe各103项单测通过；本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过。默认staging路径本轮未修改。最后恢复普通Safe构建，raftz PR固定提交及元数据通知等待均不变。
 
 原始输出：`/tmp/opencode/nas-wal-stages-split-local-safe.log`（原分段）、`/tmp/opencode/nas-wal-memcmp-trace-local-safe.log`（临时memcmp）、`/tmp/opencode/nas-wal-word-trace-local-safe.log`（最终分段）、`/tmp/opencode/nas-wal-word-cpu-{local,cifs}-safe.log`（无日志基准）、`/tmp/opencode/nas-wal-word-unit-{debug,safe}.log`、`/tmp/opencode/nas-wal-word-fault-safe.log`。
+
+## 大payload直接读入帧缓冲
+
+在 `54de4be` 基线上优化LogReader：先消耗已有预读字节，预读缓冲耗尽后，如果本次readExact剩余目标长度至少64 KiB，就直接调用readPositionalAll填入已有帧缓冲；较短请求仍走64 KiB预读。这里“直读”仅指绕过用户态中转缓冲，不是 `O_DIRECT`，不改变CIFS挂载和缓存设置。
+
+直读长度先与会话limit剩余长度比较，不超过已确认日志end；返回短读仍WalChanged，位置只在读满后推进。结束后仍探测物理EOF，payload双侧精确比对、逐帧SHA-256及窗口外日志认证全部保留。工作区仍为两个有界帧缓冲、两个64 KiB预读缓冲及实际读窗口副本，没有新增大缓冲。实际读取日志字节数不变。
+
+这一变化让大payload不再每64 KiB发起一次用户态文件读取并拷贝；小记录的请求合并保留。没有测量SMB报文数量，底层客户端可能继续按协商尺寸拆分调用，因此不能将用户态调用次数直接等同于网络请求数量。双侧读取仍顺序执行，本轮未加入读取并发。
+
+### 无日志基准
+
+同机Safe、无trace，与上一节基线相同参数；每例至少七次且至少1秒。4 KiB请求的median / p95，单位ms：
+
+| 后端 | 待提交payload | 原64 KiB中转 | 大区间直读 | 本轮样本数 | FUSE CPU ms/操作前→后 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 本地 | 1 MiB | 1.309 / 1.561 | 1.184 / 1.364 | 824 | 1.247 → 1.141 |
+| 本地 | 4 MiB | 3.429 / 3.741 | 3.195 / 3.600 | 308 | 3.379 → 3.149 |
+| 本地 | 16 MiB | 13.052 / 13.841 | 12.430 / 12.779 | 81 | 12.857 → 12.346 |
+| 双CIFS | 1 MiB | 4.200 / 5.085 | 3.629 / 3.960 | 274 | 1.886 → 1.715 |
+| 双CIFS | 4 MiB | 11.740 / 12.821 | 6.004 / 6.762 | 165 | 4.409 → 3.273 |
+| 双CIFS | 16 MiB | 25.644 / 27.056 | 17.539 / 18.547 | 57 | 13.077 → 10.702 |
+
+16 MiB payload时，stat本轮median本地24.967 ms、CIFS34.060 ms；1 MiB读本地27.796 ms、CIFS38.937 ms。本地收益较小，CIFS收益更明显；没有将同机loopback结果推广为真实NAS或所有小记录负载的吞吐保证。基线来自上一轮，非交错重复采样，CPU仍受10 ms计量粒度影响。
+
+### 验证
+
+新增两项LogReader单测：独立非均匀字节数组经过预读→大区间直读→预读→EOF仍完全一致，末尾新增字节被检出；超会话limit的直读在读取前失败且不推进位置，物理文件在预读后缩短时后续直读失败。既有最大记录、短记录混合、窗口外损坏及4 MiB校验工作区约束继续通过。
+
+Debug/Safe各105项单测、本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过。最终恢复普通Safe构建，WAL格式、Raft依赖及元数据等待机制未修改。
+
+原始日志：`/tmp/opencode/nas-wal-direct-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-wal-direct-unit-{debug,safe}.log`、`/tmp/opencode/nas-wal-direct-fuse-debug.log`、`/tmp/opencode/nas-wal-direct-fault-safe.log`。

@@ -944,3 +944,11 @@ Debug/Safe各98项单测、本地Debug WAL FUSE、Safe真实双CIFS完整WAL故�
 最终trace比对阶段约0.68 ms；Safe无trace16 MiB待提交payload的4 KiB读本地27.432→13.052 ms、双CIFS39.125→25.644 ms，FUSE每操作CPU约27.0→12.9/26.2→13.1 ms。所有结果限于同机本轮工具链，空日志路径未改，不能把其波动归因于payload优化。完整样本表、诊断定义和限制在基准文档。
 
 新增3项单测，Debug/Safe各103项通过：左右所有0–7对齐、0–80长度逐字节翻转；64 KiB边界/1 MiB payload关键字节及EOF；窗口外第二侧payload末字节损坏仍WalDiverged、冻结并保留checkpoint。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor冷重挂通过。当前仍逐次传输并认证双侧完整活跃日志，下一步成本主要在记录认证与I/O，不扩展为持久内容索引缓存。
+
+## 59. 大WAL记录绕过预读中转缓冲
+
+LogReader先消费已有64 KiB预读内容；当缓冲耗尽且目标帧还有至少64 KiB待填充时，将该剩余区间直接读入已有帧缓冲，否则继续原预读路径。这不是O_DIRECT，也不改变挂载参数。直读前检查长度不超过limit-position，短读失败且不推进记录位置，最终物理EOF检查保留。小记录仍合并预读，两帧/两预读/一窗口的工作区边界不变，全部双侧字节与记录认证不变。
+
+同机Safe无trace16 MiB待提交payload的4 KiB读本地13.052→12.430 ms、双CIFS25.644→17.539 ms；FUSE每操作CPU分别12.857→12.346/13.077→10.702 ms。减少的是大区间用户态read调用及中转拷贝，实际日志字节量没有减少，未实测SMB报文数量；也未添加双侧读取并发。完整统计及限制见基准文档。
+
+新增两项单测覆盖预读/直读/预读转换的独立字节oracle、末尾追加检测、越limit拒绝及预读后物理缩短拒绝。Debug/Safe各105项单测、本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL、SMB/supervisor及冷重挂通过。继续保留读请求范围外WAL认证，不改变写入确认、checkpoint或恢复规则。
