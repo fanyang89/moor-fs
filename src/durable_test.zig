@@ -723,7 +723,65 @@ test "automatic timestamp watermark survives restart and never replays over expl
     try t.expectEqualStrings(before, after);
 }
 
-test "automatic timestamp updates exceed receipt capacity and work with a full receipt table" {
+fn checkpointRequest(expected: u64, next: u64, size: u64) m.Request {
+    return .{ .request_id = 0, .command = .{ .checkpoint_mutable = .{
+        .inode = 2,
+        .generation = 7,
+        .expected_sequence = expected,
+        .next_sequence = next,
+        .size = size,
+    } } };
+}
+
+test "sequence checkpoints reject stale publication and preserve times across restart and replay" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var wrong_generation = checkpointRequest(4, 5, 10);
+    wrong_generation.command.checkpoint_mutable.generation = 8;
+    var wrong_id = checkpointRequest(4, 5, 10);
+    wrong_id.request_id = 88;
+    const commands = timestamp_setup ++ [_]m.Request{
+        modifiedRequest(3, 33),
+        checkpointRequest(1, 2, 10), // Behind an acknowledged modification.
+        checkpointRequest(1, 3, 20),
+        checkpointRequest(1, 3, 20),
+        checkpointRequest(2, 3, 20), // The target state is the replay key.
+        modifiedRequest(4, 44),
+        .{ .request_id = 5, .command = .{ .set_times = .{ .inode = 2, .mtime = .{ .seconds = 99 } } } },
+        checkpointRequest(1, 3, 20), // Latest checkpoint despite a pending write.
+        checkpointRequest(3, 4, 30),
+        checkpointRequest(3, 4, 30),
+        checkpointRequest(1, 3, 20),
+        checkpointRequest(3, 4, 31),
+        checkpointRequest(1, 5, 40),
+        wrong_generation,
+        wrong_id,
+        checkpointRequest(0, 5, 40),
+        checkpointRequest(4, 4, 30),
+        checkpointRequest(4, 5, std.math.maxInt(u64)),
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .sequence_conflict, .ok, .ok, .ok, .ok, .ok, .ok, .ok, .ok, .sequence_conflict, .request_conflict, .sequence_conflict, .storage_conflict, .invalid_request, .invalid_request, .invalid_request, .invalid_request };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        if (index >= 11) try t.expectEqual(@as(i64, 99), memory.get(2).?.times.mtime.seconds);
+    }
+    try t.expectEqual(@as(usize, 5), memory.receipts.items.len);
+    try t.expectEqual(@as(u64, 4), memory.get(2).?.mutable_file.?.next_sequence);
+    try t.expectEqual(@as(u64, 30), memory.get(2).?.mutable_file.?.size);
+}
+
+test "automatic timestamps and checkpoints exceed receipt capacity and work with a full receipt table" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     var memory = try m.State.init(t.allocator);
@@ -740,6 +798,11 @@ test "automatic timestamp updates exceed receipt capacity and work with a full r
         const expected = try memory.apply(command);
         try t.expectEqual(m.Status.ok, expected.status);
         try t.expectEqualDeep(expected, try apply(&store, index, command));
+        index += 1;
+        const checkpoint = checkpointRequest(sequence - 1, sequence, sequence);
+        const checkpoint_result = try memory.apply(checkpoint);
+        try t.expectEqual(m.Status.ok, checkpoint_result.status);
+        try t.expectEqualDeep(checkpoint_result, try apply(&store, index, checkpoint));
     }
     const bytes = try store.snapshot(t.allocator, index, 1);
     defer t.allocator.free(bytes);
@@ -748,7 +811,7 @@ test "automatic timestamp updates exceed receipt capacity and work with a full r
     try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
     try t.expectEqual(timestamp_setup.len, memory.receipts.items.len);
     // Restore a full retained receipt history, without generating thousands of
-    // unrelated commands. Automatic timestamps must still bypass that capacity.
+    // unrelated commands. Sequence commands must still bypass that capacity.
     while (memory.receipts.items.len < m.max_receipts) {
         try memory.receipts.append(t.allocator, .{ .request_id = memory.receipts.items.len + 10000, .digest = @splat(0), .result = .{ .status = .not_found } });
     }
@@ -760,6 +823,10 @@ test "automatic timestamp updates exceed receipt capacity and work with a full r
     const latest = modifiedRequest(m.max_receipts + 4, 20000);
     try t.expectEqual(m.Status.ok, (try memory.apply(latest)).status);
     try t.expectEqual(m.Status.ok, (try apply(&store, index, latest)).status);
+    index += 1;
+    const checkpoint = checkpointRequest(m.max_receipts + 3, m.max_receipts + 4, 20000);
+    try t.expectEqual(m.Status.ok, (try memory.apply(checkpoint)).status);
+    try t.expectEqual(m.Status.ok, (try apply(&store, index, checkpoint)).status);
     index += 1;
     const explicit: m.Request = .{ .request_id = 999999, .command = .{ .set_times = .{ .inode = 2, .mtime = .{} } } };
     try t.expectEqual(m.Status.capacity_exceeded, (try memory.apply(explicit)).status);

@@ -193,7 +193,11 @@ pub const Access = struct {
 
     fn publish(self: *Access, update: m.MutableUpdate) !void {
         // The metadata transport must reuse this request across its own retries.
-        const result = try self.metadata.apply(self.metadata.context, .{ .request_id = randomId(self.io), .command = .{ .mutable_file = update } });
+        const request: m.Request = switch (update) {
+            .attach => .{ .request_id = randomId(self.io), .command = .{ .mutable_file = update } },
+            .checkpoint => |checkpoint| .{ .request_id = 0, .command = .{ .checkpoint_mutable = checkpoint } },
+        };
+        const result = try self.metadata.apply(self.metadata.context, request);
         if (result.status != .ok) return error.MetadataConflict;
         if (result.inode != self.data.session.identity.inode) return error.InvalidResponse;
     }

@@ -381,6 +381,7 @@ test "mutable writes persist modification times without retimestamping checkpoin
     _ = try session.size();
     try session.sync();
     try session.collect();
+    try t.expectEqual(receipts_before_write + 1, f.meta.state.receipts.items.len); // Only the explicit time has a receipt.
     try t.expectEqualDeep(saved, f.meta.state.get(2).?.times);
     session.close();
     session = try f.open();
@@ -397,6 +398,7 @@ test "mutable writes persist modification times without retimestamping checkpoin
     session.close();
     session = try f.open();
     try t.expectEqualDeep(truncated, f.meta.state.get(2).?.times);
+    try t.expectEqual(receipts_before_truncate, f.meta.state.receipts.items.len);
     try t.expectEqual(@as(u64, 0), try session.size());
 }
 
@@ -438,6 +440,38 @@ test "rejected data write does not update timestamps" {
     const original = f.meta.state.get(2).?.times;
     try t.expectError(error.InvalidRange, session.write("x", std.math.maxInt(u64)));
     try t.expectEqualDeep(original, f.meta.state.get(2).?.times);
+}
+
+test "full receipt history permits mutable write sync close and recovery" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const owner = try service.connect();
+    const opened = try service.open(owner, 2, true);
+    while (f.meta.state.receipts.items.len < m.max_receipts) {
+        try f.meta.state.receipts.append(t.allocator, .{ .request_id = f.meta.state.receipts.items.len + 10000, .digest = @splat(0), .result = .{ .status = .not_found } });
+    }
+    try service.write(owner, opened.handle, "durable", 0);
+    try service.sync(owner, opened.handle);
+    try service.truncate(owner, opened.handle, 4);
+    try service.close(owner, opened.handle);
+    const reopened = try service.open(owner, 2, true);
+    try service.write(owner, reopened.handle, "!", 4);
+    service.disconnect(owner); // Recover an uncheckpointed acknowledged write.
+    var recovered = try f.open();
+    defer recovered.close();
+    var bytes: [5]u8 = undefined;
+    try t.expectEqual(@as(usize, 5), try recovered.read(&bytes, 0));
+    try t.expectEqualStrings("dura!", &bytes);
+    try t.expectEqual(@as(u64, 5), f.meta.state.get(2).?.mutable_file.?.size);
+    try t.expectEqual(@as(usize, m.max_receipts), f.meta.state.receipts.items.len);
 }
 
 test "mutable attachment reply loss reopens the bound generation instead of recreating it" {

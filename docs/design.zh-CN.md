@@ -1100,3 +1100,15 @@ mtime/ctime和modification在同一LMDB事务/Raft状态转换提交；快照验
 Debug/Safe各121项通过：内存/LMDB逐请求重启比较、精确重试/冲突/旧序号/错误代际、显式值保护、非法快照不改变数据库、超过8192次自动更新仍仅有4条初始化回执，以及满回执表下自动更新可继续而显式修改仍被拒绝。既有分配失败测试因新增节点字段暴露原地扩容导致的分配次数不确定性，测试后备分配器禁用原地扩容，继续逐分配点验证事务回滚。
 
 配套模块、Safe桥接、本地Debug/双CIFS Safe原生SMB、完整WAL FUSE/SMB故障套件通过；真实三节点验证自动记录和显式时间跨leader切换、快照追赶及全群重启保持，核心重启后精确重放也不覆盖SMB allinfo。一次并行测试因节点重启时BindFailed退出，其他隔离套件结束后串行重跑本地通过。日志前缀/tmp/opencode/nas-time-watermark-。必须统一升级全部Raft节点与核心，C ABI布局未变；创建、目录变化及atime自动维护仍待实现。
+
+## 76. 检查点按当前目标状态去重
+
+新增内部checkpoint_mutable命令，字段为inode/generation/expected_sequence/next_sequence/size，使用request_id=0；与touch_modified共用序号命令入口，不读取或追加全局receipt。Access首次attach仍走非零随机ID及旧回执协议，后续sync/close/恢复改走新检查点命令。无需新增节点历史字段，复用mutable_file的当前generation/next_sequence/size作为重放身份；旧mutable_file.checkpoint命令的序列化及回执语义保持不变。
+
+请求必须满足generation和expected_sequence非零、next_sequence严格大于expected_sequence及大小合法。新目标必须匹配当前代际和expected_sequence，且不得落后于已提交自动时间的WAL序号。目标已是当前序号且大小相同时无操作成功，即使后来已有尚未checkpoint的写入；重放身份不包含原expected_sequence，但它仍需合法且小于目标。同目标不同大小返回request_conflict，旧目标或新目标CAS不匹配返回sequence_conflict。不保存历史响应，较旧成功请求不能再要求返回原结果。检查点不修改显式或自动时间。
+
+Debug/Safe各123项通过。新增内存/LMDB逐请求重启及完整快照对照覆盖新旧目标、大小冲突、错误代际/请求ID/范围、落后于自动时间、显式时间保护；超过8192轮自动时间＋检查点仍只有4条初始化回执。满回执表下，元数据检查点继续提交；真实Access/Service验证write/fsync/truncate/close及断线后WAL恢复成功且回执数不增长。既有丢回复冻结、重开协调和旧回执测试继续通过。
+
+本地Debug/双CIFS Safe原生SMB、完整WAL FUSE/SMB故障套件通过，包含13种损坏、4次修复SIGKILL和6次基线生命周期SIGKILL；真实三节点覆盖新检查点重试、快照追赶及全群重启后的目标状态重放。日志前缀/tmp/opencode/nas-checkpoint-sequence-。
+
+这消除了已有绑定文件普通写入、检查点及恢复对全局回执容量的持续消耗，不是回执GC。创建、首次attach、显式时间、其他命名空间修改及旧检查点命令仍有8192上限，历史回执不会删除。每个写段的自动时间仍需Raft往返，时间与数据WAL仍非原子事务；跨节点fencing、自动创建/目录/读取时间仍待实现。新命令要求核心及全部Raft节点统一升级，C ABI和节点存储字段布局不变。

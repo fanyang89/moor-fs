@@ -397,6 +397,28 @@ def main():
             )
             mutable_state = run("get", endpoints, mutable_inode)["mutable_file"]
             assert mutable_state["next_sequence"] == 5 + mutable_winner
+            sequence_checkpoint = {
+                "request_id": 0,
+                "command": {
+                    "checkpoint_mutable": {
+                        "inode": mutable_inode,
+                        "generation": 7,
+                        "expected_sequence": mutable_state["next_sequence"],
+                        "next_sequence": mutable_state["next_sequence"] + 1,
+                        "size": 40,
+                    }
+                },
+            }
+            assert (
+                run("apply", endpoints, json.dumps(sequence_checkpoint))
+                == mutable_result
+            )
+            assert (
+                run("apply", endpoints, json.dumps(sequence_checkpoint))
+                == mutable_result
+            )
+            mutable_state = run("get", endpoints, mutable_inode)["mutable_file"]
+            assert mutable_state["size"] == 40
             competing = [publication(107, 11, 10), publication(108, 12, 10)]
             with ThreadPoolExecutor(max_workers=2) as workers:
                 outcomes = list(
@@ -491,6 +513,8 @@ def main():
             assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
             assert apply(elected, automatic_time) == mutable_result
             restored_time = run("get", endpoints, mutable_inode)
+            assert apply(elected, sequence_checkpoint) == mutable_result
+            assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
             assert (
                 restored_time["modification"]
                 == automatic_time["command"]["touch_modified"]["modification"]

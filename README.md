@@ -114,8 +114,9 @@ planning must replace these prototype limits before deployment.
 Each nonempty mutable WAL write and each truncate also commits mtime/ctime through
 Raft before returning success. Automatic times use one generation/sequence/time
 watermark per inode, not retained receipts; each 64 KiB native-VFS segment still
-adds metadata latency. Namespace changes, explicit times and checkpoints still
-consume receipts, so their capacity limit remains. Failed calls may have durable
+adds metadata latency. Core checkpoints also deduplicate by their current target
+sequence and size without receipts. Namespace changes, initial attachment and
+explicit times still consume receipts, so their capacity limit remains. Failed calls may have durable
 data without updated timestamps; data WAL and timestamp metadata are not one
 atomic transaction. Reads do not update atime, and automatic creation/namespace
 timestamps remain pending.
@@ -123,8 +124,8 @@ timestamps remain pending.
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
 Snapshots retain receipts even if the referenced file has since been deleted.
-The internal `touch_modified` command is the sole exception: it requires ID zero
-and deduplicates by its inode-local WAL watermark. An exact latest replay succeeds
+The internal `touch_modified` and `checkpoint_mutable` commands require ID zero
+and deduplicate against inode-local WAL state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.
 
 Names are valid UTF-8, at most 255 bytes, and cannot contain NUL or either path
@@ -177,7 +178,8 @@ access with reads and snapshot creation; the in-memory type has no internal lock
 LMDB 0.9.36 is compiled from the pinned source submodule. Store each node's
 database on local SSD, never on an SMB share. Default synchronous commits are
 used; no `NOSYNC`, `NOMETASYNC`, `MAPASYNC`, or `WRITEMAP` flags are enabled.
-Each command atomically persists inode/directory updates, its request receipt,
+Each command atomically persists inode/directory updates, its request receipt (or
+inode-local sequence state for receipt-free commands),
 and the applied index/term. Storage failures abort the transaction and are fatal
 to the Raft adapter. Returned node names are caller-owned.
 
@@ -395,6 +397,14 @@ immutable-version pointer but retains historical objects/versions. Subsequent
 then record the durable `next_sequence` and size without allocating an immutable
 version. Sequence rollback and changing size without advancing the sequence are
 rejected. Original request IDs still replay their original receipts.
+
+The core now publishes checkpoints through `checkpoint_mutable` with ID zero and
+the same fields. A fresh target requires generation and expected-sequence CAS,
+strict sequence advancement, and must not precede the automatic-time watermark.
+A latest target with identical sequence/size is an idempotent success; a different
+size conflicts, and older targets fail. This consumes no receipts or extra history.
+The legacy receipt-backed command retains its original behavior. All nodes and
+the core must be upgraded together before using the new command.
 
 These are metadata declarations, not migration or data-recovery commands. The
 caller must establish exclusive ownership and durable backend checkpoints first.

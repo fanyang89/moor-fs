@@ -28,9 +28,10 @@ pub const MutableFile = struct {
     size: u64,
     backends: [2]u64,
 };
+pub const MutableCheckpoint = struct { inode: u64, generation: u64, expected_sequence: u64, next_sequence: u64, size: u64 };
 pub const MutableUpdate = union(enum) {
     attach: struct { inode: u64, expected_version: u64, file: MutableFile },
-    checkpoint: struct { inode: u64, generation: u64, expected_sequence: u64, next_sequence: u64, size: u64 },
+    checkpoint: MutableCheckpoint,
 };
 pub const Replicas = enum { one, two };
 pub const Kind = enum { directory, file };
@@ -139,6 +140,7 @@ pub const Command = union(enum) {
     path_guarded: GuardedChange,
     set_times: TimeUpdate,
     touch_modified: ModifiedUpdate,
+    checkpoint_mutable: MutableCheckpoint,
 };
 pub const Request = struct {
     version: u32 = 1,
@@ -146,7 +148,11 @@ pub const Request = struct {
     command: Command,
 
     pub fn validId(self: Request) bool {
-        return if (self.command == .touch_modified) self.request_id == 0 else self.request_id != 0;
+        return if (self.usesSequence()) self.request_id == 0 else self.request_id != 0;
+    }
+
+    pub fn usesSequence(self: Request) bool {
+        return self.command == .touch_modified or self.command == .checkpoint_mutable;
     }
 };
 pub const Status = enum(u8) {
@@ -228,8 +234,8 @@ pub const State = struct {
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
-        // Automatic times have an inode-local WAL watermark, not a receipt.
-        if (request.command == .touch_modified) return self.execute(request.command);
+        // Sequence commands deduplicate against inode state, not receipts.
+        if (request.usesSequence()) return self.execute(request.command);
         const digest = try requestDigest(self.allocator, request);
         for (self.receipts.items) |receipt| {
             if (receipt.request_id == request.request_id) {
@@ -250,6 +256,11 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .checkpoint_mutable => |update| {
+                const i = self.find(update.inode) orelse return .{ .status = .not_found };
+                const result = checkpointMutable(&self.nodes.items[i], update);
+                return .{ .status = result, .inode = if (result == .ok) update.inode else 0 };
+            },
             .touch_modified => |update| {
                 const i = self.find(update.inode) orelse return .{ .status = .not_found };
                 const result = updateModified(&self.nodes.items[i], update);
@@ -507,6 +518,23 @@ pub fn mutableInode(update: MutableUpdate) u64 {
     return switch (update) {
         inline else => |c| c.inode,
     };
+}
+
+/// Sequence-keyed checkpoint publication. Latest target-state replays are
+/// harmless; unlike the legacy command, older results are not retained.
+pub fn checkpointMutable(node: *Node, update: MutableCheckpoint) Status {
+    if (update.generation == 0 or update.expected_sequence == 0 or update.next_sequence <= update.expected_sequence or update.size > std.math.maxInt(i64)) return .invalid_request;
+    if (node.kind != .file) return .not_file;
+    const file = node.mutable_file orelse return .storage_conflict;
+    if (update.generation != file.generation) return .storage_conflict;
+    if (update.next_sequence == file.next_sequence) return if (update.size == file.size) .ok else .request_conflict;
+    if (update.next_sequence < file.next_sequence or update.expected_sequence != file.next_sequence) return .sequence_conflict;
+    if (node.modification) |modified| {
+        if (update.next_sequence < modified.next_sequence) return .sequence_conflict;
+    }
+    node.mutable_file.?.next_sequence = update.next_sequence;
+    node.mutable_file.?.size = update.size;
+    return .ok;
 }
 
 fn mutableStatus(file: MutableFile, backends: []const Backend) Status {
