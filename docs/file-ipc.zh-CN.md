@@ -67,7 +67,9 @@ mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{i
 
 核心Access在每次非空write和每次truncate完成双副本数据更新及验证后，以接入机实时时钟同一取样提交mtime/ctime，Raft确认后才返回成功。atime/birthtime保持原值，零字节write不更新；同长度truncate仍更新时间。时间提交失败或结果不确定会冻结共享会话，需释放全部句柄后重开。失败操作的数据可能已持久化，重开恢复不补造时间；WAL和时间没有跨存储原子性。sync/close、迁移、恢复、读和stat不自动改时间，因此不会覆盖后续显式设置值。创建及命名空间自动时间尚未接入。
 
-每个上述核心操作新增一次Raft提交和一个receipt，包括VFS拆分的每个64KiB写段；当前8192个集群共享回执没有GC，到达上限会使新时间提交失败并冻结写会话。这是当前原型的写入容量及延迟限制，不能将本轮视为已支持持续大文件写入。
+每个上述核心操作仍新增一次Raft提交，包括VFS拆分的每个64KiB写段；自动时间不再消耗receipt，而是在node.modification保存一条generation/next_sequence/time记录。此字段缺省为null，属于内部去重状态，不是客户端应写的时间属性。显式set_times、命名空间和checkpoint仍消耗8192个集群共享回执且尚无GC，所以持续写入的检查点/关闭仍可能遇到容量限制。
+
+内部Raft命令touch_modified使用request_id=0及 `{inode,modification:{generation,next_sequence,time}}`，不开放为IPC change操作；IPC修改仍要求非零去重ID。文件代际必须匹配，合法的新序号须同时大于已有自动时间序号和已发布checkpoint序号。最近同序号同内容重试返回ok但不重新改时间；同序号不同内容返回request_conflict，旧序号返回sequence_conflict。显式时间不清除此记录，后续旧自动请求不能覆盖它；checkpoint之后精确重放最近自动请求也仍是无操作成功。所有Raft节点和核心须统一升级，不支持混合旧二进制。
 
 C ABI新增nas_ipc_set_times，mask位为atime=1、mtime=2、ctime=4、birthtime=8；零mask本地成功且不发送请求，无效mask/时间在发送前返回EINVAL。nas_attr新增nas_times，调用方及模块必须同步重建；新set_times命令要求统一升级全部Raft节点和核心。
 

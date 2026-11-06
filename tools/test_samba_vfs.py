@@ -327,12 +327,36 @@ nas_fs:timeout_ms = 500
         truncate_started = time.time_ns()
         call(timed_writer, "truncate", length=2)
         assert_modified_since(truncate_started)
+        modified_node = client.call({"stat": {"inode": timed_inode}})["attributes"][
+            "node"
+        ]
+        modified_request = {
+            "request_id": 0,
+            "command": {
+                "touch_modified": {
+                    "inode": timed_inode,
+                    "modification": modified_node["modification"],
+                }
+            },
+        }
+
+        def replay_modified():
+            result = subprocess.run(
+                [executable, "apply", endpoints, json.dumps(modified_request)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert json.loads(result.stdout) == {"status": "ok", "inode": timed_inode}
+
         dates = (
             "20:01:02-03:04:05 21:01:02-03:04:05 22:01:02-03:04:05 23:01:02-03:04:05"
         )
         smb(f"utimes vfs-read/times.dat {dates}", share="write")
         # A later explicit timestamp must survive the writer's close checkpoint.
         call(timed_writer, "close")
+        replay_modified()
         expected_times = {
             field: {"seconds": calendar.timegm((year, 1, 2, 3, 4, 5)), "nanoseconds": 0}
             for field, year in (
@@ -763,6 +787,7 @@ nas_fs:timeout_ms = 500
             assert core.poll() is None and time.monotonic() < deadline
             time.sleep(0.02)
         client = Client(runtime / "core.sock")
+        replay_modified()
         assert (
             client.call({"stat": {"inode": timed_inode}})["attributes"]["node"]["times"]
             == expected_times

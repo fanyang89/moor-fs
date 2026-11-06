@@ -1088,3 +1088,15 @@ Access.write非空写和Access.truncate在双副本WAL/数据更新及验证之�
 代价：每个非空写/截断新增一次Raft提交并消耗一个receipt，64KiB拆分写每段都提交。8192个集群共享回执上限且尚无GC，现在也限制累计写操作量；耗尽后时间提交失败、写会话冻结，恢复checkpoint也可能因容量耗尽失败。后续必须解决自动时间的有界去重/持久化及回执生命周期，不能以提高上限代替协议。本轮尚不实现创建、目录变更和读atime的自动维护。
 
 验证：Debug/Safe各119项、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过，后者继续覆盖13种损坏、4个修复SIGKILL及6个基线生命周期SIGKILL。新增测试验证普通put、未关闭写句柄及截断自动时间，显式更新优先于随后close/checkpoint；单测覆盖时间被拒/丢回复冻结、恢复数据但不重设时间、非法写不更新、零写/迁移/检查点不覆盖。日志前缀/tmp/opencode/nas-auto-times-。
+
+## 75. 自动时间的每inode有界去重
+
+自动时间不再复用有回执的set_times，改为内部touch_modified命令，携带inode及modification:{generation,next_sequence,time}。request_id必须为0；其他命令仍必须非零。Runtime、内存状态机及LMDB统一检查该规则。此命令不查写全局receipt，节点仅保存最新一条modification，空间随活跃inode数量有界；旧记录缺字段默认null，旧命令序列化及回执摘要不变。
+
+校验代际匹配、next_sequence至少2、时间范围合法。新序号必须大于已有modification和checkpoint序号；最近同序号同内容返回ok而不重新修改时间，同序号不同内容返回request_conflict，较旧序号返回sequence_conflict。精确重试在checkpoint已推进后也可成功；显式set_times不清除去重记录，因此自动请求重试不能覆盖后设的显式值。历史请求没有逐条回执，旧成功请求重放可能被拒绝，不能宣称它保留原响应语义。inode删除会同时移除该记录，不涉及历史回执GC。
+
+mtime/ctime和modification在同一LMDB事务/Raft状态转换提交；快照验证记录绑定当前mutable代际且序号/时间合法。Access从刚完成的数据操作取得WAL next_sequence，以同一个请求交给元数据客户端重试。仍然是数据成功后再提交时间，不增加WAL字段、不补造中断操作时间，不提供跨节点fencing。每个写段仍有一次Raft往返；只消除自动时间的回执消耗，显式时间、命名空间、attach/checkpoint回执及8192容量上限仍在。
+
+Debug/Safe各121项通过：内存/LMDB逐请求重启比较、精确重试/冲突/旧序号/错误代际、显式值保护、非法快照不改变数据库、超过8192次自动更新仍仅有4条初始化回执，以及满回执表下自动更新可继续而显式修改仍被拒绝。既有分配失败测试因新增节点字段暴露原地扩容导致的分配次数不确定性，测试后备分配器禁用原地扩容，继续逐分配点验证事务回滚。
+
+配套模块、Safe桥接、本地Debug/双CIFS Safe原生SMB、完整WAL FUSE/SMB故障套件通过；真实三节点验证自动记录和显式时间跨leader切换、快照追赶及全群重启保持，核心重启后精确重放也不覆盖SMB allinfo。一次并行测试因节点重启时BindFailed退出，其他隔离套件结束后串行重跑本地通过。日志前缀/tmp/opencode/nas-time-watermark-。必须统一升级全部Raft节点与核心，C ABI布局未变；创建、目录变化及atime自动维护仍待实现。

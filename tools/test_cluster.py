@@ -314,6 +314,30 @@ def main():
             checkpoint_request = mutable_checkpoint(202, 1, 4, 123)
             mutable_result = {"status": "ok", "inode": mutable_inode}
             assert apply(first, binding) == mutable_result
+            automatic_time = {
+                "request_id": 0,
+                "command": {
+                    "touch_modified": {
+                        "inode": mutable_inode,
+                        "modification": {
+                            "generation": 7,
+                            "next_sequence": 2,
+                            "time": {"seconds": 123, "nanoseconds": 456700},
+                        },
+                    }
+                },
+            }
+            assert apply(first, automatic_time) == mutable_result
+            explicit_time = {
+                "request_id": 207,
+                "command": {
+                    "set_times": {
+                        "inode": mutable_inode,
+                        "mtime": {"seconds": 456, "nanoseconds": 0},
+                    }
+                },
+            }
+            assert apply(first, explicit_time) == mutable_result
             assert apply(first, checkpoint_request) == mutable_result
             print(
                 "PASS: election, proposal, deduplication, validation, leader-only ReadIndex, store lock",
@@ -343,6 +367,10 @@ def main():
             assert elected != first
             assert run("apply", endpoints, json.dumps(request)) == result
             assert apply(elected, request) == result
+            assert apply(elected, automatic_time) == mutable_result
+            assert (
+                run("get", endpoints, mutable_inode)["times"]["mtime"]["seconds"] == 456
+            )
             assert run("apply", endpoints, json.dumps(initial_publication)) == result
             assert run("apply", endpoints, json.dumps(binding)) == mutable_result
             assert (
@@ -461,8 +489,15 @@ def main():
                 == mutable_result
             )
             assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
+            assert apply(elected, automatic_time) == mutable_result
+            restored_time = run("get", endpoints, mutable_inode)
+            assert (
+                restored_time["modification"]
+                == automatic_time["command"]["touch_modified"]["modification"]
+            )
+            assert restored_time["times"]["mtime"]["seconds"] == 456
             print(
-                "PASS: mutable checkpoint CAS, original receipt replay across leader change, snapshot and whole-cluster restart",
+                "PASS: mutable checkpoint CAS and timestamp watermark replay preserve explicit times across leader change, snapshot and whole-cluster restart",
                 flush=True,
             )
             print(

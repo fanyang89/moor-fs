@@ -40,6 +40,28 @@ pub const PathCheck = struct { source: Entry, ancestors: []const Entry };
 pub const Timestamp = struct { seconds: i64 = 1704067200, nanoseconds: u32 = 0 };
 pub const Times = struct { atime: Timestamp = .{}, mtime: Timestamp = .{}, ctime: Timestamp = .{}, birthtime: Timestamp = .{} };
 pub const TimeUpdate = struct { inode: u64, atime: ?Timestamp = null, mtime: ?Timestamp = null, ctime: ?Timestamp = null, birthtime: ?Timestamp = null };
+pub const Modification = struct { generation: u64, next_sequence: u64, time: Timestamp };
+pub const ModifiedUpdate = struct { inode: u64, modification: Modification };
+
+pub fn updateModified(node: *Node, update: ModifiedUpdate) Status {
+    const value = update.modification;
+    if (value.generation == 0 or value.next_sequence < 2 or !validTimestamp(value.time)) return .invalid_request;
+    if (node.kind != .file) return .not_file;
+    const file = node.mutable_file orelse return .storage_conflict;
+    if (file.generation != value.generation) return .storage_conflict;
+    if (node.modification) |previous| {
+        if (value.next_sequence < previous.next_sequence) return .sequence_conflict;
+        if (value.next_sequence == previous.next_sequence) {
+            // Do not reapply even if explicit times have since changed.
+            return if (std.meta.eql(previous, value)) .ok else .request_conflict;
+        }
+    }
+    if (value.next_sequence <= file.next_sequence) return .sequence_conflict;
+    node.times.mtime = value.time;
+    node.times.ctime = value.time;
+    node.modification = value;
+    return .ok;
+}
 
 pub fn validTimestamp(value: Timestamp) bool {
     return value.seconds >= -11644473600 and value.seconds <= 253402300799 and value.nanoseconds < 1000000000;
@@ -100,6 +122,7 @@ pub const Node = struct {
     current_version: u64 = 0,
     mutable_file: ?MutableFile = null,
     times: Times = .{},
+    modification: ?Modification = null,
 };
 pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
@@ -115,8 +138,17 @@ pub const Command = union(enum) {
     remove_checked: Entry,
     path_guarded: GuardedChange,
     set_times: TimeUpdate,
+    touch_modified: ModifiedUpdate,
 };
-pub const Request = struct { version: u32 = 1, request_id: u64, command: Command };
+pub const Request = struct {
+    version: u32 = 1,
+    request_id: u64,
+    command: Command,
+
+    pub fn validId(self: Request) bool {
+        return if (self.command == .touch_modified) self.request_id == 0 else self.request_id != 0;
+    }
+};
 pub const Status = enum(u8) {
     ok = 0,
     not_found = 1,
@@ -195,7 +227,9 @@ pub const State = struct {
 
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
-        if (request.request_id == 0) return .{ .status = .invalid_request };
+        if (!request.validId()) return .{ .status = .invalid_request };
+        // Automatic times have an inode-local WAL watermark, not a receipt.
+        if (request.command == .touch_modified) return self.execute(request.command);
         const digest = try requestDigest(self.allocator, request);
         for (self.receipts.items) |receipt| {
             if (receipt.request_id == request.request_id) {
@@ -216,6 +250,11 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .touch_modified => |update| {
+                const i = self.find(update.inode) orelse return .{ .status = .not_found };
+                const result = updateModified(&self.nodes.items[i], update);
+                return .{ .status = result, .inode = if (result == .ok) update.inode else 0 };
+            },
             .set_times => |update| {
                 const i = self.find(update.inode) orelse return .{ .status = .not_found };
                 const result = updateTimes(&self.nodes.items[i], update);
@@ -397,6 +436,10 @@ pub fn validateSnapshot(data: Snapshot) !void {
         if (node.id == 0 or node.id >= data.next_id) return error.InvalidSnapshot;
         inline for (.{ "atime", "mtime", "ctime", "birthtime" }) |field| {
             if (!validTimestamp(@field(node.times, field))) return error.InvalidSnapshot;
+        }
+        if (node.modification) |modified| {
+            const file = node.mutable_file orelse return error.InvalidSnapshot;
+            if (modified.generation != file.generation or modified.next_sequence < 2 or !validTimestamp(modified.time)) return error.InvalidSnapshot;
         }
         if (node.mutable_file) |file| {
             if (node.kind != .file or node.current_version != 0 or node.replicas != .two or mutableStatus(file, data.backends) != .ok) return error.InvalidSnapshot;

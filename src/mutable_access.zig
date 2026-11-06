@@ -228,8 +228,12 @@ pub const Access = struct {
         if (!m.validTimestamp(time)) return error.InvalidTimestamp;
         const inode = self.data.session.identity.inode;
         const result = try self.metadata.apply(self.metadata.context, .{
-            .request_id = randomId(self.io),
-            .command = .{ .set_times = .{ .inode = inode, .mtime = time, .ctime = time } },
+            .request_id = 0,
+            .command = .{ .touch_modified = .{ .inode = inode, .modification = .{
+                .generation = self.data.session.identity.generation,
+                .next_sequence = self.data.session.next,
+                .time = time,
+            } } },
         });
         if (result.status != .ok) return error.MetadataConflict;
         if (result.inode != inode) return error.InvalidResponse;

@@ -112,15 +112,20 @@ IDs remain replayable. An explicit deduplication retention protocol and capacity
 planning must replace these prototype limits before deployment.
 
 Each nonempty mutable WAL write and each truncate also commits mtime/ctime through
-Raft before returning success, consuming one receipt per core operation (including
-each 64 KiB native-VFS segment). This adds metadata latency and makes the receipt
-limit a write-volume limit too. Failed calls may have durable data without updated
-timestamps; data WAL and timestamp metadata are not one atomic transaction. Reads
-do not update atime, and automatic creation/namespace timestamps remain pending.
+Raft before returning success. Automatic times use one generation/sequence/time
+watermark per inode, not retained receipts; each 64 KiB native-VFS segment still
+adds metadata latency. Namespace changes, explicit times and checkpoints still
+consume receipts, so their capacity limit remains. Failed calls may have durable
+data without updated timestamps; data WAL and timestamp metadata are not one
+atomic transaction. Reads do not update atime, and automatic creation/namespace
+timestamps remain pending.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
 Snapshots retain receipts even if the referenced file has since been deleted.
+The internal `touch_modified` command is the sole exception: it requires ID zero
+and deduplicates by its inode-local WAL watermark. An exact latest replay succeeds
+without resetting explicit times; older sequences and conflicting replays fail.
 
 Names are valid UTF-8, at most 255 bytes, and cannot contain NUL or either path
 separator. Empty names, `.` and `..` are rejected. ASCII case folding is an initial

@@ -179,7 +179,7 @@ pub const Runtime = struct {
         if (data.len > protocol.max_command_bytes) return fail(allocator, error.InvalidRequest);
         const parsed = std.json.parseFromSlice(metadata.Request, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
         defer parsed.deinit();
-        if (parsed.value.version != 1 or parsed.value.request_id == 0) return fail(allocator, error.InvalidRequest);
+        if (parsed.value.version != 1 or !parsed.value.validId()) return fail(allocator, error.InvalidRequest);
         if (!self.node.isLeader()) return fail(allocator, error.NotLeader);
         var pending: Pending = .{};
         self.node.propose(data, .{ .ctx = &pending, .function = Pending.proposed }) catch |err| return fail(allocator, err);

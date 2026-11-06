@@ -361,8 +361,10 @@ test "mutable writes persist modification times without retimestamping checkpoin
     defer session.close();
     const original = f.meta.state.get(2).?.times;
     try t.expectEqualDeep(m.Times{}, original); // Migration is not a client write.
+    const receipts_before_write = f.meta.state.receipts.items.len;
     const before = std.Io.Clock.real.now(t.io).toNanoseconds();
     try session.write("new", 0);
+    try t.expectEqual(receipts_before_write, f.meta.state.receipts.items.len);
     const after = std.Io.Clock.real.now(t.io).toNanoseconds();
     const written = f.meta.state.get(2).?.times;
     const written_ns = @as(i96, written.mtime.seconds) * std.time.ns_per_s + written.mtime.nanoseconds;
@@ -383,7 +385,9 @@ test "mutable writes persist modification times without retimestamping checkpoin
     session.close();
     session = try f.open();
     try t.expectEqualDeep(saved, f.meta.state.get(2).?.times);
+    const receipts_before_truncate = f.meta.state.receipts.items.len;
     try session.truncate(0);
+    try t.expectEqual(receipts_before_truncate, f.meta.state.receipts.items.len);
     const truncated = f.meta.state.get(2).?.times;
     try t.expect(truncated.mtime.seconds > explicit.seconds);
     try t.expectEqualDeep(truncated.mtime, truncated.ctime);

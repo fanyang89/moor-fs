@@ -257,7 +257,8 @@ pub const Store = struct {
 
     fn applyRequest(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, request: m.Request) !m.Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
-        if (request.request_id == 0) return .{ .status = .invalid_request };
+        if (!request.validId()) return .{ .status = .invalid_request };
+        if (request.command == .touch_modified) return self.execute(txn, allocator, meta, request.command);
         const digest = try m.requestDigest(allocator, request);
         const key = idKey(request.request_id);
         if (try txn.get(self.requests_db, &key)) |data| {
@@ -278,6 +279,13 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .touch_modified => |update| {
+                var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
+                const result = m.updateModified(&node, update);
+                if (result != .ok) return .{ .status = result };
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = update.inode };
+            },
             .set_times => |update| {
                 var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
                 const result = m.updateTimes(&node, update);

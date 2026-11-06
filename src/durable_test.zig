@@ -540,7 +540,15 @@ test "version publication matches memory across reopen, CAS conflicts, policy ch
 }
 
 test "publication allocation failures roll back version, inode, receipt and applied index" {
-    try t.checkAllAllocationFailures(t.allocator, publicationAllocationScenario, .{});
+    // Arena growth must take the same allocation path on every injected run;
+    // in-place growth depends on the backing allocator's current layout.
+    const deterministic: std.mem.Allocator = .{ .ptr = t.allocator.ptr, .vtable = &.{
+        .alloc = t.allocator.vtable.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = t.allocator.vtable.free,
+    } };
+    try t.checkAllAllocationFailures(deterministic, publicationAllocationScenario, .{});
 }
 
 fn publicationAllocationScenario(allocator: std.mem.Allocator) !void {
@@ -631,6 +639,137 @@ test "publication map-full leaves previous version and deduplication state intac
         current = index;
     }
     return error.ExpectedMapFull;
+}
+
+const timestamp_setup = [_]m.Request{
+    .{ .request_id = 1, .command = .{ .create = .{ .parent = 1, .name = "mutable", .kind = .file } } },
+    .{ .request_id = 2, .command = .{ .register_backend = .{ .id = 1, .failure_domain = 10 } } },
+    .{ .request_id = 3, .command = .{ .register_backend = .{ .id = 2, .failure_domain = 20 } } },
+    .{ .request_id = 4, .command = .{ .mutable_file = .{ .attach = .{ .inode = 2, .expected_version = 0, .file = .{
+        .generation = 7,
+        .next_sequence = 1,
+        .size = 0,
+        .backends = .{ 1, 2 },
+    } } } } },
+};
+
+fn modifiedRequest(sequence: u64, seconds: i64) m.Request {
+    return .{ .request_id = 0, .command = .{ .touch_modified = .{ .inode = 2, .modification = .{
+        .generation = 7,
+        .next_sequence = sequence,
+        .time = .{ .seconds = seconds },
+    } } } };
+}
+
+test "automatic timestamp watermark survives restart and never replays over explicit times" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var wrong_generation = modifiedRequest(5, 15);
+    wrong_generation.command.touch_modified.modification.generation = 8;
+    var invalid_time = modifiedRequest(5, 15);
+    invalid_time.command.touch_modified.modification.time.nanoseconds = 1000000000;
+    var wrong_id = modifiedRequest(5, 15);
+    wrong_id.request_id = 7;
+    var directory = modifiedRequest(5, 15);
+    directory.command.touch_modified.inode = 1;
+    var missing = modifiedRequest(5, 15);
+    missing.command.touch_modified.inode = 999;
+    const commands = timestamp_setup ++ [_]m.Request{
+        modifiedRequest(2, 10),
+        .{ .request_id = 5, .command = .{ .set_times = .{ .inode = 2, .mtime = .{ .seconds = 99 } } } },
+        modifiedRequest(2, 10),
+        modifiedRequest(2, 11),
+        .{ .request_id = 6, .command = .{ .mutable_file = .{ .checkpoint = .{ .inode = 2, .generation = 7, .expected_sequence = 1, .next_sequence = 3, .size = 2 } } } },
+        modifiedRequest(2, 10),
+        modifiedRequest(3, 12),
+        modifiedRequest(4, 14),
+        modifiedRequest(2, 10),
+        wrong_generation,
+        invalid_time,
+        wrong_id,
+        .{ .request_id = 0, .command = .{ .set_times = .{ .inode = 2, .mtime = .{} } } },
+        directory,
+        missing,
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .ok, .ok, .request_conflict, .ok, .ok, .sequence_conflict, .ok, .sequence_conflict, .storage_conflict, .invalid_request, .invalid_request, .invalid_request, .not_file, .not_found };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        if (index >= 6 and index <= 11) try t.expectEqual(@as(i64, 99), memory.get(2).?.times.mtime.seconds);
+    }
+    try t.expectEqual(@as(usize, 6), memory.receipts.items.len);
+    try t.expectEqual(@as(i64, 14), memory.get(2).?.times.mtime.seconds);
+    try t.expectEqual(@as(u64, 4), memory.get(2).?.modification.?.next_sequence);
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const before = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(before);
+    memory.nodes.items[1].modification.?.generation = 8;
+    const invalid = try std.json.Stringify.valueAlloc(t.allocator, protocol.Image{ .index = 99, .term = 1, .state = memory.snapshot() }, .{});
+    defer t.allocator.free(invalid);
+    try t.expectError(error.InvalidSnapshot, store.restore(99, 1, invalid));
+    const after = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(after);
+    try t.expectEqualStrings(before, after);
+}
+
+test "automatic timestamp updates exceed receipt capacity and work with a full receipt table" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    for (timestamp_setup, 1..) |command, index| {
+        try t.expectEqualDeep(try memory.apply(command), try apply(&store, index, command));
+    }
+    var index: u64 = timestamp_setup.len;
+    for (2..m.max_receipts + 4) |sequence| {
+        index += 1;
+        const command = modifiedRequest(sequence, @intCast(sequence));
+        const expected = try memory.apply(command);
+        try t.expectEqual(m.Status.ok, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+    }
+    const bytes = try store.snapshot(t.allocator, index, 1);
+    defer t.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+    defer parsed.deinit();
+    try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    try t.expectEqual(timestamp_setup.len, memory.receipts.items.len);
+    // Restore a full retained receipt history, without generating thousands of
+    // unrelated commands. Automatic timestamps must still bypass that capacity.
+    while (memory.receipts.items.len < m.max_receipts) {
+        try memory.receipts.append(t.allocator, .{ .request_id = memory.receipts.items.len + 10000, .digest = @splat(0), .result = .{ .status = .not_found } });
+    }
+    index += 1;
+    const full = try std.json.Stringify.valueAlloc(t.allocator, protocol.Image{ .index = index, .term = 1, .state = memory.snapshot() }, .{});
+    defer t.allocator.free(full);
+    try store.restore(index, 1, full);
+    index += 1;
+    const latest = modifiedRequest(m.max_receipts + 4, 20000);
+    try t.expectEqual(m.Status.ok, (try memory.apply(latest)).status);
+    try t.expectEqual(m.Status.ok, (try apply(&store, index, latest)).status);
+    index += 1;
+    const explicit: m.Request = .{ .request_id = 999999, .command = .{ .set_times = .{ .inode = 2, .mtime = .{} } } };
+    try t.expectEqual(m.Status.capacity_exceeded, (try memory.apply(explicit)).status);
+    try t.expectEqual(m.Status.capacity_exceeded, (try apply(&store, index, explicit)).status);
+    const final = try store.snapshot(t.allocator, index, 1);
+    defer t.allocator.free(final);
+    const final_parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, final, .{});
+    defer final_parsed.deinit();
+    try t.expectEqualDeep(memory.snapshot(), final_parsed.value.state);
+    try t.expectEqual(@as(usize, m.max_receipts), memory.receipts.items.len);
 }
 
 test "mutable checkpoint CAS agrees with memory and survives restart snapshot and receipt replay" {
