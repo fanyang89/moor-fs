@@ -43,11 +43,11 @@ const Client = struct {
         return null;
     }
 
-    fn acquire(self: *Client, id: u64) !*Shared {
+    fn acquire(self: *Client, id: u64) !struct { shared: *Shared, size: u64 } {
         if (self.findSession(id)) |session| {
-            _ = try session.access.size();
+            const size = try session.access.size();
             session.refs += 1;
-            return session;
+            return .{ .shared = session, .size = size };
         }
         const session = try allocator.create(Shared);
         errdefer allocator.destroy(session);
@@ -55,8 +55,10 @@ const Client = struct {
             .access = try nas.mutable_access.Access.open(allocator, self.io, self.rpc.api(), self.mappings, id, self.write_backends),
             .next = self.sessions,
         };
+        errdefer session.access.close();
+        const size = try session.access.size();
         self.sessions = session;
-        return session;
+        return .{ .shared = session, .size = size };
     }
 
     fn release(self: *Client, session: *Shared) void {
@@ -91,10 +93,14 @@ const Client = struct {
         if (node.replicas != .two) return error.InvalidReplicaPolicy;
         out.* = try entry(node);
         if (self.wal) {
-            const shared = try self.acquire(id);
+            const acquired = try self.acquire(id);
+            const shared = acquired.shared;
             errdefer self.release(shared);
-            if (truncate_requested) try shared.access.truncate(0);
-            const current_size = try shared.access.size();
+            var current_size = acquired.size;
+            if (truncate_requested) {
+                try shared.access.truncate(0);
+                current_size = try shared.access.size();
+            }
             const writer = try allocator.create(Writer);
             writer.* = .{ .client = self, .inode = id, .base = null, .size = current_size, .dirty = false, .shared = shared };
             out.size = writer.size;
@@ -126,9 +132,9 @@ const Client = struct {
         const node = result.value orelse return error.NotFound;
         var out = try entry(node);
         if (node.mutable_file != null and self.wal) {
-            const shared = try self.acquire(node.id);
-            defer self.release(shared);
-            out.size = try shared.access.size();
+            const acquired = try self.acquire(node.id);
+            defer self.release(acquired.shared);
+            out.size = acquired.size;
             return out;
         }
         if (try self.getVersion(node)) |version| out.size = version.size;

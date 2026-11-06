@@ -318,3 +318,34 @@ Debug/Safe各103项单测通过；本地Debug WAL FUSE、Safe真实双CIFS完整
 Debug/Safe各105项单测、本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过。最终恢复普通Safe构建，WAL格式、Raft依赖及元数据等待机制未修改。
 
 原始日志：`/tmp/opencode/nas-wal-direct-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-wal-direct-unit-{debug,safe}.log`、`/tmp/opencode/nas-wal-direct-fuse-debug.log`、`/tmp/opencode/nas-wal-direct-fault-safe.log`。
+
+## FUSE属性查询复用本次已验证大小
+
+原共享会话路径在Client.acquire中调用Access.size检查会话，随后getNode/prepareFile又调用一次size。对脏文件，两次都扫描完整双WAL。现在acquire返回shared和本次size：现有会话验证成功才增加引用，新会话先验证再加入链表，失败时关闭Access并释放分配；getNode和不截断的prepareFile直接使用该size。
+
+该结果只用于同一次获取调用，独立stat/open仍会验证。O_TRUNC先保留获取时校验，截断后再调用size，不能返回截断前的值。路径、当前元数据、双侧WAL和数据EOF检查仍由Access.size执行，未增加跨请求缓存。
+
+### 验证调用次数
+
+本地trace基准中，16 MiB dirty stat的78个样本恰有78条size、78条wal-verify和156条ReadIndex记录：每次stat一次大小验证，外层Get及current各一个屏障。旧共享会话路径每次stat出现两条size及约三条屏障。日志按时间窗口截取而非request ID关联，其他窗口仍可能带入预热后的日志；本轮dirty窗口的数量与预期一致。
+
+### 无日志基准
+
+基线 `ee71804`，同机Safe，沿用每例至少七次且至少1秒。下表为stat的median / p95，单位ms：
+
+| 后端 | 阶段/待提交payload | 原重复验证 | 复用本次size | 本轮样本数 | FUSE CPU ms/操作前→后 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 本地 | clean / 0 | 0.498 / 0.604 | 0.617 / 0.800 | 1551 | 0.353 → 0.484 |
+| 本地 | dirty / 1 MiB | 2.384 / 2.652 | 1.495 / 1.802 | 650 | 2.228 → 1.400 |
+| 本地 | dirty / 4 MiB | 6.429 / 7.204 | 3.562 / 4.092 | 275 | 6.234 → 3.455 |
+| 本地 | dirty / 16 MiB | 24.967 / 25.743 | 12.626 / 13.361 | 79 | 25.000 → 12.532 |
+| 双CIFS | clean / 0 | 2.069 / 2.363 | 1.844 / 2.147 | 538 | 0.792 → 0.967 |
+| 双CIFS | dirty / 1 MiB | 5.112 / 5.671 | 3.148 / 3.475 | 317 | 2.835 → 1.861 |
+| 双CIFS | dirty / 4 MiB | 11.863 / 13.195 | 6.844 / 7.827 | 148 | 6.667 → 3.851 |
+| 双CIFS | dirty / 16 MiB | 34.060 / 37.124 | 18.789 / 20.198 | 54 | 21.333 → 11.296 |
+
+收益集中在有活跃日志时；本地空日志该轮反而略慢，不能据去掉一次调用宣称所有负载更快。基线复用上一轮，CPU tick有10 ms粒度，同机CIFS结果不代表物理NAS。文件内容read不经过本次属性结果复用，仍执行自己的完整验证。
+
+扩展现有E2E：保持旧读句柄时O_TRUNC打开写句柄，检查路径、读句柄和写句柄均看到0大小及EOF；写入新内容但未关闭写者时再打开读句柄，检查新句柄看到当前大小和内容。既有stat长度/WAL尾部损坏场景继续严格失败，不放宽断言。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL及SMB/supervisor、冷重挂通过；Python编译和fmt/diff检查通过。本轮变更在FUSE私有共享会话获取逻辑，未改底层WAL算法或C/Zig ABI。
+
+原始日志：`/tmp/opencode/nas-size-once-trace-local-safe.log`、`/tmp/opencode/nas-size-once-cpu-{local,cifs}-safe.log`、`/tmp/opencode/nas-size-once-fuse-debug.log`、`/tmp/opencode/nas-size-once-fault-safe.log`。最终为普通Safe构建。

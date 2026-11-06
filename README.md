@@ -967,6 +967,13 @@ changing WAL transfer bytes, memory bounds or integrity checks. In the same-host
 16 MiB pending-payload benchmark, small reads fell further from 13.1/25.6 ms to
 12.4/17.5 ms (local/dual CIFS); actual SMB packet counts were not measured.
 
+FUSE session acquisition now returns its freshly verified size together with the
+shared session. Attribute replies and non-truncating opens reuse that result;
+truncating opens verify size again after mutation. Independent requests still
+revalidate. This removes one duplicate size/WAL scan from shared-session stat:
+with 16 MiB pending payload, median stat latency fell from 25.0/34.1 ms to
+12.6/18.8 ms (local/dual CIFS) in the same-host benchmark.
+
 Each node owns `DATA_DIR/raft/` (raftz WAL, membership, snapshots) and
 `DATA_DIR/metadata/` (LMDB). Keep both on local durable storage. LMDB is bound to
 the node and cluster identity; a mismatched identity fails startup. An exclusive

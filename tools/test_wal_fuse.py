@@ -138,9 +138,17 @@ def test_wal_fuse(
                 assert os.pread(reader.fileno(), 4, 1 << 40) == b""
                 os.fsync(writer.fileno())
                 os.fsync(writer.fileno())
-        with open(path, "wb", buffering=0) as writer:
-            assert path.stat().st_size == 0
-            writer.write(b"replacement")
+        with open(path, "rb", buffering=0) as reader:
+            with open(path, "wb", buffering=0) as writer:
+                assert path.stat().st_size == os.fstat(writer.fileno()).st_size == 0
+                assert os.fstat(reader.fileno()).st_size == 0
+                assert os.pread(reader.fileno(), 16, 0) == b""
+                writer.write(b"replacement")
+                # A newly acquired handle must see the current dirty size, not
+                # the size observed before O_TRUNC or a previous acquisition.
+                with open(path, "rb", buffering=0) as another:
+                    assert os.fstat(another.fileno()).st_size == len(b"replacement")
+                    assert another.read() == b"replacement"
         fd = os.open(path, os.O_WRONLY | os.O_DSYNC)
         try:
             assert os.pwrite(fd, b"R", 0) == 1

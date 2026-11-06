@@ -952,3 +952,11 @@ LogReader先消费已有64 KiB预读内容；当缓冲耗尽且目标帧还有�
 同机Safe无trace16 MiB待提交payload的4 KiB读本地13.052→12.430 ms、双CIFS25.644→17.539 ms；FUSE每操作CPU分别12.857→12.346/13.077→10.702 ms。减少的是大区间用户态read调用及中转拷贝，实际日志字节量没有减少，未实测SMB报文数量；也未添加双侧读取并发。完整统计及限制见基准文档。
 
 新增两项单测覆盖预读/直读/预读转换的独立字节oracle、末尾追加检测、越limit拒绝及预读后物理缩短拒绝。Debug/Safe各105项单测、本地Debug WAL FUSE、Safe真实双CIFS完整13项损坏/10项SIGKILL、SMB/supervisor及冷重挂通过。继续保留读请求范围外WAL认证，不改变写入确认、checkpoint或恢复规则。
+
+## 60. FUSE获取会话返回已验证大小
+
+Client.acquire对既有会话原先调用size验证后只返回Shared，属性查询或prepareFile紧接着再调用size，导致脏文件重复扫描双WAL。现返回{shared,size}，验证后才增加既有引用，新会话验证成功才加入链表，失败关闭Access并释放分配。getNode和非截断prepareFile复用本次结果；O_TRUNC仍保留获取时验证，截断后再验证当前大小。没有跨请求缓存，不改变独立read/size的校验或错误冻结规则。
+
+本地trace中16 MiB dirty stat的78个样本对应78次size、78次wal-verify、156次ReadIndex，去掉一次重复大小验证而保留外层Get和current屏障。无trace同机Safe该场景median本地24.967→12.626 ms、双CIFS34.060→18.789 ms；FUSE每操作CPU25.000→12.532/21.333→11.296 ms。本地空日志样本略慢，统计限制和全表保留在基准文档。
+
+扩展E2E验证共享旧读句柄期间O_TRUNC后路径及两句柄为0、旧读句柄EOF；写者未关闭时新读句柄看到新大小和内容。既有stat损坏测试不放宽。本地Debug WAL FUSE、Safe双CIFS完整13项损坏/10项SIGKILL、SMB/supervisor冷重挂通过，fmt/diff/Python编译通过。底层WAL算法、数据格式及C/Zig ABI未变。
