@@ -668,6 +668,100 @@ test "pending WAL cannot coexist with a valid seal and partial repairs are retry
     try t.expectError(error.SealWithPendingWal, f.open());
 }
 
+test "explicit temporary collection removes only exact canonical duplicates" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var store = try f.create();
+    defer store.close();
+    const old = try f.dirs[0].readFileAlloc(t.io, "checkpoint", t.allocator, .limited(128));
+    defer t.allocator.free(old);
+    try store.write("baseline", 0);
+    try store.establishSeal();
+    const inodes = try f.checkpointInodes();
+    for (f.dirs) |dir| {
+        for ([_][]const u8{ "checkpoint", "seal" }) |name| {
+            const bytes = try dir.readFileAlloc(t.io, name, t.allocator, .limited(128));
+            defer t.allocator.free(bytes);
+            var buffer: [64]u8 = undefined;
+            const temporary = try std.fmt.bufPrint(&buffer, "{s}-00000000000000000000000000000000", .{name});
+            const file = try dir.createFile(t.io, temporary, .{ .exclusive = true });
+            defer file.close(t.io);
+            try file.writePositionalAll(t.io, bytes, 0);
+        }
+        const older = try dir.createFile(t.io, "checkpoint-11111111111111111111111111111111", .{});
+        defer older.close(t.io);
+        try older.writePositionalAll(t.io, old, 0);
+        const damaged = try dir.createFile(t.io, "seal-22222222222222222222222222222222", .{});
+        defer damaged.close(t.io);
+        try damaged.writePositionalAll(t.io, "damaged", 0);
+        const unknown = try dir.createFile(t.io, "seal-backup", .{});
+        defer unknown.close(t.io);
+        const seal_bytes = try dir.readFileAlloc(t.io, "seal", t.allocator, .limited(128));
+        defer t.allocator.free(seal_bytes);
+        try unknown.writePositionalAll(t.io, seal_bytes, 0);
+        const uppercase = try dir.createFile(t.io, "seal-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", .{});
+        defer uppercase.close(t.io);
+        try uppercase.writePositionalAll(t.io, seal_bytes, 0);
+        try dir.createDir(t.io, "seal-33333333333333333333333333333333", .default_dir);
+    }
+    try t.expectEqualDeep([2]u64{ 2, 2 }, try store.collectTemporaries());
+    try t.expectEqualDeep([2]u64{ 0, 0 }, try store.collectTemporaries());
+    try t.expectEqualDeep(inodes, try f.checkpointInodes());
+    for (f.dirs) |dir| {
+        var iterator = dir.iterate();
+        var count: usize = 0;
+        while (try iterator.next(t.io)) |entry| {
+            if (std.mem.startsWith(u8, entry.name, "seal-") or std.mem.startsWith(u8, entry.name, "checkpoint-")) count += 1;
+        }
+        try t.expectEqual(@as(usize, 5), count);
+        const bytes = try dir.readFileAlloc(t.io, "checkpoint-11111111111111111111111111111111", t.allocator, .limited(128));
+        defer t.allocator.free(bytes);
+        try t.expectEqualSlices(u8, old, bytes);
+    }
+    try f.expect("baseline");
+    try store.write("!", 8);
+    try store.sync();
+    try f.expect("baseline!");
+}
+
+test "temporary collection refuses incomplete evidence before deleting duplicates" {
+    const Damage = enum { seal, checkpoint, data, wal };
+    for (std.meta.tags(Damage)) |damage| for (0..2) |bad| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        defer store.close();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        const name = "seal-00000000000000000000000000000000";
+        for (f.dirs) |dir| {
+            const bytes = try dir.readFileAlloc(t.io, "seal", t.allocator, .limited(128));
+            defer t.allocator.free(bytes);
+            const file = try dir.createFile(t.io, name, .{});
+            defer file.close(t.io);
+            try file.writePositionalAll(t.io, bytes, 0);
+        }
+        switch (damage) {
+            .seal => try f.dirs[bad].deleteFile(t.io, "seal"),
+            .checkpoint => try f.dirs[bad].deleteFile(t.io, "checkpoint"),
+            .data => try store.session.replicas[bad].data.writePositionalAll(t.io, "X", 0),
+            .wal => try store.session.replicas[bad].log.writePositionalAll(t.io, "X", 0),
+        }
+        try t.expectError(switch (damage) {
+            .seal => error.MissingSeal,
+            .checkpoint => error.MissingCheckpoint,
+            .data => error.SealedContentMismatch,
+            .wal => error.SealWithPendingWal,
+        }, store.collectTemporaries());
+        for (f.dirs) |dir| {
+            const file = try dir.openFile(t.io, name, .{});
+            defer file.close(t.io);
+            try t.expectEqual(@as(u64, 104), (try file.stat(t.io)).size);
+        }
+        try t.expectError(error.WalSessionFailed, store.collectTemporaries());
+    };
+}
+
 test "unpublished control temporaries never substitute for canonical evidence" {
     for ([_][]const u8{ "checkpoint", "seal" }) |name| {
         var f = try Fixture.init();

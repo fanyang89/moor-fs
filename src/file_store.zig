@@ -328,6 +328,54 @@ pub const Store = struct {
         self.checkpoint = checkpoint;
     }
 
+    /// Explicit collection of exact duplicates only. Never infer authority from
+    /// temporary names or remove divergent evidence from interrupted operations.
+    pub fn collectTemporaries(self: *Store) ![2]u64 {
+        if (self.session.failed) return error.WalSessionFailed;
+        errdefer self.session.failed = true;
+        const io = self.session.io;
+        const baseline = self.seal orelse return error.MissingSeal;
+        for (self.dirs, self.session.replicas) |dir, replica| {
+            const checkpoint = (try Checkpoint.read(io, dir, self.session.identity)) orelse return error.MissingCheckpoint;
+            if (!std.meta.eql(checkpoint, self.checkpoint)) return error.CheckpointDiverged;
+            const seal = (try Seal.read(io, dir, self.session.identity)) orelse return error.MissingSeal;
+            if (!std.meta.eql(seal, baseline)) return error.SealDiverged;
+            if ((try replica.log.stat(io)).size != 0) return error.SealWithPendingWal;
+        }
+        try baseline.verify(io, .{ self.session.replicas[0].data, self.session.replicas[1].data }, false);
+        // Complete canonical publication durability before deleting duplicates.
+        for (self.dirs) |dir| try objects.syncDir(io, dir);
+        var removed: [2]u64 = .{ 0, 0 };
+        for (self.dirs, 0..) |dir, index| {
+            var iterator = dir.iterate();
+            while (try iterator.next(io)) |entry| {
+                if (entry.kind != .file) continue;
+                const canonical: []const u8 = if (temporaryName(entry.name, "checkpoint")) "checkpoint" else if (temporaryName(entry.name, "seal")) "seal" else continue;
+                const source = try dir.openFile(io, canonical, .{ .follow_symlinks = false, .allow_directory = false });
+                defer source.close(io);
+                const temporary = dir.openFile(io, entry.name, .{ .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => return err,
+                };
+                defer temporary.close(io);
+                var expected: [104]u8 = undefined;
+                var actual: [104]u8 = undefined;
+                const size: usize = if (std.mem.eql(u8, canonical, "checkpoint")) checkpoint_size else 104;
+                if ((try source.stat(io)).size != size or (try temporary.stat(io)).size != size) continue;
+                if (try source.readPositionalAll(io, expected[0..size], 0) != size or try temporary.readPositionalAll(io, actual[0..size], 0) != size) continue;
+                if (!std.mem.eql(u8, expected[0..size], actual[0..size])) continue;
+                dir.deleteFile(io, entry.name) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => return err,
+                };
+                removed[index] += 1;
+            }
+            try objects.syncDir(io, dir);
+            if (index == 0) @import("repair_fault.zig").checkpoint(.mutable_temporaries_first_collected);
+        }
+        return removed;
+    }
+
     /// Explicit, repeatable reclamation after both checkpoint files are durable.
     /// Failure leaves harmless older logs, and never removes the active/future log.
     pub fn collect(self: *Store) !void {
@@ -355,6 +403,12 @@ pub const Store = struct {
         }
     }
 };
+
+fn temporaryName(name: []const u8, canonical: []const u8) bool {
+    if (name.len != canonical.len + 33 or !std.mem.startsWith(u8, name, canonical) or name[canonical.len] != '-') return false;
+    for (name[canonical.len + 1 ..]) |byte| if (!(byte >= '0' and byte <= '9' or byte >= 'a' and byte <= 'f')) return false;
+    return true;
+}
 
 fn closeReplicas(io: Io, replicas: []const wal.Replica) void {
     for (replicas) |replica| {

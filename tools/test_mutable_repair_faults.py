@@ -250,7 +250,11 @@ def test_mutable_repair_faults(
             assert all(file.read_bytes() == content for file in data)
             assert [file.stat().st_ino for file in data] == identities
             assert run("get", endpoints, inode) == metadata
-            for command in ("scrub-mutable", "repair-mutable"):
+            for command in (
+                "scrub-mutable",
+                "repair-mutable",
+                "collect-mutable-temporaries",
+            ):
                 busy = run(command, endpoints, config, inode, success=False)
                 assert "FileBusy" in busy.stdout + busy.stderr, busy
             process.kill()
@@ -297,3 +301,65 @@ def test_mutable_repair_faults(
             f"PASS: missing {log_name} on NAS {missing + 1} SIGKILL at {point}, data/evidence preserved and retry succeeds",
             flush=True,
         )
+
+    # Only the exact duplicate orphan controls created by the pre-rename cases
+    # are reclaimed, explicitly and after full sealed-baseline verification.
+    canonical_inodes = [
+        {name: (target.parent / name).stat().st_ino for name in evidence[index]}
+        for index, target in enumerate(data)
+    ]
+    point = "mutable_temporaries_first_collected"
+    log = directory / "mutable-collect-temporaries.log"
+    with log.open("w") as output:
+        process = subprocess.Popen(
+            [
+                executable,
+                "collect-mutable-temporaries",
+                endpoints,
+                str(config),
+                str(inode),
+            ],
+            stdout=output,
+            stderr=output,
+            env={**os.environ, "NAS_FS_REPAIR_STOP": point},
+        )
+    try:
+        wait_stopped(process, point, log)
+        assert {file.name for file in data[0].parent.iterdir()} == set(evidence[0]) | {
+            "data"
+        }
+        assert len(list(data[1].parent.iterdir())) == len(evidence[1]) + 3
+        busy = run(
+            "collect-mutable-temporaries", endpoints, config, inode, success=False
+        )
+        assert "FileBusy" in busy.stdout + busy.stderr, busy
+        process.kill()
+        assert process.wait(timeout=15) == -signal.SIGKILL
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=15)
+    assert run("collect-mutable-temporaries", endpoints, config, inode) == {
+        "inode": inode,
+        "removed": [0, 2],
+    }
+    assert run("collect-mutable-temporaries", endpoints, config, inode)["removed"] == [
+        0,
+        0,
+    ]
+    assert run("get", endpoints, inode) == metadata
+    assert all(file.read_bytes() == content for file in data)
+    assert [file.stat().st_ino for file in data] == identities
+    for index, target in enumerate(data):
+        assert {
+            file.name: file.read_bytes()
+            for file in target.parent.iterdir()
+            if file.name != "data"
+        } == evidence[index]
+        assert {
+            name: (target.parent / name).stat().st_ino for name in evidence[index]
+        } == canonical_inodes[index]
+    print(
+        "PASS: explicit duplicate control temporary collection survives first-side SIGKILL, preserves canonical evidence and metadata; repeat is empty",
+        flush=True,
+    )

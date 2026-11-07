@@ -398,6 +398,16 @@ pub const Access = struct {
         try self.validate();
         try self.data.collect();
     }
+
+    pub fn collectTemporaries(self: *Access) ![2]u64 {
+        errdefer self.failed = true;
+        try self.validate();
+        _ = try self.current();
+        const removed = try self.data.collectTemporaries();
+        try self.validate();
+        _ = try self.current();
+        return removed;
+    }
 };
 
 fn randomId(io: Io) u64 {

@@ -1232,3 +1232,11 @@ Debug/Safe各145项通过。新增单元测试在双侧都只剩有效且匹配�
 暂停时确认正式目标存在、字节匹配，目录没有新增临时条目；data锁仍排斥竞争维护。死亡后普通scrub/显式repair成功，保持已发布inode和所有幸存控制文件、先前孤儿临时文件的字节/inode，以及双data和逻辑元数据。匹配checkpoint路径继续同步目录，seal恢复后也经该路径完成两侧目录同步；不会因正式记录已可见而跳过恢复所需同步。Debug/Safe各145项及完整双CIFS WAL故障回归通过，日志前缀/tmp/opencode/nas-control-postrename-。
 
 此验收仅模拟进程死亡，不能证明未完成目录sync的rename在NAS断电后仍可见，也没有模拟丢失易失文件系统状态。硬件断电、离线NAS和整个副本目录恢复继续独立跟踪。
+
+## 88. 显式回收与正式控制记录完全相同的临时副本
+
+新增collect-mutable-temporaries维护命令及Access/Store.collectTemporaries。普通恢复完成后，持有双data独占锁，校验两个正式checkpoint均与当前checkpoint一致、双seal均有效且一致、双当前WAL为空，并验证双data完整大小/SHA-256。清理前同步两侧目录，确保正式控制记录发布完成；任一校验失败则不进入删除阶段。Access在操作前后校验后端映射和Raft绑定，错误冻结会话。
+
+仅处理普通文件，名称必须是checkpoint-或seal-后接恰好32位小写十六进制。使用不跟随symlink的打开方式，长度和内容均须与同目录当前正式记录逐字节一致，才删除并计数；旧版本、损坏、未知命名、目录等原样保留。每侧清理后同步目录。命令返回inode与按绑定副本顺序排列的removed数组，计数仅覆盖本次删除；部分成功后的重试重新验证并继续，不宣称事务性回滚或跨调用累计。普通打开、修复、scrub和已有WAL回收均不隐式调用此功能。
+
+Debug/Safe各147项通过：精确重复副本清理、重复执行零删除、旧checkpoint/损坏seal/内容相同但非规范名称及大写后缀/目录保留、正式checkpoint inode和数据保持及后续写入正常；双方向缺seal/checkpoint、数据损坏或pending WAL时保留所有候选并冻结会话。真实双CIFS完整WAL故障套件复用rename前死亡留下的两侧各两份临时文件，第一侧删除并同步后在mutable_temporaries_first_collected暂停，确认第二侧候选尚在、竞争清理被锁拒绝；SIGKILL后重试仅删除第二侧[0,2]，再执行[0,0]，全部正式控制字节/inode、双data及逻辑元数据不变。日志前缀/tmp/opencode/nas-control-collect-。本轮不清理不同内容的历史临时记录，不提供版本/整目录GC或离线NAS恢复。

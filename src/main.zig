@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "scrub-mutable", "Recover an existing mutable file and compare both complete replicas", &.{ "endpoint", "config", "id" }, scrubMutable);
     try register(root, options, "seal-mutable", "Persist an idle mutable file's verified content baseline", &.{ "endpoint", "config", "id" }, sealMutable);
     try register(root, options, "repair-mutable", "Restore sealed mutable data, a missing empty active WAL or a missing seal", &.{ "endpoint", "config", "id" }, repairMutable);
+    try register(root, options, "collect-mutable-temporaries", "Remove exact duplicate control temporaries from verified sealed replicas", &.{ "endpoint", "config", "id" }, collectMutableTemporaries);
     try register(root, options, "repair-file", "Restore a declared replica from a verified copy", &.{ "endpoint", "config", "id", "backend" }, @import("data_cli.zig").repair);
     if (@import("build_options").fuse) try register(root, options, "mount", "Mount the namespace with optional verified reads and dual-replica writes", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);
@@ -153,26 +154,37 @@ fn mount(ctx: zli.CommandContext) !void {
 }
 
 fn scrubMutable(ctx: zli.CommandContext) !void {
-    try maintainMutable(ctx, false, false);
+    try maintainMutable(ctx, .scrub);
 }
 
 fn sealMutable(ctx: zli.CommandContext) !void {
-    try maintainMutable(ctx, true, false);
+    try maintainMutable(ctx, .seal);
 }
 
 fn repairMutable(ctx: zli.CommandContext) !void {
-    try maintainMutable(ctx, false, true);
+    try maintainMutable(ctx, .repair);
 }
 
-fn maintainMutable(ctx: zli.CommandContext, seal: bool, repair: bool) !void {
+fn collectMutableTemporaries(ctx: zli.CommandContext) !void {
+    try maintainMutable(ctx, .collect_temporaries);
+}
+
+fn maintainMutable(ctx: zli.CommandContext, mode: enum { scrub, seal, repair, collect_temporaries }) !void {
     const mappings = try nas.objects.loadMappings(ctx.allocator, ctx.io, ctx.getArg("config").?);
     defer mappings.deinit();
     var client: nas.mutable_rpc.Client = .{ .allocator = ctx.allocator, .endpoints = ctx.getArg("endpoint").? };
     const inode = try std.fmt.parseUnsigned(u64, ctx.getArg("id").?, 10);
     // No migration pair: this maintenance command only accepts existing bindings.
-    var access = try nas.mutable_access.Access.openMode(ctx.allocator, ctx.io, client.api(), mappings.value, inode, .{ 0, 0 }, repair);
+    var access = try nas.mutable_access.Access.openMode(ctx.allocator, ctx.io, client.api(), mappings.value, inode, .{ 0, 0 }, mode == .repair);
     defer access.close();
-    if (seal) try access.seal();
+    if (mode == .collect_temporaries) {
+        const removed = try access.collectTemporaries();
+        const json = try std.json.Stringify.valueAlloc(ctx.allocator, .{ .inode = inode, .removed = removed }, .{});
+        defer ctx.allocator.free(json);
+        try ctx.writer.print("{s}\n", .{json});
+        return;
+    }
+    if (mode == .seal) try access.seal();
     const result = try access.scrub();
     const digest = std.fmt.bytesToHex(result.sha256, .lower);
     const json = try std.json.Stringify.valueAlloc(ctx.allocator, .{

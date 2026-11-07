@@ -1028,6 +1028,22 @@ Four post-rename cases stop seal/checkpoint publication before directory sync.
 They verify the canonical file is present without an extra temporary entry,
 then kill the process and reopen without replacing the published inode. These
 process-death tests do not simulate loss of volatile filesystem state on power loss.
+
+After recovery, explicitly reclaim exact duplicate control temporaries with:
+
+```sh
+zig-out/bin/nas-fs collect-mutable-temporaries ENDPOINTS BACKENDS_JSON INODE
+```
+
+This uses normal mutable recovery first, then requires matching checkpoints,
+matching seals, empty active WALs and full verification of both data files under
+their exclusive locks. Only regular files named `checkpoint-` or `seal-` followed
+by exactly 32 lowercase hexadecimal digits and byte-identical to the current
+canonical record are removed. Older, corrupt, unknown and non-file entries remain.
+Directories are synced before collection and after each side. The JSON response
+contains `inode` and `removed`, a two-element count in replica order for this call.
+A retry after partial completion reports only its own deletions. This operation
+does not remove old WALs or run automatically during open, scrub or repair.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.
