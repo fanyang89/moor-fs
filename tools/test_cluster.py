@@ -2,6 +2,7 @@
 """Run three real processes through election, failover, snapshots and WAL recovery."""
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -108,6 +109,35 @@ def main():
             process.wait(timeout=12)
             if not kill:
                 assert process.returncode == 0, (i, process.returncode)
+            # Process exit can precede kernel release of async listener refs.
+            # Verify both endpoints are bindable before restarting this voter.
+            started = time.monotonic()
+            while True:
+                probes = []
+                try:
+                    for address in (addresses[i], addresses[i + 3]):
+                        probe = socket.socket()
+                        probes.append(probe)
+                        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        host, port = address.rsplit(":", 1)
+                        probe.bind((host, int(port)))
+                        probe.listen(1)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EADDRINUSE:
+                        raise
+                    assert time.monotonic() - started < 5, (
+                        f"node {i} endpoints remain bound after exit"
+                    )
+                finally:
+                    for probe in probes:
+                        probe.close()
+                time.sleep(0.01)
+            if time.monotonic() - started >= 0.01:
+                print(
+                    f"INFO: node {i} listener release took {time.monotonic() - started:.3f}s after process exit",
+                    flush=True,
+                )
 
         def eventually(check, seconds=25):
             deadline = time.monotonic() + seconds
