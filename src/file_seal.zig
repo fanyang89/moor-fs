@@ -53,6 +53,7 @@ pub const Seal = struct {
         try file.sync(io);
         @import("repair_fault.zig").checkpoint(.seal_before_rename);
         try dir.rename(name, dir, "seal", io);
+        @import("repair_fault.zig").checkpoint(.seal_after_rename);
         try objects.syncDir(io, dir);
     }
 

@@ -60,6 +60,7 @@ fn publish(io: Io, dir: Dir, bytes: *const [checkpoint_size]u8) !void {
     try temporary.sync(io);
     @import("repair_fault.zig").checkpoint(.checkpoint_before_rename);
     try dir.rename(name, dir, "checkpoint", io);
+    @import("repair_fault.zig").checkpoint(.checkpoint_after_rename);
     try objects.syncDir(io, dir);
 }
 

@@ -1024,6 +1024,10 @@ before rename, in both directions. The canonical target remains absent and the
 temporary file is retained as evidence. Retry validates the surviving canonical
 record and publishes a fresh copy without adopting or deleting the orphan.
 Even two valid temporary copies cannot replace missing canonical control records.
+Four post-rename cases stop seal/checkpoint publication before directory sync.
+They verify the canonical file is present without an extra temporary entry,
+then kill the process and reopen without replacing the published inode. These
+process-death tests do not simulate loss of volatile filesystem state on power loss.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.

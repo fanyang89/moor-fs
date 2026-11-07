@@ -1224,3 +1224,11 @@ Debug/Safe各144项通过：普通无seal/有pending WAL/有seal打开均保持�
 完整真实双CIFS WAL故障套件新增两个方向、两类控制文件共四项SIGKILL。暂停时确认正式目标缺失，且仅新增一个内容匹配幸存正式证据的临时文件；维护竞争者被data锁拒绝。死亡后确认正式目标仍缺失、临时文件及原控制字节保留。随后普通scrub与显式repair按各自既有语义重试，重新校验幸存正式证据、发布新副本；再次修复保持正式inode。全过程验证双data、逻辑元数据、所有幸存控制文件和孤儿临时文件的字节/inode不变。后续场景保留先前孤儿，验证它们不会干扰恢复。
 
 Debug/Safe各145项通过。新增单元测试在双侧都只剩有效且匹配的临时checkpoint或seal时，显式恢复仍分别返回MissingCheckpoint或MissingSeal；提供一份正式记录后恢复成功，临时副本保持不变。完整WAL故障回归包含原有发布后、data重建、WAL重建、seal生命周期等场景。日志前缀/tmp/opencode/nas-control-publication-。临时文件回收、硬件断电、整个副本目录丢失和离线NAS重建仍不在此次验收范围。
+
+## 87. rename完成至目录同步之间的进程死亡
+
+新增测试专用seal_after_rename与checkpoint_after_rename，位于正式文件rename完成、所在目录sync调用之前。完整真实双CIFS WAL故障套件新增两类记录、两个方向共四项SIGKILL，补齐临时文件同步、rename、目录同步三阶段之间的进程死亡覆盖。正常构建忽略故障点，控制文件发布协议和恢复授权范围不变。
+
+暂停时确认正式目标存在、字节匹配，目录没有新增临时条目；data锁仍排斥竞争维护。死亡后普通scrub/显式repair成功，保持已发布inode和所有幸存控制文件、先前孤儿临时文件的字节/inode，以及双data和逻辑元数据。匹配checkpoint路径继续同步目录，seal恢复后也经该路径完成两侧目录同步；不会因正式记录已可见而跳过恢复所需同步。Debug/Safe各145项及完整双CIFS WAL故障回归通过，日志前缀/tmp/opencode/nas-control-postrename-。
+
+此验收仅模拟进程死亡，不能证明未完成目录sync的rename在NAS断电后仍可见，也没有模拟丢失易失文件系统状态。硬件断电、离线NAS和整个副本目录恢复继续独立跟踪。

@@ -169,7 +169,7 @@ def test_mutable_repair_faults(
             )
 
     # Control-file reconstruction must preserve all data and survive death
-    # before rename and after durable publication, preserving surviving evidence.
+    # around rename and after durable publication, preserving surviving evidence.
     cases = (
         (name, point, missing)
         for name, point in (
@@ -178,6 +178,8 @@ def test_mutable_repair_faults(
             ("checkpoint", "mutable_checkpoint_reconciled"),
             ("seal", "seal_before_rename"),
             ("checkpoint", "checkpoint_before_rename"),
+            ("seal", "seal_after_rename"),
+            ("checkpoint", "checkpoint_after_rename"),
         )
         for missing in range(2)
     )
@@ -240,6 +242,11 @@ def test_mutable_repair_faults(
                 new_inode = None
             else:
                 new_inode = (data[missing].parent / log_name).stat().st_ino
+                assert {
+                    file.name: file.read_bytes()
+                    for file in data[missing].parent.iterdir()
+                    if file.name != "data"
+                } == control_evidence[missing]
             assert all(file.read_bytes() == content for file in data)
             assert [file.stat().st_ino for file in data] == identities
             assert run("get", endpoints, inode) == metadata
