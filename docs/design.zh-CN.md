@@ -1124,3 +1124,15 @@ Access在准备、验证并同步双侧完整文件后提交此命令。丢回�
 Debug/Safe各124项通过：内存/LMDB逐请求重启全快照对照、重复绑定跨checkpoint/显式时间、参数/代际/源版本/后端拒绝、非法绑定快照不改数据库、删除后重放不污染同名新inode。满回执表下LMDB首次绑定可提交，真实Service/Access覆盖空文件和不可变文件迁移、绑定丢回复后重开、写/fsync/close/断线恢复且回执不增长。新增Node字段又暴露通用LMDB分配失败测试的原地扩容不确定性；复用此前publication测试的确定性后备分配器，仍逐分配点验证回滚。
 
 配套模块/Safe桥接、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过；真实三节点绑定请求在leader切换、快照追赶及全群重启后重放不重置当前checkpoint。日志前缀/tmp/opencode/nas-attachment-state-。首次绑定、自动时间和核心checkpoint已全部不消耗全局回执；新建inode、显式时间和其他命名空间修改及旧mutable_file命令仍受8192容量限制，历史回执GC、自动创建/目录/atime时间维护及跨节点fencing仍待实现。
+
+## 78. 创建与初始时间原子提交
+
+Raft leader在普通create或path_guarded.create（包含create_open内部创建）提案前采样实时时钟，在日志Request附加可选creation_time。普通RPC客户端提供非null注记会被拒绝；leader采样有效性及附加字段后的64KiB命令大小均再次校验。状态机不读取时钟，只使用日志中相同取样；成功创建后将atime/mtime/ctime/birthtime全部初始化，并与inode、目录项和回执在同一LMDB事务提交。内存模型在创建的可失败分配完成后赋值，新增赋值不引入部分提交。
+
+creation_time是服务端注记，不进入请求去重摘要；未带注记的Request保持原序列化。重试会重新采样，但相同命令/ID仍命中原回执，不重设已创建inode或后来显式修改的时间，也不在条目改名后重新创建。非创建命令上的注记及非法时间在状态机拒绝。旧日志无注记时保留默认2024-01-01；旧创建回执在升级后重放也不会补造时间。离线未带注记的元数据命令同样沿用默认值。
+
+Debug/Safe各125项通过：内存/LMDB逐请求重启及全快照对照覆盖普通目录和守卫文件创建、不同取样重试、显式时间及改名后重放、路径冲突回执、旧默认值保留和非法注记；LMDB逐分配失败测试包含附加时间写入，验证创建/恢复回滚。真实三节点验证四时间相同且处于请求时间范围，客户端伪造注记拒绝，leader切换、快照追赶及全群重启后仍保留首次时间。
+
+配套模块、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过。SMB上传birthtime为本次创建时间，写/截断保留初始atime/birthtime，新目录四时间相同且在请求范围，核心重启后目录初始时间及文件显式时间均保留。日志前缀/tmp/opencode/nas-created-times-。
+
+新日志字段要求统一升级全部Raft节点，不支持混合旧二进制；C ABI未变。创建时间取自leader，写入时间取自核心，不保证跨机器墙钟单调。父目录随条目增删的时间、改名ctime、读atime仍未自动维护；本轮不增加额外回执，但新建inode仍消耗原创建回执。数据WAL与后续mtime提交仍非原子事务。

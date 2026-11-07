@@ -212,6 +212,61 @@ test "guarded creation enforces replicas and path checks are read-only snapshots
     try t.expect(memory.lookup(2, "wrong") == null);
 }
 
+test "creation times are atomic and deduplicated independently of leader time samples" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var directory = create;
+    directory.creation_time = .{ .seconds = 10, .nanoseconds = 123400 };
+    const file: m.Request = .{ .request_id = 2, .creation_time = .{ .seconds = 20 }, .command = .{ .path_guarded = .{
+        .ancestors = &.{.{ .inode = 2, .parent = 1, .name = "photos" }},
+        .mutation = .{ .create = .{ .parent = 2, .name = "file", .kind = .file } },
+    } } };
+    var retry = file;
+    retry.creation_time = .{ .seconds = 30 };
+    try t.expectEqualDeep(try m.requestDigest(t.allocator, file), try m.requestDigest(t.allocator, retry));
+    var stale = file;
+    stale.request_id = 5;
+    stale.command.path_guarded.ancestors = &.{.{ .inode = 2, .parent = 1, .name = "moved" }};
+    var fresh = file;
+    fresh.request_id = 6;
+    fresh.creation_time = .{ .seconds = 70 };
+    const legacy: m.Request = .{ .request_id = 7, .command = .{ .create = .{ .parent = 1, .name = "legacy", .kind = .file } } };
+    var legacy_retry = legacy;
+    legacy_retry.creation_time = .{ .seconds = 80 };
+    var invalid = fresh;
+    invalid.request_id = 9;
+    invalid.creation_time = .{ .seconds = 0, .nanoseconds = 1000000000 };
+    const commands = [_]m.Request{
+        directory,                                                                                       file,                                                                                                                            retry,
+        .{ .request_id = 3, .command = .{ .set_times = .{ .inode = 3, .mtime = .{ .seconds = 99 } } } }, retry,                                                                                                                           .{ .request_id = 4, .command = .{ .rename = .{ .id = 3, .parent = 1, .name = "moved" } } },
+        retry,                                                                                           stale,                                                                                                                           stale,
+        fresh,                                                                                           legacy,                                                                                                                          legacy_retry,
+        invalid,                                                                                         .{ .request_id = 8, .creation_time = .{ .seconds = 90 }, .command = .{ .rename = .{ .id = 3, .parent = 1, .name = "wrong" } } },
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .ok, .ok, .entry_conflict, .entry_conflict, .ok, .ok, .ok, .invalid_request, .invalid_request };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+    }
+    try t.expectEqualDeep(m.initialTimes(directory.creation_time.?), memory.get(2).?.times);
+    try t.expectEqualDeep(file.creation_time.?, memory.get(3).?.times.birthtime);
+    try t.expectEqual(@as(i64, 99), memory.get(3).?.times.mtime.seconds);
+    try t.expectEqualStrings("moved", memory.get(3).?.name);
+    try t.expectEqualDeep(m.initialTimes(fresh.creation_time.?), memory.get(4).?.times);
+    try t.expectEqualDeep(m.Times{}, memory.get(5).?.times);
+    try t.expectEqual(@as(usize, 7), memory.receipts.items.len);
+}
+
 test "timestamps persist partial updates and receipts while rejecting invalid snapshots" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
@@ -467,7 +522,9 @@ fn allocationScenario(allocator: std.mem.Allocator) !void {
     const bytes = try store.snapshot(t.allocator, 2, 1);
     defer t.allocator.free(bytes);
     store.allocator = allocator;
-    _ = apply(&store, 1, create) catch |err| {
+    var stamped = create;
+    stamped.creation_time = .{ .seconds = 10, .nanoseconds = 123400 };
+    _ = apply(&store, 1, stamped) catch |err| {
         store.allocator = t.allocator;
         try t.expectEqual(@as(u64, 0), (try store.applied()).index);
         try t.expectEqual(@as(?u64, null), try store.lookup(1, "photos"));

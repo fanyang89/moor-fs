@@ -43,6 +43,7 @@ stat, component lookup, bounded directory pages and receipt-backed namespace
 mutations. An experimental native Samba VFS supports reads, file creation,
 writes, truncation, sync, mkdir, non-overwriting rename, removal and explicit persistent
 SMB timestamp updates, plus automatic mtime/ctime updates on WAL writes and truncation,
+with initial file/directory times assigned by the Raft leader,
 and connects directly to
 this core, without FUSE:
 
@@ -119,12 +120,17 @@ sequence and size without receipts. Initial attachment retains one intent per in
 instead of a receipt. Namespace changes and explicit times still consume receipts,
 so their capacity limit remains. Failed calls may have durable
 data without updated timestamps; data WAL and timestamp metadata are not one
-atomic transaction. Reads do not update atime, and automatic creation/namespace
-timestamps remain pending.
+atomic transaction. New files and directories get initial atime/mtime/ctime/birthtime
+atomically with creation. Reads do not update atime; parent-directory and other
+namespace timestamp maintenance remains pending.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
 Snapshots retain receipts even if the referenced file has since been deleted.
+For creation, the leader records a server-only `creation_time` annotation in the
+Raft entry. It is excluded from the request digest, so retries preserve the first
+committed time. Ordinary RPC clients cannot supply this annotation. Legacy log
+entries without it retain the previous default timestamps; replay does not retime them.
 The internal `touch_modified`, `checkpoint_mutable` and `attach_mutable` commands
 require ID zero and deduplicate against inode-local state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.

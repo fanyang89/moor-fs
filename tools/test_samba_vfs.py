@@ -305,20 +305,33 @@ nas_fs:timeout_ms = 500
                 "times"
             ]
 
+        created_time = current_times()["birthtime"]
+        created_ns = created_time["seconds"] * 1000000000 + created_time["nanoseconds"]
+        assert write_started <= created_ns <= time.time_ns()
+
         def assert_modified_since(started):
             times = current_times()
             modified = times["mtime"]
             nanos = modified["seconds"] * 1000000000 + modified["nanoseconds"]
             assert started <= nanos <= time.time_ns(), times
             assert times["ctime"] == modified
-            assert (
-                times["atime"]
-                == times["birthtime"]
-                == {"seconds": 1704067200, "nanoseconds": 0}
-            )
+            assert times["atime"] == times["birthtime"] == created_time
             return times
 
         assert_modified_since(write_started)
+        directory_started = time.time_ns()
+        smb("mkdir vfs-read/clock-dir", share="write")
+        created_directory = client.call(
+            {"lookup": {"parent": parent, "name": "clock-dir"}}
+        )["attributes"]["node"]
+        directory_times = created_directory["times"]
+        directory_time = directory_times["birthtime"]
+        assert all(value == directory_time for value in directory_times.values())
+        assert (
+            directory_started
+            <= directory_time["seconds"] * 1000000000 + directory_time["nanoseconds"]
+            <= time.time_ns()
+        )
         timed_writer = worker(url.replace("upload.dat", "times.dat"))
         call(timed_writer, "open", flags=os.O_RDWR)
         write_started = time.time_ns()
@@ -788,6 +801,12 @@ nas_fs:timeout_ms = 500
             time.sleep(0.02)
         client = Client(runtime / "core.sock")
         replay_modified()
+        assert (
+            client.call({"stat": {"inode": created_directory["id"]}})["attributes"][
+                "node"
+            ]["times"]
+            == directory_times
+        )
         assert (
             client.call({"stat": {"inode": timed_inode}})["attributes"]["node"]["times"]
             == expected_times

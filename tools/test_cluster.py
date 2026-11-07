@@ -213,9 +213,24 @@ def main():
                 start(i)
             first = leader()
             request = create(1, "original")
+            creation_started = time.time_ns()
             result = apply(first, request)
             assert result == {"status": "ok", "inode": 2}
+            original_times = run("get", addresses[first + 3], "2")["times"]
+            born = original_times["birthtime"]
+            assert all(value == born for value in original_times.values())
+            assert (
+                creation_started
+                <= born["seconds"] * 1000000000 + born["nanoseconds"]
+                <= time.time_ns()
+            )
             assert apply(first, request) == result
+            assert run("get", addresses[first + 3], "2")["times"] == original_times
+            forged = {
+                **create(99, "forged-time"),
+                "creation_time": {"seconds": 123, "nanoseconds": 0},
+            }
+            run("apply", addresses[first + 3], json.dumps(forged), success=False)
             assert apply(first, create(1, "conflict"))["status"] == "request_conflict"
             run("apply", addresses[first + 3], "not-json", success=False)
             follower = next(i for i in processes if i != first)
@@ -365,6 +380,7 @@ def main():
             assert elected != first
             assert run("apply", endpoints, json.dumps(request)) == result
             assert apply(elected, request) == result
+            assert run("get", endpoints, "2")["times"] == original_times
             assert apply(elected, automatic_time) == mutable_result
             assert (
                 run("get", endpoints, mutable_inode)["times"]["mtime"]["seconds"] == 456
@@ -523,6 +539,7 @@ def main():
                 == automatic_time["command"]["touch_modified"]["modification"]
             )
             assert restored_time["times"]["mtime"]["seconds"] == 456
+            assert run("get", endpoints, "2")["times"] == original_times
             print(
                 "PASS: mutable checkpoint CAS and timestamp watermark replay preserve explicit times across leader change, snapshot and whole-cluster restart",
                 flush=True,

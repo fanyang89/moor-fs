@@ -63,6 +63,8 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 
 mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{inode}，以及rename_checked:{source:{inode,parent,name},parent,name}、remove_checked:{inode,parent,name}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；两种remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
 
+普通create和path_guarded.create（包括create_open内部创建）的初始atime/mtime/ctime/birthtime由Raft leader的实时时钟同一取样初始化，与创建和回执在同一事务提交。leader在日志请求附加creation_time，普通RPC客户端不能提供非null值；IPC字段不变。此服务端注记不进入去重摘要，重试重新取时仍返回首次回执，不改变原inode或后来显式设置的时间。失败创建不修改已有条目；新建目录同样初始化四种时间，但不自动更新父目录时间。历史日志/离线未带注记的命令继续使用旧默认时间，不在重放时读时钟；需要统一升级Raft节点，不能混跑旧二进制。
+
 时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。显式时间更新独立于数据WAL。
 
 核心Access在每次非空write和每次truncate完成双副本数据更新及验证后，以接入机实时时钟同一取样提交mtime/ctime，Raft确认后才返回成功。atime/birthtime保持原值，零字节write不更新；同长度truncate仍更新时间。时间提交失败或结果不确定会冻结共享会话，需释放全部句柄后重开。失败操作的数据可能已持久化，重开恢复不补造时间；WAL和时间没有跨存储原子性。sync/close、迁移、恢复、读和stat不自动改时间，因此不会覆盖后续显式设置值。创建及命名空间自动时间尚未接入。

@@ -149,6 +149,28 @@ pub const Request = struct {
     version: u32 = 1,
     request_id: u64,
     command: Command,
+    // Leader-assigned log annotation, excluded from the deduplication identity.
+    creation_time: ?Timestamp = null,
+
+    pub fn createsNode(self: Request) bool {
+        return switch (self.command) {
+            .create => true,
+            .path_guarded => |change| change.mutation == .create,
+            else => false,
+        };
+    }
+
+    pub fn validCreationTime(self: Request) bool {
+        return if (self.creation_time) |time| self.createsNode() and validTimestamp(time) else true;
+    }
+
+    pub fn jsonStringify(self: Request, writer: *std.json.Stringify) std.json.Stringify.Error!void {
+        if (self.creation_time) |time| {
+            try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .creation_time = time });
+        } else {
+            try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command });
+        }
+    }
 
     pub fn validId(self: Request) bool {
         return if (self.usesInodeState()) self.request_id == 0 else self.request_id != 0;
@@ -237,6 +259,7 @@ pub const State = struct {
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
+        if (!request.validCreationTime()) return .{ .status = .invalid_request };
         // Internal file commands deduplicate against inode state, not receipts.
         if (request.usesInodeState()) return self.execute(request.command);
         const digest = try requestDigest(self.allocator, request);
@@ -249,6 +272,9 @@ pub const State = struct {
         if (self.receipts.items.len == max_receipts) return .{ .status = .capacity_exceeded };
         try self.receipts.ensureUnusedCapacity(self.allocator, 1);
         const result = try self.execute(request.command);
+        if (result.status == .ok) if (request.creation_time) |time| {
+            self.nodes.items[self.find(result.inode).?].times = initialTimes(time);
+        };
         self.receipts.appendAssumeCapacity(.{
             .request_id = request.request_id,
             .digest = digest,
@@ -430,11 +456,17 @@ pub fn validName(name: []const u8) bool {
 }
 
 pub fn requestDigest(allocator: std.mem.Allocator, request: Request) ![32]u8 {
-    const encoded = try std.json.Stringify.valueAlloc(allocator, request, .{});
+    var identity = request;
+    identity.creation_time = null;
+    const encoded = try std.json.Stringify.valueAlloc(allocator, identity, .{});
     defer allocator.free(encoded);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
     return digest;
+}
+
+pub fn initialTimes(time: Timestamp) Times {
+    return .{ .atime = time, .mtime = time, .ctime = time, .birthtime = time };
 }
 
 pub fn validateSnapshot(data: Snapshot) !void {

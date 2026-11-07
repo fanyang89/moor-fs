@@ -258,6 +258,7 @@ pub const Store = struct {
     fn applyRequest(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, request: m.Request) !m.Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
+        if (!request.validCreationTime()) return .{ .status = .invalid_request };
         if (request.usesInodeState()) return self.execute(txn, allocator, meta, request.command);
         const digest = try m.requestDigest(allocator, request);
         const key = idKey(request.request_id);
@@ -269,6 +270,11 @@ pub const Store = struct {
         }
         if (try txn.count(self.requests_db) >= m.max_receipts) return .{ .status = .capacity_exceeded };
         const result = try self.execute(txn, allocator, meta, request.command);
+        if (result.status == .ok) if (request.creation_time) |time| {
+            var node = (try self.readNode(txn, allocator, result.inode)) orelse return error.CorruptStore;
+            node.times = m.initialTimes(time);
+            try self.putNode(txn, allocator, node);
+        };
         try putJson(txn, self.requests_db, &key, allocator, m.Receipt{
             .request_id = request.request_id,
             .digest = digest,
