@@ -145,11 +145,17 @@ pub const Store = struct {
     }
 
     pub fn openMode(gpa: Allocator, io: Io, identity: wal.Identity, dirs: [2]Dir, repair_sequence: ?u64) !Store {
-        // Acquire both data locks before inspecting or repairing checkpoint state.
-        const a = try openData(io, dirs[0], false);
-        errdefer a.close(io);
-        const b = try openData(io, dirs[1], false);
-        errdefer b.close(io);
+        // Lock every existing data inode first. A missing target may only be
+        // created by explicit repair after authenticating the surviving source.
+        var data: [2]?File = .{ null, null };
+        errdefer for (data) |file| if (file) |opened| opened.close(io);
+        for (dirs, 0..) |dir, i| {
+            data[i] = openData(io, dir, false) catch |err| switch (err) {
+                error.FileNotFound => if (repair_sequence != null) null else return err,
+                else => return err,
+            };
+        }
+        if (data[0] == null and data[1] == null) return error.NoVerifiedReplica;
         const ca = try Checkpoint.read(io, dirs[0], identity);
         const cb = try Checkpoint.read(io, dirs[1], identity);
         if (ca == null and cb == null) return error.MissingCheckpoint;
@@ -164,15 +170,27 @@ pub const Store = struct {
         errdefer la.close(io);
         const lb = try dirs[1].openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false });
         errdefer lb.close(io);
-        const replicas: [2]wal.Replica = .{ .{ .data = a, .log = la }, .{ .data = b, .log = lb } };
         const seal = try Seal.load(io, dirs, identity, checkpoint.next, checkpoint.size);
         if (repair_sequence != null and seal == null) return error.MissingSeal;
         if (seal) |baseline| {
             // A valid baseline is published only after rotation; writes must
             // durably invalidate both copies before appending any redo record.
             if ((try la.stat(io)).size != 0 or (try lb.stat(io)).size != 0) return error.SealWithPendingWal;
-            try baseline.verify(io, .{ a, b }, repair_sequence != null);
+            if (data[0] == null or data[1] == null) {
+                // Rebuild only one absent data file, not missing control files
+                // or an offline backend. Both persisted baselines must agree.
+                if (ca == null or cb == null or !std.meta.eql(ca.?, cb.?)) return error.CheckpointDiverged;
+                for (dirs) |dir| if (try Seal.read(io, dir, identity) == null) return error.MissingSeal;
+                const missing: usize = if (data[0] == null) 0 else 1;
+                if (!try baseline.matches(io, data[1 - missing].?)) return error.NoVerifiedReplica;
+                data[missing] = try openData(io, dirs[missing], true);
+                try data[missing].?.sync(io);
+                try objects.syncDir(io, dirs[missing]);
+                @import("repair_fault.zig").checkpoint(.mutable_created);
+            }
+            try baseline.verify(io, .{ data[0].?, data[1].? }, repair_sequence != null);
         }
+        const replicas: [2]wal.Replica = .{ .{ .data = data[0].?, .log = la }, .{ .data = data[1].?, .log = lb } };
         const session = try wal.Session.recoverFrom(gpa, io, identity, replicas, checkpoint.next);
         if (session.end == 0) {
             for (replicas) |replica| if ((try replica.data.stat(io)).size != checkpoint.size) return error.ReplicaSizeMismatch;

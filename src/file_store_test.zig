@@ -291,6 +291,98 @@ test "sealed baseline repairs either replica in place and preserves the source" 
     }
 }
 
+test "explicit sealed repair recreates only a missing data file and preserves all evidence" {
+    for (0..2) |missing| for ([_][]const u8{ "", "sealed baseline" }) |content| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write(content, 0);
+        try store.establishSeal();
+        const baseline = store.seal.?;
+        const source_inode = (try store.session.replicas[1 - missing].data.stat(t.io)).inode;
+        const checkpoint = try f.dirs[missing].readFileAlloc(t.io, "checkpoint", t.allocator, .limited(128));
+        defer t.allocator.free(checkpoint);
+        store.close();
+        try f.dirs[missing].deleteFile(t.io, "data");
+        try t.expectError(error.FileNotFound, f.open());
+        try t.expectError(error.FileNotFound, f.dirs[missing].openFile(t.io, "data", .{}));
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, baseline.next);
+        try f.expect(content);
+        try t.expectEqual(source_inode, (try store.session.replicas[1 - missing].data.stat(t.io)).inode);
+        try t.expectEqualDeep(baseline, store.seal.?);
+        const target_inode = (try store.session.replicas[missing].data.stat(t.io)).inode;
+        store.close();
+        store = try f.open();
+        defer store.close();
+        try t.expectEqual(target_inode, (try store.session.replicas[missing].data.stat(t.io)).inode);
+        for (f.dirs) |dir| {
+            const after = try dir.readFileAlloc(t.io, "checkpoint", t.allocator, .limited(128));
+            defer t.allocator.free(after);
+            try t.expectEqualSlices(u8, checkpoint, after);
+            try t.expectEqualDeep(baseline, (try Seal.read(t.io, dir, identity)).?);
+        }
+    };
+}
+
+test "missing data rebuild refuses incomplete evidence and unverified sources before creation" {
+    const Damage = enum { checkpoint, seal, log, pending, source, both, corrupt_seal, stale };
+    for (std.meta.tags(Damage)) |damage| for (0..2) |missing| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        const next = store.checkpoint.next;
+        store.close();
+        try f.dirs[missing].deleteFile(t.io, "data");
+        var name_buffer: [32]u8 = undefined;
+        const log_name = try std.fmt.bufPrint(&name_buffer, "wal-{d}", .{next});
+        switch (damage) {
+            .checkpoint => try f.dirs[missing].deleteFile(t.io, "checkpoint"),
+            .seal => try f.dirs[missing].deleteFile(t.io, "seal"),
+            .log => try f.dirs[missing].deleteFile(t.io, log_name),
+            .both => try f.dirs[1 - missing].deleteFile(t.io, "data"),
+            .pending, .source, .corrupt_seal => {
+                const dir = f.dirs[if (damage == .source) 1 - missing else missing];
+                const file = try dir.openFile(t.io, if (damage == .source) "data" else if (damage == .pending) log_name else "seal", .{ .mode = .read_write });
+                defer file.close(t.io);
+                try file.writePositionalAll(t.io, "X", 0);
+            },
+            .stale => {},
+        }
+        const expected = switch (damage) {
+            .checkpoint => error.CheckpointDiverged,
+            .seal => error.MissingSeal,
+            .log => error.FileNotFound,
+            .pending => error.SealWithPendingWal,
+            .source, .both => error.NoVerifiedReplica,
+            .corrupt_seal => error.CorruptSeal,
+            .stale => error.StaleFileState,
+        };
+        try t.expectError(expected, files.Store.openMode(t.allocator, t.io, identity, f.dirs, next + @intFromBool(damage == .stale)));
+        try t.expectError(error.FileNotFound, f.dirs[missing].openFile(t.io, "data", .{}));
+        if (damage != .both) {
+            const bytes = try f.dirs[1 - missing].readFileAlloc(t.io, "data", t.allocator, .limited(64));
+            defer t.allocator.free(bytes);
+            try t.expectEqualStrings(if (damage == .source) "Xaseline" else "baseline", bytes);
+        }
+    };
+}
+
+test "missing data rebuild cannot bypass a live owner through a replacement inode" {
+    for (0..2) |missing| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        defer store.close();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        try f.dirs[missing].deleteFile(t.io, "data");
+        try t.expectError(error.FileBusy, files.Store.openMode(t.allocator, t.io, identity, f.dirs, store.checkpoint.next));
+        try t.expectError(error.FileNotFound, f.dirs[missing].openFile(t.io, "data", .{}));
+    }
+}
+
 test "sealed identical corruption is rejected and cannot be resealed or repaired" {
     var f = try Fixture.init();
     defer f.deinit();

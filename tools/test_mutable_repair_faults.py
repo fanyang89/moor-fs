@@ -2,7 +2,9 @@
 
 import errno
 import hashlib
+import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import time
@@ -33,6 +35,15 @@ def test_mutable_repair_faults(
     report = run("seal-mutable", endpoints, config, inode)
     assert report["sealed"] and report["sha256"] == hashlib.sha256(content).hexdigest()
     metadata = run("get", endpoints, inode)
+    mappings = {entry["id"]: entry for entry in json.loads(Path(config).read_text())}
+    binding = metadata["mutable_file"]
+    client_data = [
+        Path(mappings[backend]["root"])
+        / "mutable"
+        / f"{inode}-{binding['generation']}"
+        / "data"
+        for backend in binding["backends"]
+    ]
     identities = [file.stat().st_ino for file in data]
     # Inspect on the server side for CIFS: mandatory client locks must remain
     # held while repair is paused. Only the test injects out-of-band corruption.
@@ -47,12 +58,31 @@ def test_mutable_repair_faults(
     damaged = b"?" * (len(content) + 31)
 
     for bad in range(2):
-        for point in ("mutable_first_chunk", "mutable_synced"):
-            with open(data[bad], "r+b", buffering=0) as target:
-                target.write(damaged)
-                target.truncate(len(damaged))
-                os.fsync(target.fileno())
-            log = directory / f"mutable-repair-{bad}-{point}.log"
+        for missing, point in (
+            (False, "mutable_first_chunk"),
+            (False, "mutable_synced"),
+            (True, "mutable_created"),
+            (True, "mutable_first_chunk"),
+            (True, "mutable_synced"),
+        ):
+            if missing:
+                # Delete through the tested mount so CIFS invalidates its cached
+                # dentry/deferred handle before the missing-path assertion.
+                client_data[bad].unlink()
+                fd = os.open(client_data[bad].parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                failed = run("scrub-mutable", endpoints, config, inode, success=False)
+                assert "FileNotFound" in failed.stdout + failed.stderr, failed
+                assert not data[bad].exists()
+            else:
+                with open(data[bad], "r+b", buffering=0) as target:
+                    target.write(damaged)
+                    target.truncate(len(damaged))
+                    os.fsync(target.fileno())
+            log = directory / f"mutable-repair-{bad}-{missing}-{point}.log"
             with log.open("w") as output:
                 process = subprocess.Popen(
                     [
@@ -69,11 +99,18 @@ def test_mutable_repair_faults(
             try:
                 wait_stopped(process, point, log)
                 expected = (
-                    content[:chunk] + damaged[chunk:]
-                    if point == "mutable_first_chunk"
-                    else content
+                    b""
+                    if point == "mutable_created"
+                    else (
+                        content[:chunk] + (b"" if missing else damaged[chunk:])
+                        if point == "mutable_first_chunk"
+                        else content
+                    )
                 )
                 assert data[bad].read_bytes() == expected
+                if missing:
+                    identities[bad] = data[bad].stat().st_ino
+                assert data[1 - bad].stat().st_ino == identities[1 - bad]
                 assert data[1 - bad].read_bytes() == content
                 assert run("get", endpoints, inode) == metadata
                 for command in ("scrub-mutable", "repair-mutable"):
@@ -101,7 +138,7 @@ def test_mutable_repair_faults(
                     for file in target.parent.iterdir()
                     if file.name != "data"
                 } == evidence[index]
-            if point == "mutable_first_chunk":
+            if point in ("mutable_created", "mutable_first_chunk"):
                 failed = run("scrub-mutable", endpoints, config, inode, success=False)
                 assert "SealedContentMismatch" in failed.stdout + failed.stderr, failed
             else:
@@ -127,6 +164,6 @@ def test_mutable_repair_faults(
             metadata["access"] = accessed["access"]
             assert accessed == metadata
             print(
-                f"PASS: mutable repair NAS {bad + 1} SIGKILL at {point}, source/evidence preserved, ownership and in-place retry",
+                f"PASS: mutable {'missing-data rebuild' if missing else 'repair'} NAS {bad + 1} SIGKILL at {point}, source/evidence preserved, ownership and in-place retry",
                 flush=True,
             )

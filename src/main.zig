@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "check-file", "Verify every declared replica of the current file version", &.{ "endpoint", "config", "id" }, @import("data_cli.zig").check);
     try register(root, options, "scrub-mutable", "Recover an existing mutable file and compare both complete replicas", &.{ "endpoint", "config", "id" }, scrubMutable);
     try register(root, options, "seal-mutable", "Persist an idle mutable file's verified content baseline", &.{ "endpoint", "config", "id" }, sealMutable);
-    try register(root, options, "repair-mutable", "Restore a damaged mutable replica from a matching sealed baseline", &.{ "endpoint", "config", "id" }, repairMutable);
+    try register(root, options, "repair-mutable", "Restore damaged or missing mutable data from a matching sealed baseline", &.{ "endpoint", "config", "id" }, repairMutable);
     try register(root, options, "repair-file", "Restore a declared replica from a verified copy", &.{ "endpoint", "config", "id", "backend" }, @import("data_cli.zig").repair);
     if (@import("build_options").fuse) try register(root, options, "mount", "Mount the namespace with optional verified reads and dual-replica writes", &.{ "endpoint", "mountpoint" }, mount);
     const serve = try zli.Command.init(options, .{ .name = "serve", .description = "Run a persistent node in a fixed three-voter cluster" }, serveNode);

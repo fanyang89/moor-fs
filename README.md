@@ -965,9 +965,14 @@ For idle files, `seal-mutable ENDPOINTS CONFIG INODE` explicitly persists a
 generation/sequence-bound SHA-256 baseline after both replicas agree. Later
 opens and scrubs validate it, detecting even identical subsequent corruption.
 `repair-mutable ENDPOINTS CONFIG INODE` can restore an existing damaged replica
-in place only when the other replica matches that valid baseline. Both data
-locks remain held; an interrupted copy can be retried. Neither matching source
-nor valid baseline means repair is refused.
+in place only when the other replica matches that valid baseline. It can also
+recreate one missing `data` file when both directories, matching checkpoints and
+seals, and empty active WALs are intact. The surviving data inode is locked and
+fully authenticated before exclusive target creation; the new file and directory
+entry are synced before copying. Both data locks remain held during copying and
+verification. Interrupted copies are retried in place, preserving the source.
+Ordinary opens never create missing data. Missing control files, offline backends,
+two absent data files or no matching source remain unsupported for rebuilding.
 
 Before the next write/truncate, both seal files are durably removed; ordinary
 fsync does not rebuild a whole-file seal. Re-establish the baseline explicitly
@@ -986,7 +991,9 @@ zig build test-wal-smb -Dfuse=true -Dfault-injection=true -Doptimize=safe
 Both targets kill repair after its first 256 KiB copy and after destination
 fsync, with each NAS serving as the damaged target. They check exclusive
 ownership, retained source/seal/WAL/checkpoint bytes and successful in-place
-retry. Normal builds ignore these stop points even if their environment
+retry. They also remove one data file and kill rebuilding after durable target
+creation, first copy and destination fsync in both directions (six additional cases).
+Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.
 

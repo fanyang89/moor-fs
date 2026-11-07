@@ -1174,3 +1174,17 @@ Debug/Safe各134项通过。单测将8192回执填满后回收，逐操作LMDB�
 新增test-receipts入口，真实三节点覆盖回收、删除后旧创建不复活、同ID跨代际作为新请求、leader切换/快照/全群重启后的隔离及最新回收重放；原生IPC桥接覆盖连接固定代际、ESTALE、新连接成功与raw IPC显式代际。原生受控socket测试、本地/双CIFS SMB及完整WAL FUSE/SMB故障套件通过，日志前缀/tmp/opencode/nas-receipt-epoch-。首次实现中空查询的Zig匿名void/空tuple编码与IPC对象不匹配，由真实桥接测试发现，已改为显式空struct并验证通过。自动回收策略、版本/孤儿数据GC、持久ACL与跨节点fencing仍待实现。
 
 test-receipts的Debug与Safe均通过；Safe初跑在节点全群重启时出现BindFailed，单独重跑通过，记录于cluster-safe.log及cluster-safe-rerun.log。格式、diff、Python编译和Safe FUSE兼容构建检查通过。
+
+## 82. 密封可变副本单data缺失的显式重建
+
+扩展repair-mutable，仅在显式repair模式下允许打开流程暂缺一个data。先打开并独占锁定所有仍存在的数据inode，再读取控制文件；两侧data都缺失立即拒绝。普通打开遇FileNotFound仍直接失败，不创建文件。已有数据文件的路径/类型/锁异常不会被当作缺失，也不自动初始化后端或代次目录。
+
+创建缺失目标前要求两侧checkpoint均存在且一致、两侧seal均存在且通过身份/序号/大小/摘要校验、两侧当前WAL均存在且为空，数据检查点不能落后于Raft元数据。完整计算幸存data的大小和SHA-256，必须与基线匹配。所有这些前置校验失败均保留目标缺失状态，不产生占位data。随后exclusive创建并锁定目标，同步文件和父目录；故障注入点mutable_created位于两者持久化之后。目标若被并发创建则拒绝，不覆盖现有路径。
+
+创建后复用密封修复的256KiB有界复制、目标长度设置、fsync及源/目标完整读回校验，期间持续持有幸存源与新目标锁。成功后按已有流程恢复空WAL、同步检查点及补报；正常密封状态下逻辑inode/时间/副本代次及控制文件字节不变。新目标inode可以不同于丢失前的inode；一旦创建，后续中断重试继续原地修复，不替换新inode。空文件同样先验证幸存副本再持久创建目标。
+
+Debug/Safe各138项通过：两种缺失方向、空/非空内容、普通打开拒绝、源inode/控制字节保留、重开成功；缺checkpoint/seal/当前WAL、pending WAL、源损坏、双侧缺失、坏seal、Raft序号领先时不创建目标；持有旧目标的活跃会话即使目标路径已删除，幸存侧锁仍阻止重建。Access验证显式重建不改逻辑元数据，随后读取和写入/同步正常。
+
+本地/双CIFS原生SMB覆盖普通下载拒绝、两个方向显式重建、元数据/源inode保留及重新下载。完整WAL FUSE/SMB故障套件新增两方向各mutable_created、mutable_first_chunk、mutable_synced共六项SIGKILL：目标空文件/部分副本保留，源与seal/checkpoint/WAL字节不变，持锁时其他维护和FUSE打开失败，重试保持新目标inode并恢复内容。原有四项损坏修复、六项seal生命周期中断及WAL损坏场景继续通过。
+
+初跑缺失注入直接删除CIFS服务端路径，客户端仍从缓存目录项/延迟句柄读取旧文件，未进入预期的缺失分支；测试改为通过被测CIFS挂载删除并同步目录，暂停阶段继续从服务端观察内容，完整重跑通过。此差异没有通过等待或弱化断言规避，不提供远端删除立即失效、离线后端接管或跨节点fencing。后端目录/控制文件缺失及完整副本丢失重建仍待实现。日志前缀/tmp/opencode/nas-missing-data-；Raft/IPC/C ABI未变。

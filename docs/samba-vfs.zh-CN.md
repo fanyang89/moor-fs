@@ -135,6 +135,14 @@ Debug/Safe各125项、本地/双CIFS原生SMB及完整WAL故障套件通过。�
 
 leader使用独立namespace_time日志注记，创建时与creation_time共用一次取样；两者均不进入去重摘要，RPC拒绝客户端指定非null值。旧日志仅有creation_time时仍只初始化新节点，不补更新父目录。Debug/Safe各127项、本地/双CIFS原生SMB及完整WAL故障回归通过，覆盖跨目录/大小写改名、冲突失败、删除、重放保留显式时间、事务分配失败回滚及重启持久化。日志前缀：/tmp/opencode/nas-namespace-times-。
 
+### 单个data文件缺失的显式重建
+
+普通SMB打开/下载在data缺失时仍失败，不自动创建。关闭相关句柄后可执行`nas-fs repair-mutable ENDPOINTS CONFIG INODE`：只接受一个data缺失、两侧代次目录存在、checkpoint一致、两份seal有效一致、当前两份WAL完整且为空的状态。先锁定并完整校验幸存副本，再exclusive创建并锁定目标，同步空文件和目录项后复制、同步、读回校验。已有目标按原路径原地修复，不替换inode。
+
+中断后保留新建的空/部分目标及原证据，重试按已有损坏目标原地完成。源内容/inode及逻辑元数据不变；后续正常读取才更新atime。没有可信源、两个data都缺失、控制文件缺失或后端离线时不创建目标。源仍被活跃会话锁定时拒绝重建，不能通过新建目标inode绕过持有者。
+
+Debug/Safe各138项、本地/双CIFS原生SMB及完整WAL故障套件通过。SMB验证两种缺失方向的下载拒绝、显式修复和重新下载；故障套件新增两方向各三个SIGKILL阶段（持久创建、首块复制、目标同步），验证证据保留、锁及原地重试。CIFS删除通过被测挂载进行，避免服务端删除后的缓存句柄掩盖缺失状态；未增加外部删除的即时失效保证。日志前缀/tmp/opencode/nas-missing-data-。
+
 ### 回执代际回收
 
 命名空间和显式时间请求增加receipt_epoch；桥接首次提交这类修改前查询核心receipt_state并固定代际，普通重试不刷新。管理员通过`nas-fs receipts ENDPOINTS`检查容量，再显式执行`nas-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`。Raft将代际加一与清空回执原子提交，旧连接后续命名空间修改返回ESTALE；新连接取得新代际。仍允许已有数据句柄读写/同步，因为这些内部操作采用inode内去重。

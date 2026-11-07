@@ -690,6 +690,30 @@ test "mutable access freezes on metadata outage and replacement of the data file
     try t.expectError(error.WalSessionFailed, session.read(&bytes, 0));
 }
 
+test "explicit missing replica repair preserves logical metadata and resumes verified reads" {
+    for (0..2) |missing| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var session = try f.open();
+        try session.write("baseline", 0);
+        try session.seal();
+        const before = f.meta.state.get(2).?;
+        try session.dirs[missing].deleteFile(t.io, "data");
+        session.close();
+        try t.expectError(error.FileNotFound, f.open());
+        session = try access.Access.openMode(t.allocator, t.io, f.meta.api(), &f.mappings, 2, .{ 1, 2 }, true);
+        defer session.close();
+        try t.expectEqualDeep(before, f.meta.state.get(2).?);
+        var bytes: [8]u8 = undefined;
+        try t.expectEqual(@as(usize, 8), try session.read(&bytes, 0));
+        try t.expectEqualStrings("baseline", &bytes);
+        try session.write("X", 0);
+        try session.sync();
+        try t.expectEqual(@as(usize, 8), try session.read(&bytes, 0));
+        try t.expectEqualStrings("Xaseline", &bytes);
+    }
+}
+
 test "mutable reads detect either replica corruption and retain WAL evidence" {
     for (0..2) |bad| {
         var f = try Fixture.init();

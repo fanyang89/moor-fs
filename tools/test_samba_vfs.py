@@ -873,6 +873,52 @@ nas_fs:timeout_ms = 500
         # Reopen recovers the acknowledged WAL after every failed handle closes.
         smb(f"get vfs-read/binary.dat {destination}")
         assert destination.read_bytes() == data
+
+        def maintain_upload(command):
+            result = subprocess.run(
+                [
+                    executable,
+                    command,
+                    endpoints,
+                    str(directory / "backends.json"),
+                    str(upload),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            return json.loads(result.stdout)
+
+        sealed = maintain_upload("seal-mutable")
+        assert sealed["sealed"]
+        mappings = {
+            entry["id"]: entry
+            for entry in json.loads((directory / "backends.json").read_text())
+        }
+        for bad in range(2):
+            before = client.call({"stat": {"inode": upload}})["attributes"]["node"]
+            binding = before["mutable_file"]
+            replicas = [
+                Path(mappings[backend]["root"])
+                / "mutable"
+                / f"{upload}-{binding['generation']}"
+                / "data"
+                for backend in binding["backends"]
+            ]
+            source_inode = replicas[1 - bad].stat().st_ino
+            replicas[bad].unlink()
+            smb(f"get vfs-read/upload.dat {directory / 'vfs-missing'}", success=False)
+            assert not replicas[bad].exists()
+            rebuilt = maintain_upload("repair-mutable")
+            assert rebuilt == sealed
+            assert (
+                client.call({"stat": {"inode": upload}})["attributes"]["node"] == before
+            )
+            assert replicas[1 - bad].stat().st_ino == source_inode
+            assert all(replica.read_bytes() == b"repair" for replica in replicas)
+            smb(f"get vfs-read/upload.dat {directory / 'vfs-rebuilt'}")
+            assert (directory / "vfs-rebuilt").read_bytes() == b"repair"
         paused = worker(url.replace("/write/", "/deadline/"))
         call(paused, "open", flags=os.O_RDONLY)
         os.kill(core.pid, signal.SIGSTOP)
