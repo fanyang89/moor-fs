@@ -87,7 +87,7 @@ VFS改名/删除使用path_guarded命令：将查找返回的源inode、parent�
 
 文件/目录创建同样核对父目录到根的条件链，再在同一事务内创建并强制双副本策略。真实数据文件open使用open_guarded：leader ReadIndex后通过一次LMDB只读事务检查祖先和源，再建立核心句柄；此只读检查不产生Raft回执。核心锁覆盖检查到本地句柄登记，拒绝旧路径不会先迁移文件或占用写句柄。旧句柄仍可跨改名访问原inode。其他元数据写者可能在检查快照之后修改路径，此处不提供跨服务fencing。
 
-每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL、父目录/改名/读取的时间更新和跨节点fencing仍待实现。
+每次最多记录32个不同的非根目录，超限返回ENAMETOOLONG；Raft命令JSON上限64 KiB，Unix IPC帧上限不变。条件链必须连接到根，缺链、重复inode或环被拒绝。观察起点是当前VFS回调持有的目录fd身份，不回溯此前Samba获取该fd时的路径；也不检测移走后又移回的历史。目录路径引用不计入核心活跃数据句柄。这仍不是完整POSIX路径原子性或SMB delete-on-close/share-mode语义。SMB持久ACL、读取atime更新和跨节点fencing仍待实现。
 
 先构建模块，再运行：
 
@@ -119,15 +119,21 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 
 源目录项CAS验证：内存/LMDB对照与逐请求重启测试覆盖跨目录移动、名称变化、精确大小写、删除后名称复用、成功/冲突回执重放；真实Raft SMB/IPC混合测试确认移动后旧请求被拒、原文件和同名新文件均保留。Debug/Safe各111项单测、C ABI Debug/Safe及本地/双CIFS E2E通过，日志：`/tmp/opencode/nas-entry-{unit-debug,unit-safe,abi-debug,abi-safe,local,cifs}.log`。新增checked命令要求Raft节点与核心/桥接统一升级，不支持混合旧二进制运行。
 
-这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL、父目录/改名/读取的时间更新、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
+这是Linux smbclient与同机loopback CIFS验证，不是Windows/macOS或物理NAS验收。下一阶段仍需路径操作原子性、持久ACL、读取atime更新、share-mode/byte-range lock/lease协调、失效通知、异步调度和跨节点fencing。
 
 ### 创建时的初始时间
 
 新建文件和目录以Raft leader提案时的同一实时时钟取样初始化atime/mtime/ctime/birthtime，与inode创建和回执原子提交。create_open与mkdir使用的guarded create同样生效。取样作为日志注记复制，状态机重放不读时钟；回执去重忽略该注记，同一创建请求重试或leader切换后仍保留首次提交值及后续显式修改。RPC拒绝客户端伪造该注记。
 
-旧日志没有注记时沿用原默认值；已有节点不补造创建时间。父目录在增删条目时的时间、改名ctime及读atime尚未自动维护。创建取时来自leader，后续写入取时来自核心，不提供跨机器单调墙钟保证。此日志格式需统一升级全部Raft节点，C ABI未改变。
+旧日志没有注记时沿用原默认值；已有节点不补造创建时间。父目录及改名时间按下节自动维护，读atime仍未自动更新。创建和命名空间取时来自leader，后续写入取时来自核心，不提供跨机器单调墙钟保证。此日志格式需统一升级全部Raft节点，C ABI未改变。
 
 Debug/Safe各125项、本地/双CIFS原生SMB及完整WAL故障套件通过。单测覆盖逐请求重启、重试换取样但不改创建时间、显式时间及改名后的重放、旧默认值保留、非法注记与事务OOM回滚；真实集群覆盖leader切换/快照/全群重启后时间不变及伪造注记拒绝。SMB验证普通上传的birthtime范围、写/截断保留初始atime/birthtime、新目录四时间一致及核心重启后保留。日志前缀：`/tmp/opencode/nas-created-times-`。
+
+### 命名空间的自动时间
+
+创建和删除更新父目录mtime/ctime；实际改名更新源inode的ctime及新旧父目录mtime/ctime，同父目录只更新一次。源inode的atime/mtime/birthtime保持不变。大小写改名会更新时间；同父目录同名字节的无操作改名、失败操作和回执重放不更新时间。时间、命名空间和回执在同一LMDB事务提交。
+
+leader使用独立namespace_time日志注记，创建时与creation_time共用一次取样；两者均不进入去重摘要，RPC拒绝客户端指定非null值。旧日志仅有creation_time时仍只初始化新节点，不补更新父目录。Debug/Safe各127项、本地/双CIFS原生SMB及完整WAL故障回归通过，覆盖跨目录/大小写改名、冲突失败、删除、重放保留显式时间、事务分配失败回滚及重启持久化。日志前缀：/tmp/opencode/nas-namespace-times-。
 
 ### 写入和截断的自动时间
 
@@ -147,7 +153,7 @@ Debug/Safe各119项、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故�
 
 文件和目录的atime、mtime、ctime、birthtime由Raft/LMDB持久化，VFS stat读取这些值。fntimes仅更新客户端提供的字段，省略字段保持原值；UTIME_NOW使用接入进程的实时时钟，同一次调用共用一个取样。只读共享拒绝设置。更新按inode执行并保存Raft回执，不因改名改变目标身份；不要求取得数据写句柄。
 
-内部保存有符号Unix秒和纳秒，允许秒范围[-11644473600,253402300799]、纳秒小于1000000000；SMB线上精度受协议限制。旧记录缺少时间字段时默认2024-01-01 UTC，新建节点由leader初始化。普通上传实测不会自动调用fntimes；写入/截断的自动更新时间由核心负责，读取及改名自动时间仍待实现。底层NAS文件的宿主时间不是这些逻辑属性的来源。
+内部保存有符号Unix秒和纳秒，允许秒范围[-11644473600,253402300799]、纳秒小于1000000000；SMB线上精度受协议限制。旧记录缺少时间字段时默认2024-01-01 UTC，新建节点由leader初始化。普通上传实测不会自动调用fntimes；写入/截断的自动更新时间由核心负责，改名时间随命名空间事务更新，读取atime仍待实现。底层NAS文件的宿主时间不是这些逻辑属性的来源。
 
 `nas_attr`增加时间字段，包含它的目录页与祖先数组布局也改变；必须一起重建桥接库、模块及C ABI调用方，并统一升级Raft节点与核心，不支持新旧二进制混用。
 

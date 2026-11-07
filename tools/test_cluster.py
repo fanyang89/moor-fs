@@ -231,6 +231,8 @@ def main():
                 "creation_time": {"seconds": 123, "nanoseconds": 0},
             }
             run("apply", addresses[first + 3], json.dumps(forged), success=False)
+            forged["namespace_time"] = forged.pop("creation_time")
+            run("apply", addresses[first + 3], json.dumps(forged), success=False)
             assert apply(first, create(1, "conflict"))["status"] == "request_conflict"
             run("apply", addresses[first + 3], "not-json", success=False)
             follower = next(i for i in processes if i != first)
@@ -352,6 +354,7 @@ def main():
             }
             assert apply(first, explicit_time) == mutable_result
             assert apply(first, checkpoint_request) == mutable_result
+            root_times_before_retry = run("get", endpoints, "1")["times"]
             print(
                 "PASS: election, proposal, deduplication, validation, leader-only ReadIndex, store lock",
                 flush=True,
@@ -381,6 +384,7 @@ def main():
             assert run("apply", endpoints, json.dumps(request)) == result
             assert apply(elected, request) == result
             assert run("get", endpoints, "2")["times"] == original_times
+            assert run("get", endpoints, "1")["times"] == root_times_before_retry
             assert apply(elected, automatic_time) == mutable_result
             assert (
                 run("get", endpoints, mutable_inode)["times"]["mtime"]["seconds"] == 456
@@ -457,6 +461,7 @@ def main():
                     == "ok"
                 )
             survivors = list(processes)
+            root_final_times = run("get", endpoints, "1")["times"]
             for i in survivors:
                 stop(i, kill=False)
             for i in survivors:
@@ -540,6 +545,7 @@ def main():
             )
             assert restored_time["times"]["mtime"]["seconds"] == 456
             assert run("get", endpoints, "2")["times"] == original_times
+            assert run("get", endpoints, "1")["times"] == root_final_times
             print(
                 "PASS: mutable checkpoint CAS and timestamp watermark replay preserve explicit times across leader change, snapshot and whole-cluster restart",
                 flush=True,

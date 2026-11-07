@@ -121,8 +121,10 @@ instead of a receipt. Namespace changes and explicit times still consume receipt
 so their capacity limit remains. Failed calls may have durable
 data without updated timestamps; data WAL and timestamp metadata are not one
 atomic transaction. New files and directories get initial atime/mtime/ctime/birthtime
-atomically with creation. Reads do not update atime; parent-directory and other
-namespace timestamp maintenance remains pending.
+atomically with creation. Creation/removal updates parent mtime/ctime; renaming
+updates source ctime and both parents' mtime/ctime atomically with the namespace
+change. Failed operations, exact no-op renames and receipt replays do not retime
+nodes. Reads do not update atime.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
@@ -131,6 +133,9 @@ For creation, the leader records a server-only `creation_time` annotation in the
 Raft entry. It is excluded from the request digest, so retries preserve the first
 committed time. Ordinary RPC clients cannot supply this annotation. Legacy log
 entries without it retain the previous default timestamps; replay does not retime them.
+Namespace effects use a separate server-only `namespace_time` log annotation,
+also excluded from deduplication. Historical entries containing only
+`creation_time` retain their original effects without updating parent times.
 The internal `touch_modified`, `checkpoint_mutable` and `attach_mutable` commands
 require ID zero and deduplicate against inode-local state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.

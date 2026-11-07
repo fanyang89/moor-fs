@@ -414,6 +414,78 @@ nas_fs:timeout_ms = 500
         assert len(saved_times) == 4
         for line, year in zip(saved_times, (2020, 2021, 2019, 2023)):
             assert str(year) in line and "03:04:05" in line, line
+
+        # Namespace effects must be atomic with the operation, while preserving
+        # file data times and directory access/birth times.
+        def lookup_node(directory_inode, name):
+            return client.call({"lookup": {"parent": directory_inode, "name": name}})[
+                "attributes"
+            ]["node"]
+
+        def inode_times(inode):
+            return client.call({"stat": {"inode": inode}})["attributes"]["node"][
+                "times"
+            ]
+
+        def changed_in_window(value, started):
+            assert (
+                started
+                <= value["seconds"] * 1000000000 + value["nanoseconds"]
+                <= time.time_ns()
+            )
+
+        def parent_changed(node, started):
+            times = inode_times(node["id"])
+            changed_in_window(times["mtime"], started)
+            assert times["mtime"] == times["ctime"]
+            for field in ("atime", "birthtime"):
+                assert times[field] == node["times"][field]
+            return times
+
+        smb("mkdir vfs-read/time-parent; mkdir vfs-read/time-dest", share="write")
+        time_parent = lookup_node(parent, "time-parent")
+        time_dest = lookup_node(parent, "time-dest")
+        started = time.time_ns()
+        smb(f"put {source} vfs-read/time-parent/item.dat", share="write")
+        parent_changed(time_parent, started)
+        item = lookup_node(time_parent["id"], "item.dat")
+        started = time.time_ns()
+        smb(
+            "rename vfs-read/time-parent/item.dat vfs-read/time-dest/item.dat",
+            share="write",
+        )
+        parent_changed(time_parent, started)
+        parent_changed(time_dest, started)
+        renamed = lookup_node(time_dest["id"], "item.dat")
+        assert renamed["id"] == item["id"]
+        changed_in_window(renamed["times"]["ctime"], started)
+        for field in ("atime", "mtime", "birthtime"):
+            assert renamed["times"][field] == item["times"][field]
+        started = time.time_ns()
+        smb(
+            "rename vfs-read/time-dest/item.dat vfs-read/time-dest/ITEM.dat",
+            share="write",
+        )
+        parent_changed(time_dest, started)
+        renamed = lookup_node(time_dest["id"], "ITEM.dat")
+        assert renamed["name"] == "ITEM.dat"
+        changed_in_window(renamed["times"]["ctime"], started)
+        smb(f"put {source} vfs-read/time-dest/exists.dat", share="write")
+        before_failed = inode_times(time_dest["id"])
+        before_file = inode_times(item["id"])
+        smb(
+            "rename vfs-read/time-dest/ITEM.dat vfs-read/time-dest/exists.dat",
+            share="write",
+            success=False,
+        )
+        assert inode_times(time_dest["id"]) == before_failed
+        assert inode_times(item["id"]) == before_file
+        started = time.time_ns()
+        smb("del vfs-read/time-dest/ITEM.dat", share="write")
+        parent_changed(time_dest, started)
+        namespace_saved_times = {
+            node["id"]: inode_times(node["id"]) for node in (time_parent, time_dest)
+        }
         race = [
             worker(url.replace("upload.dat", "exclusive-race.dat")) for _ in range(2)
         ]
@@ -812,6 +884,8 @@ nas_fs:timeout_ms = 500
             == expected_times
         )
         assert time_lines() == saved_times
+        for inode, times in namespace_saved_times.items():
+            assert inode_times(inode) == times
         print(
             "PASS: native Samba VFS SMB3 reads/writes, namespace mutations, writer exclusion, checkpoints, corruption recovery and paused-core deadline without FUSE; host paths rejected",
             flush=True,

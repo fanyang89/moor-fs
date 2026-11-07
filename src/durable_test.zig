@@ -212,6 +212,86 @@ test "guarded creation enforces replicas and path checks are read-only snapshots
     try t.expect(memory.lookup(2, "wrong") == null);
 }
 
+fn timedNamespace(id: u64, seconds: i64, command: m.Command) m.Request {
+    var request: m.Request = .{ .request_id = id, .command = command, .namespace_time = .{ .seconds = seconds } };
+    if (request.createsNode()) request.creation_time = request.namespace_time;
+    return request;
+}
+
+test "namespace timestamps preserve unaffected fields and do not repeat successful or failed effects" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const move = timedNamespace(6, 50, .{ .path_guarded = .{
+        .ancestors = &.{ .{ .inode = 2, .parent = 1, .name = "a" }, .{ .inode = 3, .parent = 1, .name = "b" } },
+        .mutation = .{ .rename = .{ .source = .{ .inode = 4, .parent = 2, .name = "FILE" }, .parent = 3, .name = "moved" } },
+    } });
+    var failed = move;
+    failed.request_id = 7;
+    failed.namespace_time = .{ .seconds = 60 };
+    var replay = move;
+    replay.namespace_time = .{ .seconds = 70 };
+    const remove = timedNamespace(10, 80, .{ .remove_entry = .{ .parent = 3, .name = "MOVED", .kind = .file } });
+    var remove_replay = remove;
+    remove_replay.namespace_time = .{ .seconds = 90 };
+    const commands = [_]m.Request{
+        timedNamespace(1, 10, .{ .create = .{ .parent = 1, .name = "a", .kind = .directory } }),
+        timedNamespace(2, 15, .{ .create = .{ .parent = 1, .name = "b", .kind = .directory } }),
+        timedNamespace(3, 20, .{ .create = .{ .parent = 2, .name = "file", .kind = .file } }),
+        timedNamespace(4, 30, .{ .rename_entry = .{ .parent = 2, .name = "file", .new_parent = 2, .new_name = "FILE" } }),
+        timedNamespace(5, 40, .{ .rename_checked = .{ .source = .{ .inode = 4, .parent = 2, .name = "FILE" }, .parent = 2, .name = "FILE" } }),
+        move,
+        failed,
+        .{ .request_id = 8, .command = .{ .set_times = .{ .inode = 4, .ctime = .{ .seconds = 999 } } } },
+        .{ .request_id = 9, .command = .{ .set_times = .{ .inode = 2, .mtime = .{ .seconds = 888 }, .ctime = .{ .seconds = 888 } } } },
+        replay,
+        remove,
+        .{ .request_id = 11, .command = .{ .set_times = .{ .inode = 3, .mtime = .{ .seconds = 777 }, .ctime = .{ .seconds = 777 } } } },
+        remove_replay,
+        timedNamespace(12, 100, .{ .remove_entry = .{ .parent = 1, .name = "a", .kind = .file } }),
+        timedNamespace(13, 110, .{ .remove_checked = .{ .inode = 2, .parent = 1, .name = "a" } }),
+        timedNamespace(14, 120, .{ .remove = .{ .id = 3 } }),
+        .{ .request_id = 15, .namespace_time = .{ .seconds = 130 }, .command = .{ .set_times = .{ .inode = 1, .mtime = .{ .seconds = 999 } } } },
+        .{ .request_id = 16, .namespace_time = .{ .nanoseconds = 1000000000 }, .command = .{ .remove = .{ .id = 1 } } },
+    };
+    for (commands, 1..) |command, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(if (index == 7) m.Status.entry_conflict else if (index == 14) m.Status.not_file else if (index >= 17) m.Status.invalid_request else m.Status.ok, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        for ([_]u64{ 2, 3 }) |id| if (memory.get(id)) |node| {
+            try t.expectEqual(@as(i64, if (id == 2) 10 else 15), node.times.atime.seconds);
+            try t.expectEqualDeep(node.times.atime, node.times.birthtime);
+            try t.expectEqualDeep(node.times.mtime, node.times.ctime);
+        };
+        if (index >= 3 and index <= 10) {
+            const times = memory.get(4).?.times;
+            try t.expectEqual(@as(i64, 20), times.atime.seconds);
+            try t.expectEqual(@as(i64, 20), times.mtime.seconds);
+            try t.expectEqual(@as(i64, 20), times.birthtime.seconds);
+            try t.expectEqual(@as(i64, if (index >= 8) 999 else if (index >= 6) 50 else if (index >= 4) 30 else 20), times.ctime.seconds);
+        }
+        if (index == 5) try t.expectEqual(@as(i64, 30), memory.get(2).?.times.mtime.seconds);
+        if (index == 7) {
+            try t.expectEqual(@as(i64, 50), memory.get(2).?.times.mtime.seconds);
+            try t.expectEqual(@as(i64, 50), memory.get(3).?.times.mtime.seconds);
+        }
+        if (index >= 9 and index <= 14) try t.expectEqual(@as(i64, 888), memory.get(2).?.times.mtime.seconds);
+        if (index >= 12 and index <= 15) try t.expectEqual(@as(i64, 777), memory.get(3).?.times.mtime.seconds);
+        if (index == 14) try t.expectEqual(@as(i64, 15), memory.get(1).?.times.mtime.seconds);
+    }
+    try t.expectEqual(@as(i64, 120), memory.get(1).?.times.mtime.seconds);
+    try t.expectEqual(@as(i64, 120), memory.get(1).?.times.ctime.seconds);
+    try t.expectEqualDeep(m.Timestamp{}, memory.get(1).?.times.birthtime);
+}
+
 test "creation times are atomic and deduplicated independently of leader time samples" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
@@ -489,6 +569,42 @@ test "LMDB allocation failures roll back apply and restore" {
     try t.checkAllAllocationFailures(deterministic_allocator, allocationScenario, .{});
 }
 
+test "namespace timestamp allocation failures roll back all affected inodes and entries" {
+    for ([_]bool{ false, true }) |remove| {
+        try t.checkAllAllocationFailures(deterministic_allocator, namespaceAllocationScenario, .{remove});
+    }
+}
+
+fn namespaceAllocationScenario(allocator: std.mem.Allocator, remove: bool) !void {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    _ = try apply(&store, 1, timedNamespace(1, 10, .{ .create = .{ .parent = 1, .name = "a", .kind = .directory } }));
+    _ = try apply(&store, 2, timedNamespace(2, 20, .{ .create = .{ .parent = 1, .name = "b", .kind = .directory } }));
+    _ = try apply(&store, 3, timedNamespace(3, 30, .{ .create = .{ .parent = 2, .name = "file", .kind = .file } }));
+    const before = try store.snapshot(t.allocator, 3, 1);
+    defer t.allocator.free(before);
+    const source: m.Entry = .{ .inode = 4, .parent = 2, .name = "file" };
+    const command: m.Command = .{ .path_guarded = .{
+        .ancestors = &.{ .{ .inode = 2, .parent = 1, .name = "a" }, .{ .inode = 3, .parent = 1, .name = "b" } },
+        .mutation = if (remove) .{ .remove = source } else .{ .rename = .{ .source = source, .parent = 3, .name = "moved" } },
+    } };
+    store.allocator = allocator;
+    const result = apply(&store, 4, timedNamespace(4, 40, command)) catch |err| {
+        store.allocator = t.allocator;
+        const after = try store.snapshot(t.allocator, 3, 1);
+        defer t.allocator.free(after);
+        try t.expectEqualStrings(before, after);
+        return err;
+    };
+    store.allocator = t.allocator;
+    try t.expectEqual(m.Status.ok, result.status);
+    const parent = (try store.get(t.allocator, 2)).?;
+    defer t.allocator.free(parent.name);
+    try t.expectEqual(@as(i64, 40), parent.times.mtime.seconds);
+}
+
 test "LMDB map-full snapshot replacement preserves previous database" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
@@ -524,6 +640,7 @@ fn allocationScenario(allocator: std.mem.Allocator) !void {
     store.allocator = allocator;
     var stamped = create;
     stamped.creation_time = .{ .seconds = 10, .nanoseconds = 123400 };
+    stamped.namespace_time = stamped.creation_time;
     _ = apply(&store, 1, stamped) catch |err| {
         store.allocator = t.allocator;
         try t.expectEqual(@as(u64, 0), (try store.applied()).index);

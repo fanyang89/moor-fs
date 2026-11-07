@@ -1136,3 +1136,13 @@ Debug/Safe各125项通过：内存/LMDB逐请求重启及全快照对照覆盖�
 配套模块、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过。SMB上传birthtime为本次创建时间，写/截断保留初始atime/birthtime，新目录四时间相同且在请求范围，核心重启后目录初始时间及文件显式时间均保留。日志前缀/tmp/opencode/nas-created-times-。
 
 新日志字段要求统一升级全部Raft节点，不支持混合旧二进制；C ABI未变。创建时间取自leader，写入时间取自核心，不保证跨机器墙钟单调。父目录随条目增删的时间、改名ctime、读atime仍未自动维护；本轮不增加额外回执，但新建inode仍消耗原创建回执。数据WAL与后续mtime提交仍非原子事务。
+
+## 79. 命名空间时间与目录项原子更新
+
+leader为create、rename、remove及其entry/checked/path_guarded变体附加namespace_time，创建时与creation_time共用一次实时时钟取样。RPC拒绝客户端提供任一非null注记；状态机验证时间范围和适用命令。两个注记均不进入去重摘要，未带注记的命令序列化不变。独立namespace_time用于区分历史日志：仅带creation_time的旧创建仍只初始化新节点，不能在重放时新增父目录副作用。
+
+执行前统一解析命名空间操作，记录旧父目录和源inode身份；按目录项查找前先校验名称，避免非法名称进入有界LMDB键缓冲区。只有操作成功才应用时间：创建/删除更新父目录mtime/ctime，实际改名更新源ctime及新旧父目录mtime/ctime，同父目录去重。源atime/mtime/birthtime及父目录atime/birthtime保留。同父目录同名字节的无操作改名、失败操作和回执重放均无时间副作用；大小写改名按实际改名处理。LMDB将目录项、涉及inode和回执一次提交；内存模型在所有可失败的操作完成后赋值。
+
+Debug/Safe各127项通过，覆盖内存/LMDB逐请求重启全快照对照、跨目录/大小写/无操作改名、失败与显式时间后的回执重放、删除变体、非法注记，以及跨目录改名/删除的逐分配失败事务回滚。真实三节点验证伪造namespace_time拒绝及leader切换/全群重启后创建重放保留父目录时间。本地Debug/双CIFS Safe原生SMB验证创建、跨目录/大小写改名、冲突失败、删除及核心重启后父目录时间保留；完整WAL FUSE/SMB故障回归通过。日志前缀/tmp/opencode/nas-namespace-times-。
+
+IPC/C ABI未变，Raft节点需统一升级。没有新增额外回执，但命名空间原有全局回执仍受8192条上限约束；回执GC、读atime及跨节点fencing仍待完成。命名空间时间来自leader，不保证跨机器墙钟单调；数据WAL与后续写入mtime提交仍非原子事务。

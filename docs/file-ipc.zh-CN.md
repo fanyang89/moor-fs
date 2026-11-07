@@ -63,7 +63,9 @@ runtime目录必须是可信父目录下尚不存在的绝对路径。服务以0
 
 mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{inode}，以及rename_checked:{source:{inode,parent,name},parent,name}、remove_checked:{inode,parent,name}；kind为file/directory。create强制双副本，即使父目录被外部设为单副本。rename不覆盖已有目标，允许持有句柄时重命名；两种remove在本服务有任意该inode句柄时返回FileBusy。删除只改命名空间，旧数据目录仍保留，不隐式回收。
 
-普通create和path_guarded.create（包括create_open内部创建）的初始atime/mtime/ctime/birthtime由Raft leader的实时时钟同一取样初始化，与创建和回执在同一事务提交。leader在日志请求附加creation_time，普通RPC客户端不能提供非null值；IPC字段不变。此服务端注记不进入去重摘要，重试重新取时仍返回首次回执，不改变原inode或后来显式设置的时间。失败创建不修改已有条目；新建目录同样初始化四种时间，但不自动更新父目录时间。历史日志/离线未带注记的命令继续使用旧默认时间，不在重放时读时钟；需要统一升级Raft节点，不能混跑旧二进制。
+普通create和path_guarded.create（包括create_open内部创建）的初始atime/mtime/ctime/birthtime由Raft leader的实时时钟同一取样初始化，与创建和回执在同一事务提交。leader在日志请求附加creation_time和namespace_time，普通RPC客户端不能提供非null值；IPC字段不变。两种服务端注记均不进入去重摘要，重试重新取时仍返回首次回执，不改变原inode或后来显式设置的时间。
+
+namespace_time使创建/删除更新父目录mtime/ctime，实际改名更新源inode的ctime及新旧父目录mtime/ctime；同父目录只更新一次，源inode的atime/mtime/birthtime保留。大小写改名属于实际改名；同父目录同名字节的无操作改名、失败操作和回执重放均不更新时间。效果与命名空间和回执在同一事务提交，不增加额外回执。历史日志没有namespace_time时不更新父目录，包括只有creation_time的旧创建；重放不读时钟。读atime仍未自动更新。需要统一升级Raft节点，不能混跑旧二进制。
 
 时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。显式时间更新独立于数据WAL。
 

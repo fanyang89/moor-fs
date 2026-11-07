@@ -151,6 +151,7 @@ pub const Request = struct {
     command: Command,
     // Leader-assigned log annotation, excluded from the deduplication identity.
     creation_time: ?Timestamp = null,
+    namespace_time: ?Timestamp = null,
 
     pub fn createsNode(self: Request) bool {
         return switch (self.command) {
@@ -160,12 +161,16 @@ pub const Request = struct {
         };
     }
 
-    pub fn validCreationTime(self: Request) bool {
-        return if (self.creation_time) |time| self.createsNode() and validTimestamp(time) else true;
+    pub fn validTimes(self: Request) bool {
+        if (self.creation_time) |time| if (!self.createsNode() or !validTimestamp(time)) return false;
+        if (self.namespace_time) |time| if (namespaceMutation(self.command) == null or !validTimestamp(time)) return false;
+        return true;
     }
 
     pub fn jsonStringify(self: Request, writer: *std.json.Stringify) std.json.Stringify.Error!void {
-        if (self.creation_time) |time| {
+        if (self.namespace_time) |time| {
+            try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .creation_time = self.creation_time, .namespace_time = time });
+        } else if (self.creation_time) |time| {
             try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .creation_time = time });
         } else {
             try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command });
@@ -180,6 +185,49 @@ pub const Request = struct {
         return self.command == .touch_modified or self.command == .checkpoint_mutable or self.command == .attach_mutable;
     }
 };
+pub const NamespaceSource = union(enum) { inode: u64, entry: struct { parent: u64, name: []const u8 } };
+pub const TimeEffects = struct { parents: [2]u64 = .{ 0, 0 }, renamed: u64 = 0 };
+pub const NamespaceMutation = union(enum) {
+    create: u64,
+    rename: struct { source: NamespaceSource, parent: u64, name: []const u8 },
+    remove: NamespaceSource,
+
+    pub fn source(self: NamespaceMutation) ?NamespaceSource {
+        return switch (self) {
+            .create => null,
+            .rename => |op| op.source,
+            .remove => |op| op,
+        };
+    }
+
+    pub fn effects(self: NamespaceMutation, node: ?Node) TimeEffects {
+        if (self == .create) return .{ .parents = .{ self.create, 0 } };
+        const previous = node orelse return .{};
+        return switch (self) {
+            .create => unreachable,
+            .remove => .{ .parents = .{ previous.parent, 0 } },
+            .rename => |op| if (previous.parent == op.parent and std.mem.eql(u8, previous.name, op.name)) .{} else .{ .parents = .{ previous.parent, op.parent }, .renamed = previous.id },
+        };
+    }
+};
+
+pub fn namespaceMutation(command: Command) ?NamespaceMutation {
+    return switch (command) {
+        .create => |op| .{ .create = op.parent },
+        .rename => |op| .{ .rename = .{ .source = .{ .inode = op.id }, .parent = op.parent, .name = op.name } },
+        .rename_checked => |op| .{ .rename = .{ .source = .{ .inode = op.source.inode }, .parent = op.parent, .name = op.name } },
+        .rename_entry => |op| .{ .rename = .{ .source = .{ .entry = .{ .parent = op.parent, .name = op.name } }, .parent = op.new_parent, .name = op.new_name } },
+        .remove => |op| .{ .remove = .{ .inode = op.id } },
+        .remove_checked => |op| .{ .remove = .{ .inode = op.inode } },
+        .remove_entry => |op| .{ .remove = .{ .entry = .{ .parent = op.parent, .name = op.name } } },
+        .path_guarded => |op| switch (op.mutation) {
+            .create => |value| .{ .create = value.parent },
+            .rename => |value| .{ .rename = .{ .source = .{ .inode = value.source.inode }, .parent = value.parent, .name = value.name } },
+            .remove => |value| .{ .remove = .{ .inode = value.inode } },
+        },
+        else => null,
+    };
+}
 pub const Status = enum(u8) {
     ok = 0,
     not_found = 1,
@@ -259,7 +307,7 @@ pub const State = struct {
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
-        if (!request.validCreationTime()) return .{ .status = .invalid_request };
+        if (!request.validTimes()) return .{ .status = .invalid_request };
         // Internal file commands deduplicate against inode state, not receipts.
         if (request.usesInodeState()) return self.execute(request.command);
         const digest = try requestDigest(self.allocator, request);
@@ -271,9 +319,27 @@ pub const State = struct {
         }
         if (self.receipts.items.len == max_receipts) return .{ .status = .capacity_exceeded };
         try self.receipts.ensureUnusedCapacity(self.allocator, 1);
+        var effects: TimeEffects = .{};
+        if (request.namespace_time != null) {
+            const mutation = namespaceMutation(request.command).?;
+            const source = if (mutation.source()) |ref| switch (ref) {
+                .inode => |id| self.get(id),
+                .entry => |entry| if (validName(entry.name)) self.lookup(entry.parent, entry.name) else null,
+            } else null;
+            effects = mutation.effects(source);
+        }
         const result = try self.execute(request.command);
         if (result.status == .ok) if (request.creation_time) |time| {
             self.nodes.items[self.find(result.inode).?].times = initialTimes(time);
+        };
+        if (result.status == .ok) if (request.namespace_time) |time| {
+            if (effects.renamed != 0) self.nodes.items[self.find(effects.renamed).?].times.ctime = time;
+            for (effects.parents, 0..) |parent, i| {
+                if (parent == 0 or (i == 1 and parent == effects.parents[0])) continue;
+                const node = &self.nodes.items[self.find(parent).?];
+                node.times.mtime = time;
+                node.times.ctime = time;
+            }
         };
         self.receipts.appendAssumeCapacity(.{
             .request_id = request.request_id,
@@ -458,6 +524,7 @@ pub fn validName(name: []const u8) bool {
 pub fn requestDigest(allocator: std.mem.Allocator, request: Request) ![32]u8 {
     var identity = request;
     identity.creation_time = null;
+    identity.namespace_time = null;
     const encoded = try std.json.Stringify.valueAlloc(allocator, identity, .{});
     defer allocator.free(encoded);
     var digest: [32]u8 = undefined;

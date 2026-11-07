@@ -180,15 +180,16 @@ pub const Runtime = struct {
         const parsed = std.json.parseFromSlice(metadata.Request, allocator, data, .{}) catch return fail(allocator, error.InvalidRequest);
         defer parsed.deinit();
         if (parsed.value.version != 1 or !parsed.value.validId()) return fail(allocator, error.InvalidRequest);
-        if (parsed.value.creation_time != null) return fail(allocator, error.InvalidRequest);
+        if (parsed.value.creation_time != null or parsed.value.namespace_time != null) return fail(allocator, error.InvalidRequest);
         if (!self.node.isLeader()) return fail(allocator, error.NotLeader);
         var logged = parsed.value;
         var stamped: ?[]u8 = null;
         defer if (stamped) |bytes| allocator.free(bytes);
-        if (logged.createsNode()) {
+        if (metadata.namespaceMutation(logged.command) != null) {
             const nanos = std.Io.Clock.real.now(std.Io.Threaded.global_single_threaded.io()).toNanoseconds();
-            logged.creation_time = .{ .seconds = @intCast(@divFloor(nanos, std.time.ns_per_s)), .nanoseconds = @intCast(@mod(nanos, std.time.ns_per_s)) };
-            if (!logged.validCreationTime()) return fail(allocator, error.InvalidRequest);
+            logged.namespace_time = .{ .seconds = @intCast(@divFloor(nanos, std.time.ns_per_s)), .nanoseconds = @intCast(@mod(nanos, std.time.ns_per_s)) };
+            if (logged.createsNode()) logged.creation_time = logged.namespace_time;
+            if (!logged.validTimes()) return fail(allocator, error.InvalidRequest);
             stamped = try std.json.Stringify.valueAlloc(allocator, logged, .{});
             if (stamped.?.len > protocol.max_command_bytes) return fail(allocator, error.InvalidRequest);
         }

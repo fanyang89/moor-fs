@@ -258,7 +258,7 @@ pub const Store = struct {
     fn applyRequest(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, request: m.Request) !m.Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
-        if (!request.validCreationTime()) return .{ .status = .invalid_request };
+        if (!request.validTimes()) return .{ .status = .invalid_request };
         if (request.usesInodeState()) return self.execute(txn, allocator, meta, request.command);
         const digest = try m.requestDigest(allocator, request);
         const key = idKey(request.request_id);
@@ -269,11 +269,35 @@ pub const Store = struct {
             return receipt.result;
         }
         if (try txn.count(self.requests_db) >= m.max_receipts) return .{ .status = .capacity_exceeded };
+        var effects: m.TimeEffects = .{};
+        if (request.namespace_time != null) {
+            const mutation = m.namespaceMutation(request.command).?;
+            const source_id: ?u64 = if (mutation.source()) |ref| switch (ref) {
+                .inode => |id| id,
+                .entry => |entry| if (m.validName(entry.name)) try self.find(txn, entry.parent, entry.name) else null,
+            } else null;
+            const source = if (source_id) |id| try self.readNode(txn, allocator, id) else null;
+            effects = mutation.effects(source);
+        }
         const result = try self.execute(txn, allocator, meta, request.command);
         if (result.status == .ok) if (request.creation_time) |time| {
             var node = (try self.readNode(txn, allocator, result.inode)) orelse return error.CorruptStore;
             node.times = m.initialTimes(time);
             try self.putNode(txn, allocator, node);
+        };
+        if (result.status == .ok) if (request.namespace_time) |time| {
+            if (effects.renamed != 0) {
+                var node = (try self.readNode(txn, allocator, effects.renamed)) orelse return error.CorruptStore;
+                node.times.ctime = time;
+                try self.putNode(txn, allocator, node);
+            }
+            for (effects.parents, 0..) |parent, i| {
+                if (parent == 0 or (i == 1 and parent == effects.parents[0])) continue;
+                var node = (try self.readNode(txn, allocator, parent)) orelse return error.CorruptStore;
+                node.times.mtime = time;
+                node.times.ctime = time;
+                try self.putNode(txn, allocator, node);
+            }
         };
         try putJson(txn, self.requests_db, &key, allocator, m.Receipt{
             .request_id = request.request_id,
