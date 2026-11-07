@@ -124,7 +124,13 @@ atomic transaction. New files and directories get initial atime/mtime/ctime/birt
 atomically with creation. Creation/removal updates parent mtime/ctime; renaming
 updates source ctime and both parents' mtime/ctime atomically with the namespace
 change. Failed operations, exact no-op renames and receipt replays do not retime
-nodes. Reads do not update atime.
+nodes. Each verified nonempty mutable-file read commits atime before returning,
+including reads through read-only SMB handles. Empty reads and EOF do not update
+it. Reads use a separate generation/read-sequence/time watermark per inode rather
+than receipts or WAL sequence numbers. This adds a Raft round trip per core read
+(including each 64 KiB native-VFS segment); time-publication failure or uncertainty
+freezes the shared session until all handles are released and the file is reopened.
+Directory enumeration and the legacy immutable-object read path do not update atime.
 
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
@@ -136,7 +142,7 @@ entries without it retain the previous default timestamps; replay does not retim
 Namespace effects use a separate server-only `namespace_time` log annotation,
 also excluded from deduplication. Historical entries containing only
 `creation_time` retain their original effects without updating parent times.
-The internal `touch_modified`, `checkpoint_mutable` and `attach_mutable` commands
+The internal `touch_modified`, `touch_accessed`, `checkpoint_mutable` and `attach_mutable` commands
 require ID zero and deduplicate against inode-local state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.
 

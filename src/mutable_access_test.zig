@@ -374,10 +374,11 @@ test "mutable writes persist modification times without retimestamping checkpoin
     try t.expectEqualDeep(original.birthtime, written.birthtime);
     const explicit: m.Timestamp = .{ .seconds = 123, .nanoseconds = 456700 };
     _ = try f.meta.state.apply(.{ .request_id = 100, .command = .{ .set_times = .{ .inode = 2, .mtime = explicit, .ctime = explicit } } });
-    const saved = f.meta.state.get(2).?.times;
+    var saved = f.meta.state.get(2).?.times;
     try session.write("", 0);
     var buffer: [8]u8 = undefined;
     _ = try session.read(&buffer, 0);
+    saved.atime = f.meta.state.get(2).?.times.atime;
     _ = try session.size();
     try session.sync();
     try session.collect();
@@ -392,7 +393,7 @@ test "mutable writes persist modification times without retimestamping checkpoin
     const truncated = f.meta.state.get(2).?.times;
     try t.expect(truncated.mtime.seconds > explicit.seconds);
     try t.expectEqualDeep(truncated.mtime, truncated.ctime);
-    try t.expectEqualDeep(original.atime, truncated.atime);
+    try t.expectEqualDeep(saved.atime, truncated.atime);
     try t.expectEqualDeep(original.birthtime, truncated.birthtime);
     // Last release without checkpoint retains acknowledged timestamps too.
     session.close();
@@ -425,10 +426,72 @@ test "timestamp metadata rejection and lost reply freeze writes while preserving
         f.meta.conflict = false;
         session = try f.open();
         defer session.close();
-        try t.expectEqual(@as(usize, 4), try session.read(&bytes, 0));
-        try t.expectEqualStrings("kept", &bytes);
         // Recovery cannot invent the time of an interrupted operation.
         try t.expectEqualDeep(observed, f.meta.state.get(2).?.times);
+        try t.expectEqual(@as(usize, 4), try session.read(&bytes, 0));
+        try t.expectEqualStrings("kept", &bytes);
+        try t.expectEqualDeep(observed.mtime, f.meta.state.get(2).?.times.mtime);
+        try t.expectEqualDeep(observed.ctime, f.meta.state.get(2).?.times.ctime);
+    }
+}
+
+test "verified reads commit only atime without receipts and empty reads preserve it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var session = try f.open();
+    defer session.close();
+    try session.write("bytes", 0);
+    // A full global receipt table must not make reads fail.
+    while (f.meta.state.receipts.items.len < m.max_receipts) {
+        const id = f.meta.state.receipts.items.len + 100;
+        _ = try f.meta.state.apply(.{ .request_id = id, .command = .{ .remove = .{ .id = 999 } } });
+    }
+    const before = f.meta.state.get(2).?.times;
+    const started = std.Io.Clock.real.now(t.io).toNanoseconds();
+    var bytes: [8]u8 = undefined;
+    try t.expectEqual(@as(usize, 5), try session.read(&bytes, 0));
+    const head = f.meta.state.get(2).?;
+    const nanos = @as(i96, head.times.atime.seconds) * std.time.ns_per_s + head.times.atime.nanoseconds;
+    try t.expect(nanos >= started and nanos <= std.Io.Clock.real.now(t.io).toNanoseconds());
+    var expected = before;
+    expected.atime = head.times.atime;
+    try t.expectEqualDeep(expected, head.times);
+    try t.expectEqual(@as(u64, 1), head.access.?.sequence);
+    try t.expectEqual(@as(usize, 0), try session.read(bytes[0..0], 0));
+    try t.expectEqual(@as(usize, 0), try session.read(&bytes, 5));
+    try t.expectEqualDeep(head.access, f.meta.state.get(2).?.access);
+    try session.sync();
+    session.close();
+    session = try f.open();
+    try t.expectEqualDeep(expected, f.meta.state.get(2).?.times);
+    _ = try session.read(&bytes, 0);
+    try t.expectEqual(@as(u64, 2), f.meta.state.get(2).?.access.?.sequence);
+    try t.expectEqual(@as(usize, m.max_receipts), f.meta.state.receipts.items.len);
+}
+
+test "read timestamp rejection or lost reply freezes session until reopen" {
+    for ([_]bool{ false, true }) |lost_reply| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var session = try f.open();
+        try session.write("kept", 0);
+        const before = f.meta.state.get(2).?.times;
+        f.meta.conflict = !lost_reply;
+        f.meta.lose_reply = lost_reply;
+        var bytes: [4]u8 = undefined;
+        try t.expectError(if (lost_reply) error.ReplyLost else error.MetadataConflict, session.read(&bytes, 0));
+        const observed = f.meta.state.get(2).?.times;
+        if (lost_reply) try t.expect(observed.atime.seconds > before.atime.seconds) else try t.expectEqualDeep(before, observed);
+        try t.expectError(error.WalSessionFailed, session.read(&bytes, 0));
+        try t.expectError(error.WalSessionFailed, session.write("x", 0));
+        session.close();
+        f.meta.conflict = false;
+        session = try f.open();
+        defer session.close();
+        try t.expectEqualDeep(observed, f.meta.state.get(2).?.times);
+        try t.expectEqual(@as(usize, 4), try session.read(&bytes, 0));
+        try t.expectEqualStrings("kept", &bytes);
+        try t.expectEqual(@as(u64, if (lost_reply) 2 else 1), f.meta.state.get(2).?.access.?.sequence);
     }
 }
 
@@ -601,9 +664,12 @@ test "mutable reads detect either replica corruption and retain WAL evidence" {
         try session.write("original", 0);
         const sequence = session.data.checkpoint.next;
         const log_size = (try session.data.session.replicas[0].log.stat(t.io)).size;
+        const times = f.meta.state.get(2).?.times;
         try session.data.session.replicas[bad].data.writePositionalAll(t.io, "X", 3);
         var bytes: [8]u8 = undefined;
         try t.expectError(error.ReplicaContentMismatch, session.read(&bytes, 0));
+        try t.expectEqualDeep(times, f.meta.state.get(2).?.times);
+        try t.expect(f.meta.state.get(2).?.access == null);
         try t.expectError(error.WalSessionFailed, session.collect());
         try t.expectError(error.WalSessionFailed, session.write("bad", 0));
         try t.expectEqual(sequence, session.data.checkpoint.next);

@@ -44,6 +44,25 @@ pub const Times = struct { atime: Timestamp = .{}, mtime: Timestamp = .{}, ctime
 pub const TimeUpdate = struct { inode: u64, atime: ?Timestamp = null, mtime: ?Timestamp = null, ctime: ?Timestamp = null, birthtime: ?Timestamp = null };
 pub const Modification = struct { generation: u64, next_sequence: u64, time: Timestamp };
 pub const ModifiedUpdate = struct { inode: u64, modification: Modification };
+pub const AccessTime = struct { generation: u64, sequence: u64, time: Timestamp };
+pub const AccessedUpdate = struct { inode: u64, access: AccessTime };
+
+pub fn updateAccessed(node: *Node, update: AccessedUpdate) Status {
+    const value = update.access;
+    if (value.generation == 0 or value.sequence == 0 or !validTimestamp(value.time)) return .invalid_request;
+    if (node.kind != .file) return .not_file;
+    const file = node.mutable_file orelse return .storage_conflict;
+    if (file.generation != value.generation) return .storage_conflict;
+    const sequence = if (node.access) |previous| blk: {
+        if (value.sequence < previous.sequence) return .sequence_conflict;
+        if (value.sequence == previous.sequence) return if (std.meta.eql(previous, value)) .ok else .request_conflict;
+        break :blk previous.sequence;
+    } else 0;
+    if (sequence == std.math.maxInt(u64) or value.sequence != sequence + 1) return .sequence_conflict;
+    node.times.atime = value.time;
+    node.access = value;
+    return .ok;
+}
 
 pub fn updateModified(node: *Node, update: ModifiedUpdate) Status {
     const value = update.modification;
@@ -126,6 +145,7 @@ pub const Node = struct {
     times: Times = .{},
     modification: ?Modification = null,
     attachment: ?MutableAttachment = null,
+    access: ?AccessTime = null,
 };
 pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
@@ -142,6 +162,7 @@ pub const Command = union(enum) {
     path_guarded: GuardedChange,
     set_times: TimeUpdate,
     touch_modified: ModifiedUpdate,
+    touch_accessed: AccessedUpdate,
     checkpoint_mutable: MutableCheckpoint,
     attach_mutable: MutableAttachment,
 };
@@ -182,7 +203,7 @@ pub const Request = struct {
     }
 
     pub fn usesInodeState(self: Request) bool {
-        return self.command == .touch_modified or self.command == .checkpoint_mutable or self.command == .attach_mutable;
+        return self.command == .touch_modified or self.command == .touch_accessed or self.command == .checkpoint_mutable or self.command == .attach_mutable;
     }
 };
 pub const NamespaceSource = union(enum) { inode: u64, entry: struct { parent: u64, name: []const u8 } };
@@ -351,6 +372,11 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .touch_accessed => |update| {
+                const i = self.find(update.inode) orelse return .{ .status = .not_found };
+                const result = updateAccessed(&self.nodes.items[i], update);
+                return .{ .status = result, .inode = if (result == .ok) update.inode else 0 };
+            },
             .attach_mutable => |update| {
                 const i = self.find(update.inode) orelse return .{ .status = .not_found };
                 const result = attachMutable(&self.nodes.items[i], update, self.backends.items);
@@ -558,6 +584,10 @@ pub fn validateSnapshot(data: Snapshot) !void {
         if (node.modification) |modified| {
             const file = node.mutable_file orelse return error.InvalidSnapshot;
             if (modified.generation != file.generation or modified.next_sequence < 2 or !validTimestamp(modified.time)) return error.InvalidSnapshot;
+        }
+        if (node.access) |access| {
+            const file = node.mutable_file orelse return error.InvalidSnapshot;
+            if (access.generation != file.generation or access.sequence == 0 or !validTimestamp(access.time)) return error.InvalidSnapshot;
         }
         if (node.mutable_file) |file| {
             if (node.kind != .file or node.current_version != 0 or node.replicas != .two or mutableStatus(file, data.backends) != .ok) return error.InvalidSnapshot;

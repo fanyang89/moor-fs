@@ -340,6 +340,42 @@ nas_fs:timeout_ms = 500
         truncate_started = time.time_ns()
         call(timed_writer, "truncate", length=2)
         assert_modified_since(truncate_started)
+        before_read = current_times()
+        read_started = time.time_ns()
+        smb(f"get vfs-read/times.dat {directory / 'vfs-times-download'}")
+        assert (directory / "vfs-times-download").read_bytes() == b"cl"
+        accessed_node = client.call({"stat": {"inode": timed_inode}})["attributes"][
+            "node"
+        ]
+        accessed_time = accessed_node["times"]["atime"]
+        assert (
+            read_started
+            <= accessed_time["seconds"] * 1000000000 + accessed_time["nanoseconds"]
+            <= time.time_ns()
+        )
+        assert accessed_node["access"]["sequence"] == 1
+        for field in ("mtime", "ctime", "birthtime"):
+            assert accessed_node["times"][field] == before_read[field]
+        accessed_request = {
+            "request_id": 0,
+            "command": {
+                "touch_accessed": {
+                    "inode": timed_inode,
+                    "access": accessed_node["access"],
+                }
+            },
+        }
+
+        def replay_accessed():
+            result = subprocess.run(
+                [executable, "apply", endpoints, json.dumps(accessed_request)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert json.loads(result.stdout) == {"status": "ok", "inode": timed_inode}
+
         modified_node = client.call({"stat": {"inode": timed_inode}})["attributes"][
             "node"
         ]
@@ -370,6 +406,7 @@ nas_fs:timeout_ms = 500
         # A later explicit timestamp must survive the writer's close checkpoint.
         call(timed_writer, "close")
         replay_modified()
+        replay_accessed()
         expected_times = {
             field: {"seconds": calendar.timegm((year, 1, 2, 3, 4, 5)), "nanoseconds": 0}
             for field, year in (
@@ -873,6 +910,7 @@ nas_fs:timeout_ms = 500
             time.sleep(0.02)
         client = Client(runtime / "core.sock")
         replay_modified()
+        replay_accessed()
         assert (
             client.call({"stat": {"inode": created_directory["id"]}})["attributes"][
                 "node"
@@ -886,6 +924,13 @@ nas_fs:timeout_ms = 500
         assert time_lines() == saved_times
         for inode, times in namespace_saved_times.items():
             assert inode_times(inode) == times
+        smb(f"get vfs-read/times.dat {directory / 'vfs-times-restarted-download'}")
+        reopened_node = client.call({"stat": {"inode": timed_inode}})["attributes"][
+            "node"
+        ]
+        assert reopened_node["access"]["sequence"] == 2
+        for field in ("mtime", "ctime", "birthtime"):
+            assert reopened_node["times"][field] == expected_times[field]
         print(
             "PASS: native Samba VFS SMB3 reads/writes, namespace mutations, writer exclusion, checkpoints, corruption recovery and paused-core deadline without FUSE; host paths rejected",
             flush=True,

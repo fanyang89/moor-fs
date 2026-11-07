@@ -15,9 +15,10 @@ pub const Head = struct {
     replicas: m.Replicas,
     current_version: u64,
     mutable_file: ?m.MutableFile,
+    access: ?m.AccessTime = null,
 
     pub fn from(node: m.Node) Head {
-        return .{ .id = node.id, .kind = node.kind, .replicas = node.replicas, .current_version = node.current_version, .mutable_file = node.mutable_file };
+        return .{ .id = node.id, .kind = node.kind, .replicas = node.replicas, .current_version = node.current_version, .mutable_file = node.mutable_file, .access = node.access };
     }
 };
 
@@ -183,12 +184,16 @@ pub const Access = struct {
     }
 
     fn current(self: *Access) !m.MutableFile {
+        return (try self.currentHead()).mutable_file.?;
+    }
+
+    fn currentHead(self: *Access) !Head {
         const identity = self.data.session.identity;
         const head = try self.metadata.get(self.metadata.context, identity.inode);
         const file = head.mutable_file orelse return error.StorageConflict;
         if (head.id != identity.inode or head.kind != .file or head.replicas != .two or head.current_version != 0 or file.generation != identity.generation or !std.mem.eql(u64, &file.backends, &.{ self.mappings[0].id, self.mappings[1].id })) return error.StorageConflict;
         if (file.next_sequence > self.data.session.next) return error.StaleFileState;
-        return file;
+        return head;
     }
 
     fn publish(self: *Access, update: m.MutableUpdate) !void {
@@ -248,7 +253,7 @@ pub const Access = struct {
         errdefer self.failed = true;
         try self.validate();
         timing.mark(0);
-        _ = try self.current();
+        const head = try self.currentHead();
         timing.mark(1);
         _ = try self.replicaSize();
         const count = try self.readCompared(bytes, offset);
@@ -256,9 +261,33 @@ pub const Access = struct {
         try self.data.verifyRead(offset, bytes[0..count], bytes.len);
         timing.mark(3);
         try self.validate();
+        if (count != 0) try self.touchAccessed(head.access);
         timing.mark(4);
         timing.finish("read", self.data.session.identity.inode, bytes.len, self.data.session.end);
         return count;
+    }
+
+    // Reads have their own persistent sequence: WAL sequences do not advance on
+    // reads, and wall-clock samples are neither unique nor monotonic.
+    fn touchAccessed(self: *Access, previous: ?m.AccessTime) !void {
+        const sequence = try std.math.add(u64, if (previous) |value| value.sequence else 0, 1);
+        const nanos = Io.Clock.real.now(self.io).toNanoseconds();
+        const time: m.Timestamp = .{
+            .seconds = @intCast(@divFloor(nanos, std.time.ns_per_s)),
+            .nanoseconds = @intCast(@mod(nanos, std.time.ns_per_s)),
+        };
+        if (!m.validTimestamp(time)) return error.InvalidTimestamp;
+        const inode = self.data.session.identity.inode;
+        const result = try self.metadata.apply(self.metadata.context, .{
+            .request_id = 0,
+            .command = .{ .touch_accessed = .{ .inode = inode, .access = .{
+                .generation = self.data.session.identity.generation,
+                .sequence = sequence,
+                .time = time,
+            } } },
+        });
+        if (result.status != .ok) return error.MetadataConflict;
+        if (result.inode != inode) return error.InvalidResponse;
     }
 
     // Bounded scratch space even when the caller supplies a large read buffer.

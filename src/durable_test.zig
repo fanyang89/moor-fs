@@ -836,6 +836,107 @@ fn modifiedRequest(sequence: u64, seconds: i64) m.Request {
     } } } };
 }
 
+fn accessedRequest(sequence: u64, seconds: i64) m.Request {
+    return .{ .request_id = 0, .command = .{ .touch_accessed = .{ .inode = 2, .access = .{
+        .generation = 7,
+        .sequence = sequence,
+        .time = .{ .seconds = seconds },
+    } } } };
+}
+
+test "read timestamp sequence persists without receipts and preserves explicit times on replay" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var wrong_generation = accessedRequest(3, 10);
+    wrong_generation.command.touch_accessed.access.generation = 8;
+    var wrong_id = accessedRequest(3, 10);
+    wrong_id.request_id = 6;
+    var invalid_time = accessedRequest(3, 10);
+    invalid_time.command.touch_accessed.access.time.nanoseconds = 1000000000;
+    var directory = accessedRequest(1, 10);
+    directory.command.touch_accessed.inode = 1;
+    var missing = directory;
+    missing.command.touch_accessed.inode = 999;
+    const commands = timestamp_setup ++ [_]m.Request{
+        accessedRequest(1, 10),
+        .{ .request_id = 5, .command = .{ .set_times = .{ .inode = 2, .atime = .{ .seconds = 99 } } } },
+        accessedRequest(1, 10),
+        accessedRequest(1, 11),
+        accessedRequest(3, 10),
+        accessedRequest(2, 10),
+        accessedRequest(1, 10),
+        wrong_generation,
+        wrong_id,
+        invalid_time,
+        directory,
+        missing,
+        accessedRequest(0, 10),
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .ok, .ok, .ok, .ok, .request_conflict, .sequence_conflict, .ok, .sequence_conflict, .storage_conflict, .invalid_request, .invalid_request, .not_file, .not_found, .invalid_request };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        if (index >= 6 and index <= 9) try t.expectEqual(@as(i64, 99), memory.get(2).?.times.atime.seconds);
+    }
+    try t.expectEqual(@as(usize, 5), memory.receipts.items.len);
+    const node = &memory.nodes.items[1];
+    try t.expectEqualDeep(m.Timestamp{}, node.times.mtime);
+    try t.expectEqualDeep(m.Timestamp{}, node.times.ctime);
+    try t.expectEqualDeep(m.Timestamp{}, node.times.birthtime);
+    // Equal clock samples still represent distinct reads. No receipt growth.
+    for (3..m.max_receipts + 4) |sequence| {
+        try t.expectEqual(m.Status.ok, (try memory.apply(accessedRequest(sequence, 10))).status);
+    }
+    try t.expectEqual(@as(usize, 5), memory.receipts.items.len);
+    const saved = node.access.?;
+    for ([_]m.AccessTime{
+        .{ .generation = 8, .sequence = 1, .time = .{} },
+        .{ .generation = 7, .sequence = 0, .time = .{} },
+        .{ .generation = 7, .sequence = 1, .time = .{ .nanoseconds = 1000000000 } },
+    }) |invalid| {
+        node.access = invalid;
+        try t.expectError(error.InvalidSnapshot, m.validateSnapshot(memory.snapshot()));
+    }
+    node.access = saved;
+    try m.validateSnapshot(memory.snapshot());
+    node.access.?.sequence = std.math.maxInt(u64);
+    try t.expectEqual(m.Status.sequence_conflict, (try memory.apply(accessedRequest(1, 10))).status);
+}
+
+test "read timestamp allocation failures roll back atime and replay state" {
+    try t.checkAllAllocationFailures(deterministic_allocator, accessedAllocationScenario, .{});
+}
+
+fn accessedAllocationScenario(allocator: std.mem.Allocator) !void {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    for (timestamp_setup, 1..) |command, index| _ = try apply(&store, index, command);
+    const before = try store.snapshot(t.allocator, 4, 1);
+    defer t.allocator.free(before);
+    store.allocator = allocator;
+    const result = apply(&store, 5, accessedRequest(1, 10)) catch |err| {
+        store.allocator = t.allocator;
+        const after = try store.snapshot(t.allocator, 4, 1);
+        defer t.allocator.free(after);
+        try t.expectEqualStrings(before, after);
+        return err;
+    };
+    store.allocator = t.allocator;
+    try t.expectEqual(m.Status.ok, result.status);
+}
+
 test "inode attachment retries preserve later checkpoints and times across restart" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

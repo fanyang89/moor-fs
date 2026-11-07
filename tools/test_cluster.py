@@ -343,12 +343,27 @@ def main():
                 },
             }
             assert apply(first, automatic_time) == mutable_result
+            automatic_access = {
+                "request_id": 0,
+                "command": {
+                    "touch_accessed": {
+                        "inode": mutable_inode,
+                        "access": {
+                            "generation": 7,
+                            "sequence": 1,
+                            "time": {"seconds": 124, "nanoseconds": 0},
+                        },
+                    }
+                },
+            }
+            assert apply(first, automatic_access) == mutable_result
             explicit_time = {
                 "request_id": 207,
                 "command": {
                     "set_times": {
                         "inode": mutable_inode,
                         "mtime": {"seconds": 456, "nanoseconds": 0},
+                        "atime": {"seconds": 789, "nanoseconds": 0},
                     }
                 },
             }
@@ -386,6 +401,10 @@ def main():
             assert run("get", endpoints, "2")["times"] == original_times
             assert run("get", endpoints, "1")["times"] == root_times_before_retry
             assert apply(elected, automatic_time) == mutable_result
+            assert apply(elected, automatic_access) == mutable_result
+            assert (
+                run("get", endpoints, mutable_inode)["times"]["atime"]["seconds"] == 789
+            )
             assert (
                 run("get", endpoints, mutable_inode)["times"]["mtime"]["seconds"] == 456
             )
@@ -544,6 +563,16 @@ def main():
                 == automatic_time["command"]["touch_modified"]["modification"]
             )
             assert restored_time["times"]["mtime"]["seconds"] == 456
+            assert (
+                run("apply", endpoints, json.dumps(automatic_access)) == mutable_result
+            )
+            assert (
+                run("get", endpoints, mutable_inode)["times"]["atime"]["seconds"] == 789
+            )
+            assert (
+                restored_time["access"]
+                == automatic_access["command"]["touch_accessed"]["access"]
+            )
             assert run("get", endpoints, "2")["times"] == original_times
             assert run("get", endpoints, "1")["times"] == root_final_times
             print(

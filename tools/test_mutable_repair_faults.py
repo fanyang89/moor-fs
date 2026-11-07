@@ -111,7 +111,21 @@ def test_mutable_repair_faults(
             assert all(file.read_bytes() == content for file in data)
             assert [file.stat().st_ino for file in data] == identities
             assert run("get", endpoints, inode) == metadata
+            read_started = time.time_ns()
             assert path.read_bytes() == content
+            accessed = run("get", endpoints, inode)
+            atime = accessed["times"]["atime"]
+            assert (
+                read_started
+                <= atime["seconds"] * 1000000000 + atime["nanoseconds"]
+                <= time.time_ns()
+            )
+            assert accessed["access"]["sequence"] > (
+                metadata["access"]["sequence"] if metadata["access"] else 0
+            )
+            metadata["times"]["atime"] = atime
+            metadata["access"] = accessed["access"]
+            assert accessed == metadata
             print(
                 f"PASS: mutable repair NAS {bad + 1} SIGKILL at {point}, source/evidence preserved, ownership and in-place retry",
                 flush=True,

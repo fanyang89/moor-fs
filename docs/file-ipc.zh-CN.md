@@ -65,11 +65,15 @@ mutation支持create:{parent,name,kind}、rename:{inode,parent,name}、remove:{i
 
 普通create和path_guarded.create（包括create_open内部创建）的初始atime/mtime/ctime/birthtime由Raft leader的实时时钟同一取样初始化，与创建和回执在同一事务提交。leader在日志请求附加creation_time和namespace_time，普通RPC客户端不能提供非null值；IPC字段不变。两种服务端注记均不进入去重摘要，重试重新取时仍返回首次回执，不改变原inode或后来显式设置的时间。
 
-namespace_time使创建/删除更新父目录mtime/ctime，实际改名更新源inode的ctime及新旧父目录mtime/ctime；同父目录只更新一次，源inode的atime/mtime/birthtime保留。大小写改名属于实际改名；同父目录同名字节的无操作改名、失败操作和回执重放均不更新时间。效果与命名空间和回执在同一事务提交，不增加额外回执。历史日志没有namespace_time时不更新父目录，包括只有creation_time的旧创建；重放不读时钟。读atime仍未自动更新。需要统一升级Raft节点，不能混跑旧二进制。
+namespace_time使创建/删除更新父目录mtime/ctime，实际改名更新源inode的ctime及新旧父目录mtime/ctime；同父目录只更新一次，源inode的atime/mtime/birthtime保留。大小写改名属于实际改名；同父目录同名字节的无操作改名、失败操作和回执重放均不更新时间。效果与命名空间和回执在同一事务提交，不增加额外回执。历史日志没有namespace_time时不更新父目录，包括只有creation_time的旧创建；重放不读时钟。需要统一升级Raft节点，不能混跑旧二进制。
 
 时间修改为 `set_times:{inode,atime?,mtime?,ctime?,birthtime?}`，每个非null字段为 `{seconds:i64,nanoseconds:u32}`；省略/null保持原值，至少提供一项。支持文件和目录，按inode提交Raft并保存回执；所有字段验证成功后才修改。秒范围[-11644473600,253402300799]，纳秒范围[0,999999999]。node.times返回四种时间，旧记录缺省为1704067200秒/0纳秒。显式时间更新独立于数据WAL。
 
-核心Access在每次非空write和每次truncate完成双副本数据更新及验证后，以接入机实时时钟同一取样提交mtime/ctime，Raft确认后才返回成功。atime/birthtime保持原值，零字节write不更新；同长度truncate仍更新时间。时间提交失败或结果不确定会冻结共享会话，需释放全部句柄后重开。失败操作的数据可能已持久化，重开恢复不补造时间；WAL和时间没有跨存储原子性。sync/close、迁移、恢复、读和stat不自动改时间，因此不会覆盖后续显式设置值。创建及命名空间自动时间尚未接入。
+核心Access在每次非空write和每次truncate完成双副本数据更新及验证后，以接入机实时时钟同一取样提交mtime/ctime，Raft确认后才返回成功。atime/birthtime保持原值，零字节write不更新；同长度truncate仍更新时间。时间提交失败或结果不确定会冻结共享会话，需释放全部句柄后重开。失败操作的数据可能已持久化，重开恢复不补造时间；WAL和时间没有跨存储原子性。sync/close、迁移、恢复和stat不自动改时间，因此不会覆盖后续显式设置值。
+
+read通过双副本比较、WAL覆盖校验和挂载验证且实际返回非零字节后，核心取时并通过Raft持久化atime，再返回数据；mtime/ctime/birthtime保持不变。零长度请求、EOF和失败读取不改时间。只读句柄同样更新atime，每个核心read增加一次Raft提交；时间提交失败/结果不确定会让本次read失败并冻结共享会话，回复丢失时atime可能已经提交。重开恢复不补造读取时间，下一次真实读取继续持久化序号。
+
+内部touch_accessed要求request_id=0及`{inode,access:{generation,sequence,time}}`，不开放为IPC change。每个inode只保存一个access记录，旧记录缺省null；序号从1开始，必须逐次加一，独立于WAL写序号及墙钟。最新同序号同内容重试是无操作成功，不覆盖后续显式atime；同序号异内容冲突、旧序号/跳号拒绝，u64耗尽时读取失败。记录和atime在同一LMDB事务提交，无全局回执消耗。目录浏览及旧immutable对象读取路径不更新atime，scrub/repair/seal也不作为客户读取。核心和Raft节点需统一升级，IPC/C ABI未变。
 
 每个上述核心操作仍新增一次Raft提交，包括VFS拆分的每个64KiB写段；自动时间不再消耗receipt，而是在node.modification保存一条generation/next_sequence/time记录。此字段缺省为null，属于内部去重状态，不是客户端应写的时间属性。核心checkpoint按当前序号/大小去重，首次attach也已改为每inode一条绑定记录，均不消耗receipt。显式set_times、命名空间及旧mutable_file命令仍受8192个集群共享回执且无GC的限制。
 

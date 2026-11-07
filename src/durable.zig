@@ -332,6 +332,13 @@ pub const Store = struct {
                 try self.putNode(txn, allocator, node);
                 return .{ .status = .ok, .inode = update.inode };
             },
+            .touch_accessed => |update| {
+                var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
+                const result = m.updateAccessed(&node, update);
+                if (result != .ok) return .{ .status = result };
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = update.inode };
+            },
             .touch_modified => |update| {
                 var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
                 const result = m.updateModified(&node, update);

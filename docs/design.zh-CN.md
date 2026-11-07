@@ -1146,3 +1146,15 @@ leader为create、rename、remove及其entry/checked/path_guarded变体附加nam
 Debug/Safe各127项通过，覆盖内存/LMDB逐请求重启全快照对照、跨目录/大小写/无操作改名、失败与显式时间后的回执重放、删除变体、非法注记，以及跨目录改名/删除的逐分配失败事务回滚。真实三节点验证伪造namespace_time拒绝及leader切换/全群重启后创建重放保留父目录时间。本地Debug/双CIFS Safe原生SMB验证创建、跨目录/大小写改名、冲突失败、删除及核心重启后父目录时间保留；完整WAL FUSE/SMB故障回归通过。日志前缀/tmp/opencode/nas-namespace-times-。
 
 IPC/C ABI未变，Raft节点需统一升级。没有新增额外回执，但命名空间原有全局回执仍受8192条上限约束；回执GC、读atime及跨节点fencing仍待完成。命名空间时间来自leader，不保证跨机器墙钟单调；数据WAL与后续写入mtime提交仍非原子事务。
+
+## 80. 成功读取的持久化atime与有界去重
+
+核心Access.read在双副本比较、WAL覆盖校验及挂载验证全部成功后，实际读取非零字节才取接入机实时时钟并提交atime；Raft确认后才返回数据。只读SMB共享/句柄和WAL FUSE路径同样生效，mtime/ctime/birthtime保留。零长度请求、EOF、失败读取、stat、目录浏览、scrub/repair/seal不自动更新atime；旧immutable对象读入口仍维持原行为。采用严格逐次更新，不引入relatime/noatime或批处理，每次核心读取（原生VFS每64KiB分段）增加一次Raft提交，复用读前的ReadIndex元数据查询取得读取序号。
+
+新增内部命令touch_accessed，要求request_id=0，参数为inode及access:{generation,sequence,time}。每个inode仅保留一个access记录，历史记录缺省null；序号从1逐次递增，与WAL写序号独立，不依赖墙钟单调或取样唯一性。最新同序号同内容重放直接返回成功，不重新赋值，因而保留后续显式atime；同序号异内容为request_conflict，旧序号和跳号为sequence_conflict。代际必须匹配当前mutable文件；目录、缺失inode及非法时间拒绝。u64耗尽时读取失败，不回绕。atime与access记录同一LMDB事务提交，无全局回执增长，快照验证代际、序号及时间有效性。
+
+时间提交失败或结果不确定使本次read失败并冻结共享会话；数据已读入调用方缓冲区但不返回成功，回复丢失时atime可能已提交。释放全部句柄后重开恢复，不补造失败读取时间，下一次真实读取从持久序号继续。跨节点并发更新导致序号冲突时保守失败，仍不提供跨节点fencing；墙钟回退允许atime回退。IPC/C ABI未变，新增Raft命令和快照字段要求核心与全部Raft节点统一升级。
+
+Debug/Safe各131项通过：逐请求LMDB重启及内存全快照对照、显式时间后精确重放、相同时间采样的连续读取、超过8192次更新无回执增长、错误ID/代际/序号/时间、快照校验、事务逐分配失败回滚；真实Access覆盖全局回执表满读取、零长度/EOF、损坏读无时间副作用、时间提交拒绝/回复丢失的冻结及重开恢复。真实集群覆盖leader切换、快照及全群重启后access记录和显式atime保留。本地Debug/双CIFS Safe原生SMB覆盖下载仅更新atime及核心重启后序号继续。
+
+完整WAL FUSE/SMB故障套件重跑通过。初跑发现修复故障测试每轮末尾的FUSE客户读取已合法改变atime，而下一轮仍使用读取前的全元数据基线；测试现在严格验证该读取仅改变atime/access，再更新基线，修复自身仍须保持全部元数据。日志前缀/tmp/opencode/nas-access-times-。全局回执GC、持久ACL/完整SMB锁协调、跨节点fencing及物理NAS/Windows/macOS验收仍待完成。
