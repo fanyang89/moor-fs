@@ -5,6 +5,13 @@ The design is documented in Chinese in `docs/design.zh-CN.md`.
 Deployment and recovery commands are in `docs/operations.zh-CN.md`.
 Native relocatable runtime bundles are described in `docs/package.zh-CN.md`.
 
+## MVP feature freeze
+
+The MVP feature set is frozen at `13da45c`. Work now focuses on acceptance,
+defect fixes and deployment documentation; new features require explicit approval
+to unfreeze. This baseline is a trial candidate, not a production-readiness claim.
+See `docs/mvp-acceptance.zh-CN.md` for the acceptance scope and remaining gates.
+
 ## Build and run
 
 Use Zig 0.17.0 on Linux. The native dependencies require a C/C++ toolchain, CMake,
