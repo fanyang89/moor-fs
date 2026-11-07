@@ -24,7 +24,8 @@ const Request = struct {
         stat: struct { inode: u64 },
         lookup: ns.Lookup,
         list: ns.List,
-        change: struct { request_id: u64, mutation: ns.Change },
+        change: struct { request_id: u64, receipt_epoch: u64 = 0, mutation: ns.Change },
+        receipt_state: struct {},
     },
 };
 const Result = struct {
@@ -35,6 +36,7 @@ const Result = struct {
     attributes: ?ns.Attributes = null,
     page: ?ns.Page = null,
     change: ?m.Result = null,
+    receipts: ?m.ReceiptState = null,
 };
 
 fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allocator) !Result {
@@ -78,7 +80,8 @@ fn dispatch(service: *Service, owner: u64, request: Request, arena: std.mem.Allo
         .stat => |op| return .{ .attributes = try service.stat(owner, arena, op.inode) },
         .lookup => |op| return .{ .attributes = try service.lookup(owner, arena, op) },
         .list => |op| return .{ .page = try service.list(owner, arena, op) },
-        .change => |op| return .{ .change = try service.change(owner, op.request_id, op.mutation) },
+        .change => |op| return .{ .change = try service.changeEpoch(owner, op.request_id, op.receipt_epoch, op.mutation) },
+        .receipt_state => return .{ .receipts = try service.receiptState(owner, arena) },
     }
     return .{};
 }

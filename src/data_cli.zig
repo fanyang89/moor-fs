@@ -3,7 +3,7 @@ const nas = @import("nas_fs");
 const zli = @import("zli");
 const m = nas.metadata;
 const objects = nas.objects;
-const Upload = struct { request_id: u64, inode: u64, version_id: u64, expected_version: u64, backends: [2]u64 };
+const Upload = struct { request_id: u64, receipt_epoch: u64 = 0, inode: u64, version_id: u64, expected_version: u64, backends: [2]u64 };
 
 fn query(ctx: zli.CommandContext, comptime T: type, method: []const u8, value: anytype) !std.json.Parsed(T) {
     const request = try std.json.Stringify.valueAlloc(ctx.allocator, value, .{});
@@ -36,7 +36,7 @@ pub fn put(ctx: zli.CommandContext) !void {
     defer source.close(ctx.io);
     const digest = try objects.hash(ctx.io, source);
     const version: m.Version = .{ .id = upload.version_id, .inode = upload.inode, .size = digest.size, .sha256 = digest.sha256, .backends = upload.backends };
-    const request: m.Request = .{ .request_id = upload.request_id, .command = .{ .publish = .{ .expected_version = upload.expected_version, .version = version } } };
+    const request: m.Request = .{ .request_id = upload.request_id, .receipt_epoch = upload.receipt_epoch, .command = .{ .publish = .{ .expected_version = upload.expected_version, .version = version } } };
     const old = try query(ctx, ?m.Version, "Version", .{ .id = version.id });
     defer old.deinit();
     if (old.value) |existing| {

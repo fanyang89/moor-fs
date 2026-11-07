@@ -134,6 +134,7 @@ pub const Runtime = struct {
         try self.server.registerUnary("/nas.fs.Metadata/Backend", grpc.UnaryHandler.bind(Runtime, self, backend));
         try self.server.registerUnary("/nas.fs.Metadata/Version", grpc.UnaryHandler.bind(Runtime, self, version));
         try self.server.registerUnary("/nas.fs.Metadata/Status", grpc.UnaryHandler.bind(Runtime, self, status));
+        try self.server.registerUnary("/nas.fs.Metadata/Receipts", grpc.UnaryHandler.bind(Runtime, self, receipts));
         self.driver = try std.Thread.spawn(.{}, drive, .{self});
         errdefer {
             self.node.stop();
@@ -221,6 +222,12 @@ pub const Runtime = struct {
         _ = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
         if (self.failed.load(.acquire)) return fail(allocator, error.ShuttingDown);
         return reply(allocator, self.node.getStatus());
+    }
+
+    fn receipts(self: *Runtime, allocator: std.mem.Allocator, _: *grpc.ServerContext, request: []const u8) !grpc.UnaryResponse {
+        _ = wire.decode(request) catch return fail(allocator, error.InvalidRequest);
+        self.readBarrier() catch |err| return fail(allocator, err);
+        return reply(allocator, self.store.receiptState() catch |err| return fail(allocator, err));
     }
 
     fn readBarrier(self: *Runtime) !void {

@@ -19,6 +19,7 @@ const Metadata = struct {
         const self: *Metadata = @ptrCast(@alignCast(ctx));
         const check = switch (query) {
             .check_path => |value| value,
+            .receipts => return .{ .receipts = .{ .epoch = self.state.receipt_epoch, .count = self.state.receipts.items.len } },
             else => return error.UnexpectedQuery,
         };
         if (!m.validPathGuards(.{ .ancestors = check.ancestors, .mutation = .{ .remove = check.source } })) return .{ .checked = .invalid_request };
@@ -433,6 +434,40 @@ test "timestamp metadata rejection and lost reply freeze writes while preserving
         try t.expectEqualDeep(observed.mtime, f.meta.state.get(2).?.times.mtime);
         try t.expectEqualDeep(observed.ctime, f.meta.state.get(2).?.times.ctime);
     }
+}
+
+test "receipt retirement fences namespace requests without breaking live mutable handles" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var service: @import("file_service.zig").Service = .{
+        .allocator = t.allocator,
+        .io = t.io,
+        .metadata = f.meta.api(),
+        .namespace = .{ .context = &f.meta, .query = Metadata.namespaceQuery },
+        .mappings = &f.mappings,
+        .migration_pair = .{ 1, 2 },
+    };
+    defer service.deinit();
+    const owner = try service.connect();
+    const handle = try service.open(owner, 2, true);
+    try service.write(owner, handle.handle, "before", 0);
+    _ = try f.meta.state.apply(.{ .request_id = 0, .command = .{ .rotate_receipts = .{ .expected_epoch = 0 } } });
+    try t.expectEqual(@as(u64, 1), (try service.receiptState(owner, t.allocator)).epoch);
+    const mutation: ns.Change = .{ .create = .{ .parent = 1, .name = "new", .kind = .directory } };
+    try t.expectEqual(m.Status.receipt_epoch_conflict, (try service.change(owner, 20, mutation)).status);
+    try t.expectEqual(m.Status.ok, (try service.changeEpoch(owner, 20, 1, mutation)).status);
+    var create: ns.CreateOpen = .{ .request_id = 21, .parent = 1, .name = "new-file", .ancestors = &.{}, .writable = true };
+    try t.expectEqual(m.Status.receipt_epoch_conflict, (try service.createOpen(owner, t.allocator, create)).change.status);
+    create.receipt_epoch = 1;
+    const opened = try service.createOpen(owner, t.allocator, create);
+    try t.expectEqual(m.Status.ok, opened.change.status);
+    try service.close(owner, opened.opened.?.handle);
+    try service.write(owner, handle.handle, "after!", 0);
+    var bytes: [6]u8 = undefined;
+    try t.expectEqual(@as(usize, 6), try service.read(owner, handle.handle, &bytes, 0));
+    try t.expectEqualStrings("after!", &bytes);
+    try service.close(owner, handle.handle);
+    try t.expectEqual(@as(usize, 2), f.meta.state.receipts.items.len);
 }
 
 test "verified reads commit only atime without receipts and empty reads preserve it" {

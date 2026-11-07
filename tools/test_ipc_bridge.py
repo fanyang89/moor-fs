@@ -85,8 +85,24 @@ def main():
                 for reply in replies:
                     size = struct.unpack("<I", exact(connection, 4))[0]
                     request = json.loads(exact(connection, size))
+                    if request["operation"] == {"receipt_state": {}}:
+                        response = {
+                            "version": 1,
+                            "request": request["request"],
+                            "err": None,
+                            "result": {
+                                "receipts": {"epoch": 0, "count": 0, "capacity": 8192}
+                            },
+                        }
+                        encoded = json.dumps(response).encode()
+                        connection.sendall(struct.pack("<I", len(encoded)) + encoded)
+                        size = struct.unpack("<I", exact(connection, 4))[0]
+                        request = json.loads(exact(connection, size))
                     if isinstance(reply, tuple):
                         expected, reply = reply
+                        for name in ("change", "create_open"):
+                            if name in expected:
+                                expected[name].setdefault("receipt_epoch", 0)
                         assert request["operation"] == expected, request
                     if isinstance(reply, bytes):
                         connection.sendall(reply)

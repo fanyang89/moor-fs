@@ -135,6 +135,14 @@ Debug/Safe各125项、本地/双CIFS原生SMB及完整WAL故障套件通过。�
 
 leader使用独立namespace_time日志注记，创建时与creation_time共用一次取样；两者均不进入去重摘要，RPC拒绝客户端指定非null值。旧日志仅有creation_time时仍只初始化新节点，不补更新父目录。Debug/Safe各127项、本地/双CIFS原生SMB及完整WAL故障回归通过，覆盖跨目录/大小写改名、冲突失败、删除、重放保留显式时间、事务分配失败回滚及重启持久化。日志前缀：/tmp/opencode/nas-namespace-times-。
 
+### 回执代际回收
+
+命名空间和显式时间请求增加receipt_epoch；桥接首次提交这类修改前查询核心receipt_state并固定代际，普通重试不刷新。管理员通过`nas-fs receipts ENDPOINTS`检查容量，再显式执行`nas-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`。Raft将代际加一与清空回执原子提交，旧连接后续命名空间修改返回ESTALE；新连接取得新代际。仍允许已有数据句柄读写/同步，因为这些内部操作采用inode内去重。
+
+回收后旧请求被拒绝，而不是重新执行；即使旧文件已删除、发生leader切换或全群重启，也不会重建旧名称。最新回收重试不会删除新回执。每代际仍最多8192条，不自动回收，没有客户排空协议；需要协调客户与管理员操作。不能为结果未知的旧请求更换代际后重发，旧请求可能已提交。C ABI未变，核心、桥接及全部Raft节点需要统一升级；首次修改多一个独立限时查询。FUSE挂载固定代际，回收后需重新挂载才能继续命名空间修改。
+
+Debug/Safe各134项、原生桥接受控socket测试、真实三节点及原生IPC回收测试、本地/双CIFS原生SMB和完整WAL故障套件通过。覆盖满表回收、原子回滚、快照代际不倒退、旧原生连接ESTALE/新连接成功、显式IPC代际及活跃数据句柄不受影响。日志前缀/tmp/opencode/nas-receipt-epoch-。
+
 ### 读取的自动时间
 
 每次核心read通过双副本、WAL及挂载校验且返回非零字节后，提交atime再返回数据；只读SMB共享和只读句柄同样生效。零字节、EOF、失败读取不更新时间，mtime/ctime/birthtime保留。采用严格逐次更新，每个64KiB分段增加一次Raft提交；没有relatime/noatime或批处理策略。时间提交失败或回复不确定使read失败并冻结共享会话，释放全部句柄后重开；atime可能已提交，恢复不补造时间。

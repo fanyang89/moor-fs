@@ -97,6 +97,16 @@ pub const Service = struct {
     }
 
     pub fn change(self: *Service, owner: u64, request_id: u64, mutation: ns.Change) !m.Result {
+        return self.changeEpoch(owner, request_id, 0, mutation);
+    }
+
+    pub fn receiptState(self: *Service, owner: u64, arena: std.mem.Allocator) !m.ReceiptState {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        return (try self.namespaceQuery(owner, arena, .receipts)).receipts;
+    }
+
+    pub fn changeEpoch(self: *Service, owner: u64, request_id: u64, receipt_epoch: u64, mutation: ns.Change) !m.Result {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (!self.connections.contains(owner)) return error.InvalidConnection;
@@ -123,7 +133,7 @@ pub const Service = struct {
                 break :blk .{ .remove = .{ .id = op.inode } };
             },
         };
-        return self.metadata.apply(self.metadata.context, .{ .request_id = request_id, .command = command });
+        return self.metadata.apply(self.metadata.context, .{ .request_id = request_id, .receipt_epoch = receipt_epoch, .command = command });
     }
 
     pub fn open(self: *Service, owner: u64, inode: u64, writable: bool) !Opened {
@@ -147,7 +157,7 @@ pub const Service = struct {
         if (self.handles.count() >= self.max_handles) return error.HandleLimit;
         if (self.next_id == std.math.maxInt(u64)) return error.IdExhausted;
         try self.handles.ensureUnusedCapacity(self.allocator, 1);
-        const result = try self.metadata.apply(self.metadata.context, .{ .request_id = op.request_id, .command = .{ .path_guarded = .{ .ancestors = op.ancestors, .mutation = .{ .create = .{ .parent = op.parent, .name = op.name, .kind = .file } } } } });
+        const result = try self.metadata.apply(self.metadata.context, .{ .request_id = op.request_id, .receipt_epoch = op.receipt_epoch, .command = .{ .path_guarded = .{ .ancestors = op.ancestors, .mutation = .{ .create = .{ .parent = op.parent, .name = op.name, .kind = .file } } } } });
         if (result.status != .ok) return .{ .change = result };
         const opened = try self.openGuardedLocked(owner, arena, .{ .path = .{ .ancestors = op.ancestors, .source = .{ .inode = result.inode, .parent = op.parent, .name = op.name } }, .writable = op.writable });
         return .{ .change = result, .opened = opened };

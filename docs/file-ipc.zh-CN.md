@@ -75,7 +75,17 @@ read通过双副本比较、WAL覆盖校验和挂载验证且实际返回非零�
 
 内部touch_accessed要求request_id=0及`{inode,access:{generation,sequence,time}}`，不开放为IPC change。每个inode只保存一个access记录，旧记录缺省null；序号从1开始，必须逐次加一，独立于WAL写序号及墙钟。最新同序号同内容重试是无操作成功，不覆盖后续显式atime；同序号异内容冲突、旧序号/跳号拒绝，u64耗尽时读取失败。记录和atime在同一LMDB事务提交，无全局回执消耗。目录浏览及旧immutable对象读取路径不更新atime，scrub/repair/seal也不作为客户读取。核心和Raft节点需统一升级，IPC/C ABI未变。
 
-每个上述核心操作仍新增一次Raft提交，包括VFS拆分的每个64KiB写段；自动时间不再消耗receipt，而是在node.modification保存一条generation/next_sequence/time记录。此字段缺省为null，属于内部去重状态，不是客户端应写的时间属性。核心checkpoint按当前序号/大小去重，首次attach也已改为每inode一条绑定记录，均不消耗receipt。显式set_times、命名空间及旧mutable_file命令仍受8192个集群共享回执且无GC的限制。
+每个上述核心操作仍新增一次Raft提交，包括VFS拆分的每个64KiB写段；自动时间不再消耗receipt，而是在node.modification保存一条generation/next_sequence/time记录。此字段缺省为null，属于内部去重状态，不是客户端应写的时间属性。核心checkpoint按当前序号/大小去重，首次attach也已改为每inode一条绑定记录，均不消耗receipt。显式set_times、命名空间及旧mutable_file命令仍受每代际8192个集群共享回执限制，可显式回收整个代际，不能自动淘汰单条回执。
+
+### 回执代际与显式回收
+
+IPC新增`receipt_state:{}`，返回result.receipts={epoch,count,capacity}，经ReadIndex与单次LMDB读事务获取。change和create_open新增可选receipt_epoch，缺省0；与request_id一起固定请求身份，所有重试必须携带原代际。核心原样转交Raft，不刷新代际。代际不匹配返回result.change.receipt_epoch_conflict（21），不会执行命名空间修改或新增回执；C桥接映射ESTALE。
+
+管理员可用`nas-fs receipts ENDPOINTS`查询，再用`nas-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`回收。内部Raft命令为request_id=0、receipt_epoch=0、rotate_receipts:{expected_epoch}；匹配当前代际才在同一事务清空回执并加一，满表也可执行。最新回收精确重试无操作成功，不清除后来新回执；更老/未来代际拒绝，u64最大值不回绕。快照、重启保留代际，恢复不得倒退代际。历史请求/快照/LMDB缺省为0，epoch=0请求保持原序列化摘要。
+
+回收是明确结束旧代际的结果保留期，不表示其中的请求未执行；旧请求可能已经成功但丢失响应。不能把未知结果的旧请求改写成新代际后盲目重试。需要协调客户停止新的命名空间修改、处理未知结果并更换连接；本轮没有自动轮换、客户端排空或续期协议。数据读写/截断、attach、checkpoint及自动时间采用inode内去重，必须使用request_id/receipt_epoch=0，回收不影响这些操作或已有数据句柄。
+
+原生桥接首次命名空间修改前查询一次代际并固定在连接内；首次调用额外增加一个有独立截止时间的查询，后续错误不刷新。已固定旧代际的连接返回ESTALE，新连接可取得新代际。FUSE在mount时固定代际，回收后需要重新挂载才能提交新命名空间操作。raw apply和put-file JSON也支持显式receipt_epoch。C ABI未变，但核心、桥接及全部Raft节点须统一升级；不能将新桥接连接到不支持receipt_state的旧核心。
 
 内部Raft命令touch_modified使用request_id=0及 `{inode,modification:{generation,next_sequence,time}}`，不开放为IPC change操作；IPC修改仍要求非零去重ID。文件代际必须匹配，合法的新序号须同时大于已有自动时间序号和已发布checkpoint序号。最近同序号同内容重试返回ok但不重新改时间；同序号不同内容返回request_conflict，旧序号返回sequence_conflict。显式时间不清除此记录，后续旧自动请求不能覆盖它；checkpoint之后精确重放最近自动请求也仍是无操作成功。所有Raft节点和核心须统一升级，不支持混合旧二进制。
 

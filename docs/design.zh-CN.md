@@ -1158,3 +1158,19 @@ IPC/C ABI未变，Raft节点需统一升级。没有新增额外回执，但命�
 Debug/Safe各131项通过：逐请求LMDB重启及内存全快照对照、显式时间后精确重放、相同时间采样的连续读取、超过8192次更新无回执增长、错误ID/代际/序号/时间、快照校验、事务逐分配失败回滚；真实Access覆盖全局回执表满读取、零长度/EOF、损坏读无时间副作用、时间提交拒绝/回复丢失的冻结及重开恢复。真实集群覆盖leader切换、快照及全群重启后access记录和显式atime保留。本地Debug/双CIFS Safe原生SMB覆盖下载仅更新atime及核心重启后序号继续。
 
 完整WAL FUSE/SMB故障套件重跑通过。初跑发现修复故障测试每轮末尾的FUSE客户读取已合法改变atime，而下一轮仍使用读取前的全元数据基线；测试现在严格验证该读取仅改变atime/access，再更新基线，修复自身仍须保持全部元数据。日志前缀/tmp/opencode/nas-access-times-。全局回执GC、持久ACL/完整SMB锁协调、跨节点fencing及物理NAS/Windows/macOS验收仍待完成。
+
+## 81. 显式回执代际回收与迟到请求隔离
+
+回执不能直接删除后继续接受旧ID，否则迟到的创建/改名等请求会重新执行。新增持久化receipt_epoch，缺省0；所有使用回执的Request携带该字段，必须等于当前代际才可查回执或执行。请求去重身份包含代际及ID，同一代际内ID仍要求集群唯一。epoch=0保持历史Request序列化与摘要不变；非零代际参与摘要，creation_time/namespace_time仍排除。旧代际或未来代际返回receipt_epoch_conflict（21），不保留失败回执，禁止用新代际自动重试。
+
+显式rotate_receipts:{expected_epoch}要求request_id/receipt_epoch均为0，在满表时仍可执行：当前代际等于expected则同一LMDB事务清空requests库并将代际加一；当前等于expected+1则是最新精确重放，返回ok但不触碰新回执；其他代际冲突，expected为u64最大值非法，不回绕。内存模型对应清空数组并递增。此命令不消耗回执，也不影响inode内attach/checkpoint/自动时间的去重状态。元数据和快照新增缺省0字段，快照恢复不能倒退已持久化代际，即使传入更大Raft index也拒绝。
+
+新增Receipts RPC，经ReadIndex后在一个LMDB读事务返回epoch/count/capacity；CLI为receipts ENDPOINTS与rotate-receipts ENDPOINTS EXPECTED_EPOCH。回收不使用墙钟、不自动触发，只是显式结束整代际的结果保留期，不回收文件数据/版本。结果未知的旧请求可能已提交，回收后只能报告代际过期而不能恢复旧结果；修改代际是新操作，不是原请求重试。没有自动续期、按客户水位回收或客户排空协议，需要协调命名空间客户切换。
+
+IPC新增receipt_state:{}，change/create_open接收receipt_epoch并原样转发；缺省0让旧客户在初始代际继续工作，回收后安全拒绝。原生桥接首次命名空间修改前查询并固定代际，之后不刷新，过期映射ESTALE；新连接获取新代际。首次修改多一个独立截止时间的查询，协议错误仍使桥接连接失效。FUSE在挂载时固定代际，过期后需重挂载；raw apply/put-file JSON接受显式代际。已有文件句柄的读写/截断/同步、首次绑定及自动时间不受回收影响。C ABI未变，核心/桥接/全部Raft节点须统一升级。
+
+Debug/Safe各134项通过。单测将8192回执填满后回收，逐操作LMDB重启、快照恢复及内存全量对照验证旧请求拒绝、最新回收重放保留新回执、多次回收、非法参数/注记、u64边界、快照禁止代际倒退及逐分配失败事务回滚；服务测试验证旧change/create_open拒绝、新代际成功、已打开数据句柄读写/同步继续。
+
+新增test-receipts入口，真实三节点覆盖回收、删除后旧创建不复活、同ID跨代际作为新请求、leader切换/快照/全群重启后的隔离及最新回收重放；原生IPC桥接覆盖连接固定代际、ESTALE、新连接成功与raw IPC显式代际。原生受控socket测试、本地/双CIFS SMB及完整WAL FUSE/SMB故障套件通过，日志前缀/tmp/opencode/nas-receipt-epoch-。首次实现中空查询的Zig匿名void/空tuple编码与IPC对象不匹配，由真实桥接测试发现，已改为显式空struct并验证通过。自动回收策略、版本/孤儿数据GC、持久ACL与跨节点fencing仍待实现。
+
+test-receipts的Debug与Safe均通过；Safe初跑在节点全群重启时出现BindFailed，单独重跑通过，记录于cluster-safe.log及cluster-safe-rerun.log。格式、diff、Python编译和Safe FUSE兼容构建检查通过。

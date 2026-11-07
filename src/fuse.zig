@@ -32,6 +32,7 @@ const Client = struct {
     mappings: []const objects.Mapping,
     write_backends: [2]u64 = .{ 0, 0 },
     wal: bool = false,
+    receipt_epoch: u64 = 0,
     rpc: nas.mutable_rpc.Client,
     sessions: ?*Shared = null,
 
@@ -79,7 +80,7 @@ const Client = struct {
 
     fn apply(self: *Client, command: m.Command) !u64 {
         if (self.write_backends[0] == 0) return error.ReadOnly;
-        const result = try self.query(m.Result, "Apply", m.Request{ .request_id = self.randomId(), .command = command });
+        const result = try self.query(m.Result, "Apply", m.Request{ .request_id = self.randomId(), .receipt_epoch = self.receipt_epoch, .command = command });
         defer result.deinit();
         try checkStatus(result.value.status);
         return result.value.inode;
@@ -340,6 +341,7 @@ fn errno(err: anyerror) c_int {
         error.InvalidName, error.InvalidReplicaPolicy => 22,
         error.VersionConflict, error.StorageConflict, error.SequenceConflict => 11,
         error.CapacityExceeded => 28,
+        error.ReceiptEpochConflict => 116,
         else => 5,
     };
 }
@@ -357,6 +359,7 @@ fn checkStatus(status: m.Status) !void {
         .storage_conflict => error.StorageConflict,
         .sequence_conflict => error.SequenceConflict,
         .capacity_exceeded => error.CapacityExceeded,
+        .receipt_epoch_conflict => error.ReceiptEpochConflict,
         else => error.InvalidResponse,
     };
 }
@@ -456,6 +459,9 @@ pub fn mount(gpa: std.mem.Allocator, io: std.Io, endpoints: []const u8, path: []
     const mappings = if (config.len == 0) null else try objects.loadMappings(gpa, io, config);
     defer if (mappings) |parsed| parsed.deinit();
     var client: Client = .{ .endpoints = endpoints, .io = io, .mappings = if (mappings) |parsed| parsed.value else &.{}, .wal = wal, .rpc = .{ .allocator = allocator, .endpoints = endpoints } };
+    const receipts = try client.query(m.ReceiptState, "Receipts", .{});
+    defer receipts.deinit();
+    client.receipt_epoch = receipts.value.epoch;
     if (write_config.len != 0) {
         var ids = std.mem.splitScalar(u8, write_config, ',');
         var domains: [2]u64 = undefined;

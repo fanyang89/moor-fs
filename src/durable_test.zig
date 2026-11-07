@@ -836,6 +836,114 @@ fn modifiedRequest(sequence: u64, seconds: i64) m.Request {
     } } } };
 }
 
+fn rotateReceipts(epoch: u64) m.Request {
+    return .{ .request_id = 0, .command = .{ .rotate_receipts = .{ .expected_epoch = epoch } } };
+}
+
+test "receipt rotation frees full capacity and rejects retired requests across restart and restore" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    var index: u64 = 0;
+    {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        for (timestamp_setup) |command| {
+            index += 1;
+            try t.expectEqualDeep(try memory.apply(command), try apply(&store, index, command));
+        }
+        for (5..m.max_receipts + 1) |id| {
+            const command: m.Request = .{ .request_id = id, .command = .{ .remove = .{ .id = 999 } } };
+            index += 1;
+            try t.expectEqualDeep(try memory.apply(command), try apply(&store, index, command));
+        }
+        try t.expectEqualDeep(m.ReceiptState{ .epoch = 0, .count = m.max_receipts }, try store.receiptState());
+    }
+    var fresh = create;
+    fresh.receipt_epoch = 1;
+    var wrong_rotation = rotateReceipts(0);
+    wrong_rotation.request_id = 99999;
+    var annotated_rotation = rotateReceipts(0);
+    annotated_rotation.namespace_time = .{};
+    var future = fresh;
+    future.receipt_epoch = 2;
+    const commands = [_]m.Request{
+        .{ .request_id = 99999, .command = .{ .remove = .{ .id = 999 } } },
+        fresh,
+        wrong_rotation,
+        annotated_rotation,
+        rotateReceipts(0),
+        fresh,
+        rotateReceipts(0),
+        timestamp_setup[0],
+        future,
+        accessedRequest(1, 10),
+        rotateReceipts(1),
+        fresh,
+        rotateReceipts(0),
+        rotateReceipts(std.math.maxInt(u64)),
+    };
+    const statuses = [_]m.Status{ .capacity_exceeded, .receipt_epoch_conflict, .invalid_request, .invalid_request, .ok, .ok, .ok, .receipt_epoch_conflict, .receipt_epoch_conflict, .ok, .ok, .receipt_epoch_conflict, .receipt_epoch_conflict, .invalid_request };
+    for (commands, statuses) |command, status| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        index += 1;
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        try store.restore(index, 1, bytes);
+        try t.expectEqualDeep(m.ReceiptState{ .epoch = memory.receipt_epoch, .count = memory.receipts.items.len }, try store.receiptState());
+    }
+    try t.expectEqual(@as(usize, 0), memory.receipts.items.len);
+    try t.expectEqual(@as(u64, 2), memory.receipt_epoch);
+    try t.expectEqual(@as(i64, 10), memory.get(2).?.times.atime.seconds);
+    try t.expect(memory.lookup(1, "photos") != null);
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    var regressed = protocol.Image{ .index = index + 1, .term = 1, .state = memory.snapshot() };
+    regressed.state.receipt_epoch = 1;
+    const bytes = try std.json.Stringify.valueAlloc(t.allocator, regressed, .{});
+    defer t.allocator.free(bytes);
+    try t.expectError(error.SnapshotOutOfDate, store.restore(index + 1, 1, bytes));
+    try t.expectEqual(@as(u64, 2), (try store.receiptState()).epoch);
+    var exhausted = rotateReceipts(std.math.maxInt(u64));
+    memory.receipt_epoch = std.math.maxInt(u64);
+    try t.expectEqual(m.Status.invalid_request, (try memory.apply(exhausted)).status);
+    exhausted.command.rotate_receipts.expected_epoch -= 1;
+    try t.expectEqual(m.Status.ok, (try memory.apply(exhausted)).status);
+}
+
+test "receipt rotation allocation failures preserve epoch and all receipts" {
+    try t.checkAllAllocationFailures(deterministic_allocator, receiptRotationAllocationScenario, .{});
+}
+
+fn receiptRotationAllocationScenario(allocator: std.mem.Allocator) !void {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    _ = try apply(&store, 1, create);
+    const before = try store.snapshot(t.allocator, 1, 1);
+    defer t.allocator.free(before);
+    store.allocator = allocator;
+    const result = apply(&store, 2, rotateReceipts(0)) catch |err| {
+        store.allocator = t.allocator;
+        const after = try store.snapshot(t.allocator, 1, 1);
+        defer t.allocator.free(after);
+        try t.expectEqualStrings(before, after);
+        return err;
+    };
+    store.allocator = t.allocator;
+    try t.expectEqual(m.Status.ok, result.status);
+    try t.expectEqualDeep(m.ReceiptState{ .epoch = 1, .count = 0 }, try store.receiptState());
+}
+
 fn accessedRequest(sequence: u64, seconds: i64) m.Request {
     return .{ .request_id = 0, .command = .{ .touch_accessed = .{ .inode = 2, .access = .{
         .generation = 7,

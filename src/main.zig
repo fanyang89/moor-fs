@@ -20,6 +20,8 @@ pub fn main(init: std.process.Init) !void {
     try register(root, options, "apply", "Propose a metadata request to the leader", &.{ "endpoint", "json" }, remoteApply);
     try register(root, options, "get", "Read an inode through the leader with ReadIndex", &.{ "endpoint", "id" }, remoteGet);
     try register(root, options, "status", "Inspect a node's local Raft status", &.{"endpoint"}, remoteStatus);
+    try register(root, options, "receipts", "Read the current receipt epoch and capacity", &.{"endpoint"}, remoteReceipts);
+    try register(root, options, "rotate-receipts", "Retire all receipts in an expected epoch; old requests will be rejected", &.{ "endpoint", "expected-epoch" }, rotateReceipts);
     try register(root, options, "lookup", "Look up a child by name", &.{ "endpoint", "parent", "name" }, remoteLookup);
     try register(root, options, "list", "List a directory page", &.{ "endpoint", "parent" }, remoteList);
     try register(root, options, "backend", "Read a registered NAS failure domain", &.{ "endpoint", "id" }, remoteBackend);
@@ -110,6 +112,17 @@ fn remote(ctx: zli.CommandContext, method: []const u8, request: []const u8) !voi
 
 fn remoteApply(ctx: zli.CommandContext) !void {
     try remote(ctx, "Apply", ctx.getArg("json").?);
+}
+
+fn remoteReceipts(ctx: zli.CommandContext) !void {
+    try remote(ctx, "Receipts", "{}");
+}
+
+fn rotateReceipts(ctx: zli.CommandContext) !void {
+    const request: nas.metadata.Request = .{ .request_id = 0, .command = .{ .rotate_receipts = .{ .expected_epoch = try std.fmt.parseUnsigned(u64, ctx.getArg("expected-epoch").?, 10) } } };
+    const json = try std.json.Stringify.valueAlloc(ctx.allocator, request, .{});
+    defer ctx.allocator.free(json);
+    try remote(ctx, "Apply", json);
 }
 
 fn remoteGet(ctx: zli.CommandContext) !void {

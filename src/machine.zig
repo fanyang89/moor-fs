@@ -92,6 +92,7 @@ pub const Machine = struct {
         };
         defer parsed.deinit();
         const image = parsed.value;
+        if (image.state.receipt_epoch < self.state.receipt_epoch) return error.SnapshotOutOfDate;
         if ((image.version < 1 or image.version > 3) or image.index != snapshot.index or image.term != snapshot.term or
             (image.index == 0) != (image.term == 0)) return error.EntryParseError;
         const replacement = metadata.State.restore(self.allocator, image.state) catch |err| switch (err) {

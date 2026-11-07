@@ -109,8 +109,8 @@ Both retain prototype bounds: 4,096 live
 inodes (including root), 64 backends, 2,048 retained file versions, and 8,192
 retained request receipts. Receipts are not
 silently evicted; at the receipt limit new request IDs are rejected, while known
-IDs remain replayable. An explicit deduplication retention protocol and capacity
-planning must replace these prototype limits before deployment.
+IDs remain replayable within the current receipt epoch. Explicit epoch retirement
+can reclaim the receipt table; capacity planning and automatic retention remain pending.
 
 Each nonempty mutable WAL write and each truncate also commits mtime/ctime through
 Raft before returning success. Automatic times use one generation/sequence/time
@@ -132,9 +132,10 @@ than receipts or WAL sequence numbers. This adds a Raft round trip per core read
 freezes the shared session until all handles are released and the file is reopened.
 Directory enumeration and the legacy immutable-object read path do not update atime.
 
-Each request ID is a nonzero `u64` unique across callers in this prototype; a
+Each receipt-backed request ID is a nonzero `u64` unique across callers within its epoch; a
 future client/session identity protocol must allocate suitable request IDs.
-Snapshots retain receipts even if the referenced file has since been deleted.
+Snapshots retain receipts even if the referenced file has since been deleted,
+until their entire epoch is explicitly retired.
 For creation, the leader records a server-only `creation_time` annotation in the
 Raft entry. It is excluded from the request digest, so retries preserve the first
 committed time. Ordinary RPC clients cannot supply this annotation. Legacy log
@@ -145,6 +146,35 @@ also excluded from deduplication. Historical entries containing only
 The internal `touch_modified`, `touch_accessed`, `checkpoint_mutable` and `attach_mutable` commands
 require ID zero and deduplicate against inode-local state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.
+
+### Explicit receipt retirement
+
+`nas-fs receipts "$ENDPOINTS"` returns a linearizable `{epoch,count,capacity}` view.
+`nas-fs rotate-receipts "$ENDPOINTS" EXPECTED_EPOCH` atomically clears all receipts
+and advances the epoch by one through Raft. It also works when the table is full.
+Repeating the latest rotation succeeds without deleting any newer receipts;
+older rotations and skipped epochs fail. No clock-based eviction or automatic
+rotation is performed.
+
+Receipt-backed requests carry `receipt_epoch` (default 0 for existing clients).
+Keep both epoch and request ID fixed across every retry. Old or future epochs
+return `receipt_epoch_conflict` before mutation, even after deletion, snapshot or
+restart. An expired request may already have committed: changing its epoch is a
+**new operation**, not a safe retry. Rotation does not recover expired results.
+The internal rotation command uses ID/epoch zero and `rotate_receipts:{expected_epoch}`;
+inode-local deduplication commands continue working independently of the receipt epoch.
+
+The native bridge pins the epoch before its first namespace mutation and never
+refreshes it on errors; old connections return `ESTALE` after retirement. New
+connections obtain the new epoch. FUSE pins it at mount, requiring remount for new
+namespace mutations after retirement. Existing mutable handles can continue data
+I/O. Raw IPC `change`/`create_open`, raw `apply` and `put-file` JSON accept explicit
+`receipt_epoch`; raw IPC exposes `receipt_state:{}` for discovery. Coordinate
+retirement with clients; there is no client-drain or automatic renewal protocol.
+Upgrade all voters, cores and bridges together. The C ABI is unchanged.
+
+`zig build test-receipts` covers real Raft failover/restart and native IPC clients
+across retirement; unit tests also cover a full table and transactional rollback.
 
 Names are valid UTF-8, at most 255 bytes, and cannot contain NUL or either path
 separator. Empty names, `.` and `..` are rejected. ASCII case folding is an initial
@@ -867,7 +897,8 @@ all metadata nodes together before using these new commands; older binaries do
 not recognize their WAL entries.
 
 Prototype limits still apply: 64 handles per mount, 2,048 retained versions and
-8,192 request receipts, no GC, no NAS I/O deadline, and administrator-trusted mount
+8,192 request receipts per epoch, explicit receipt retirement but no object/version GC,
+no NAS I/O deadline, and administrator-trusted mount
 physical failure domains. Frequent flush/publication can exhaust the version limit
 quickly. Guarded mappings reject mount mismatches; `allow_local` explicitly bypasses
 that protection. This is not yet a production writable filesystem.

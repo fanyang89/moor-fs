@@ -22,6 +22,16 @@ const Client = struct {
     fd: c_int,
     sequence: u64 = 0,
     timeout_ms: u32,
+    receipt_epoch: ?u64 = null,
+
+    fn epoch(self: *Client, arena: std.mem.Allocator) !u64 {
+        if (self.receipt_epoch) |value| return value;
+        errdefer self.poison();
+        const reply = try self.call(arena, .{ .receipt_state = @as(struct {}, .{}) });
+        if (reply.err != null) return error.Protocol;
+        self.receipt_epoch = (reply.result.receipts orelse return error.Protocol).epoch;
+        return self.receipt_epoch.?;
+    }
 
     fn poison(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
@@ -88,6 +98,7 @@ const Reply = struct {
         attributes: ?ns.Attributes = null,
         page: ?ns.Page = null,
         change: ?m.Result = null,
+        receipts: ?m.ReceiptState = null,
     },
 };
 
@@ -302,7 +313,8 @@ export fn nas_ipc_create_open(client: *Client, parent: u64, name: [*:0]const u8,
     for (ancestors[0..count], 0..) |*value, i| guards[i] = entryValue(value);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const reply = client.call(arena.allocator(), .{ .create_open = .{ .request_id = request_id, .parent = parent, .name = std.mem.span(name), .ancestors = guards[0..count], .writable = writable == 1 } }) catch |err| return failure(err);
+    const receipt_epoch = client.epoch(arena.allocator()) catch |err| return failure(err);
+    const reply = client.call(arena.allocator(), .{ .create_open = .{ .request_id = request_id, .receipt_epoch = receipt_epoch, .parent = parent, .name = std.mem.span(name), .ancestors = guards[0..count], .writable = writable == 1 } }) catch |err| return failure(err);
     const err = changeResult(client, reply, inode);
     if (err != 0) return err;
     const opened = reply.result.handle orelse return protocol(client);
@@ -329,7 +341,8 @@ export fn nas_ipc_set_times(client: *Client, inode: u64, times: *const Times, ma
 fn change(client: *Client, mutation: ns.Change, request_id: u64, out: ?*u64) c_int {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const reply = client.call(arena.allocator(), .{ .change = .{ .request_id = request_id, .mutation = mutation } }) catch |err| return failure(err);
+    const receipt_epoch = client.epoch(arena.allocator()) catch |err| return failure(err);
+    const reply = client.call(arena.allocator(), .{ .change = .{ .request_id = request_id, .receipt_epoch = receipt_epoch, .mutation = mutation } }) catch |err| return failure(err);
     return changeResult(client, reply, out);
 }
 
@@ -350,7 +363,7 @@ fn changeResult(client: *Client, reply: Reply, out: ?*u64) c_int {
         .not_empty => return c.ENOTEMPTY,
         .root_protected => return c.EPERM,
         .cycle => return c.EINVAL,
-        .entry_conflict => return c.ESTALE,
+        .entry_conflict, .receipt_epoch_conflict => return c.ESTALE,
         .invalid_name, .invalid_request => return c.EINVAL,
         .capacity_exceeded => return c.ENOSPC,
         else => return c.EIO,

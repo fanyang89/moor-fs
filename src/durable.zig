@@ -4,7 +4,7 @@ const lmdb = @import("lmdb.zig");
 const m = @import("metadata.zig");
 const protocol = @import("machine.zig");
 
-const Meta = struct { schema: u32 = 3, index: u64 = 0, term: u64 = 0, next_id: u64 = 2 };
+const Meta = struct { schema: u32 = 3, index: u64 = 0, term: u64 = 0, next_id: u64 = 2, receipt_epoch: u64 = 0 };
 
 pub const ListRequest = struct { parent: u64, after: ?[]const u8 = null, limit: u8 = 16 };
 pub const Page = struct {
@@ -107,6 +107,15 @@ pub const Store = struct {
         defer arena.deinit();
         const meta = try self.readMeta(&txn, arena.allocator());
         return .{ .index = meta.index, .term = meta.term };
+    }
+
+    pub fn receiptState(self: *Store) !m.ReceiptState {
+        var txn = try self.env.begin(true);
+        defer txn.abort();
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const meta = try self.readMeta(&txn, arena.allocator());
+        return .{ .epoch = meta.receipt_epoch, .count = try txn.count(self.requests_db) };
     }
 
     /// The caller owns the returned node's name and must free it with allocator.
@@ -259,7 +268,17 @@ pub const Store = struct {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
         if (!request.validTimes()) return .{ .status = .invalid_request };
+        if (request.command == .rotate_receipts) {
+            const expected = request.command.rotate_receipts.expected_epoch;
+            const status = m.rotationStatus(meta.receipt_epoch, expected);
+            if (status == .ok and meta.receipt_epoch == expected) {
+                try txn.clear(self.requests_db);
+                meta.receipt_epoch += 1;
+            }
+            return .{ .status = status };
+        }
         if (request.usesInodeState()) return self.execute(txn, allocator, meta, request.command);
+        if (request.receipt_epoch != meta.receipt_epoch) return .{ .status = .receipt_epoch_conflict };
         const digest = try m.requestDigest(allocator, request);
         const key = idKey(request.request_id);
         if (try txn.get(self.requests_db, &key)) |data| {
@@ -309,6 +328,7 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .rotate_receipts => unreachable,
             .attach_mutable => |update| {
                 var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
                 var backends: [2]m.Backend = undefined;
@@ -536,6 +556,7 @@ pub const Store = struct {
         if (index < meta.index or term < meta.term or (index == 0) != (term == 0)) return error.SnapshotOutOfDate;
         const state: m.Snapshot = .{
             .next_id = meta.next_id,
+            .receipt_epoch = meta.receipt_epoch,
             .nodes = try readRecords(m.Node, &txn, self.nodes_db, temp, m.max_nodes),
             .receipts = try readRecords(m.Receipt, &txn, self.requests_db, temp, m.max_receipts),
             .backends = try readRecords(m.Backend, &txn, self.backends_db, temp, m.max_backends),
@@ -560,6 +581,7 @@ pub const Store = struct {
         defer txn.abort();
         const previous = try self.readMeta(&txn, allocator);
         if (index < previous.index or term < previous.term) return error.SnapshotOutOfDate;
+        if (image.state.receipt_epoch < previous.receipt_epoch) return error.SnapshotOutOfDate;
         try txn.clear(self.nodes_db);
         try txn.clear(self.dirents_db);
         try txn.clear(self.requests_db);
@@ -578,7 +600,7 @@ pub const Store = struct {
             const key = idKey(v.id);
             try putJson(&txn, self.versions_db, &key, allocator, v);
         }
-        try putJson(&txn, self.meta_db, "state", allocator, Meta{ .index = index, .term = term, .next_id = image.state.next_id });
+        try putJson(&txn, self.meta_db, "state", allocator, Meta{ .index = index, .term = term, .next_id = image.state.next_id, .receipt_epoch = image.state.receipt_epoch });
         try txn.commit();
     }
 

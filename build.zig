@@ -152,6 +152,11 @@ pub fn build(b: *std.Build) void {
     cluster_test.addArtifactArg(exe);
     if (fault_injection) cluster_test.addArg("--repair-faults");
     b.step("test-cluster", "Test three processes, failover, snapshots and recovery").dependOn(&cluster_test.step);
+    const receipt_test = b.addSystemCommand(&.{ "python3", "tools/test_cluster.py" });
+    receipt_test.addArtifactArg(exe);
+    receipt_test.addArg("--receipt-bridge");
+    receipt_test.addArtifactArg(ipc_bridge);
+    b.step("test-receipts", "Test receipt retirement with real Raft voters and native IPC clients").dependOn(&receipt_test.step);
     const e2e_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
     e2e_test.addArtifactArg(exe);
     if (fault_injection) e2e_test.addArg("--repair-faults");

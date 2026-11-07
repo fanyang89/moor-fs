@@ -19,6 +19,7 @@ pub const Client = struct {
     fn namespaceQuery(context: *anyopaque, arena: std.mem.Allocator, input: ns.Query) !ns.Reply {
         const self: *Client = @ptrCast(@alignCast(context));
         return switch (input) {
+            .receipts => .{ .receipts = try self.namespaceRead(m.ReceiptState, arena, "Receipts", .{}) },
             .get => |id| .{ .node = try self.namespaceRead(?m.Node, arena, "Get", .{ .id = id }) },
             .lookup => |lookup| .{ .node = try self.namespaceRead(?m.Node, arena, "Lookup", lookup) },
             .list => |list| .{ .page = try self.namespaceRead(ns.Page, arena, "List", list) },

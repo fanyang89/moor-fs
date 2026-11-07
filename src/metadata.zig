@@ -165,11 +165,13 @@ pub const Command = union(enum) {
     touch_accessed: AccessedUpdate,
     checkpoint_mutable: MutableCheckpoint,
     attach_mutable: MutableAttachment,
+    rotate_receipts: struct { expected_epoch: u64 },
 };
 pub const Request = struct {
     version: u32 = 1,
     request_id: u64,
     command: Command,
+    receipt_epoch: u64 = 0,
     // Leader-assigned log annotation, excluded from the deduplication identity.
     creation_time: ?Timestamp = null,
     namespace_time: ?Timestamp = null,
@@ -189,7 +191,9 @@ pub const Request = struct {
     }
 
     pub fn jsonStringify(self: Request, writer: *std.json.Stringify) std.json.Stringify.Error!void {
-        if (self.namespace_time) |time| {
+        if (self.receipt_epoch != 0) {
+            try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .receipt_epoch = self.receipt_epoch, .creation_time = self.creation_time, .namespace_time = self.namespace_time });
+        } else if (self.namespace_time) |time| {
             try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .creation_time = self.creation_time, .namespace_time = time });
         } else if (self.creation_time) |time| {
             try writer.write(.{ .version = self.version, .request_id = self.request_id, .command = self.command, .creation_time = time });
@@ -199,7 +203,7 @@ pub const Request = struct {
     }
 
     pub fn validId(self: Request) bool {
-        return if (self.usesInodeState()) self.request_id == 0 else self.request_id != 0;
+        return if (self.usesInodeState() or self.command == .rotate_receipts) self.request_id == 0 and self.receipt_epoch == 0 else self.request_id != 0;
     }
 
     pub fn usesInodeState(self: Request) bool {
@@ -271,11 +275,19 @@ pub const Status = enum(u8) {
     storage_conflict = 18,
     sequence_conflict = 19,
     entry_conflict = 20,
+    receipt_epoch_conflict = 21,
 };
+pub const ReceiptState = struct { epoch: u64, count: usize, capacity: usize = max_receipts };
+
+pub fn rotationStatus(current: u64, expected: u64) Status {
+    if (expected == std.math.maxInt(u64)) return .invalid_request;
+    return if (current == expected or current == expected + 1) .ok else .receipt_epoch_conflict;
+}
 pub const Result = struct { status: Status, inode: u64 = 0 };
 pub const Receipt = struct { request_id: u64, digest: [32]u8, result: Result };
 pub const Snapshot = struct {
     next_id: u64,
+    receipt_epoch: u64 = 0,
     nodes: []const Node,
     receipts: []const Receipt,
     backends: []const Backend = &.{},
@@ -289,6 +301,7 @@ pub const State = struct {
     backends: std.ArrayList(Backend) = .empty,
     versions: std.ArrayList(Version) = .empty,
     next_id: u64 = root_id + 1,
+    receipt_epoch: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var self: State = .{ .allocator = allocator };
@@ -329,8 +342,18 @@ pub const State = struct {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
         if (!request.validTimes()) return .{ .status = .invalid_request };
+        if (request.command == .rotate_receipts) {
+            const expected = request.command.rotate_receipts.expected_epoch;
+            const status = rotationStatus(self.receipt_epoch, expected);
+            if (status == .ok and self.receipt_epoch == expected) {
+                self.receipts.clearRetainingCapacity();
+                self.receipt_epoch += 1;
+            }
+            return .{ .status = status };
+        }
         // Internal file commands deduplicate against inode state, not receipts.
         if (request.usesInodeState()) return self.execute(request.command);
+        if (request.receipt_epoch != self.receipt_epoch) return .{ .status = .receipt_epoch_conflict };
         const digest = try requestDigest(self.allocator, request);
         for (self.receipts.items) |receipt| {
             if (receipt.request_id == request.request_id) {
@@ -372,6 +395,7 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .rotate_receipts => unreachable,
             .touch_accessed => |update| {
                 const i = self.find(update.inode) orelse return .{ .status = .not_found };
                 const result = updateAccessed(&self.nodes.items[i], update);
@@ -521,12 +545,12 @@ pub const State = struct {
     }
 
     pub fn snapshot(self: *const State) Snapshot {
-        return .{ .next_id = self.next_id, .nodes = self.nodes.items, .receipts = self.receipts.items, .backends = self.backends.items, .versions = self.versions.items };
+        return .{ .next_id = self.next_id, .receipt_epoch = self.receipt_epoch, .nodes = self.nodes.items, .receipts = self.receipts.items, .backends = self.backends.items, .versions = self.versions.items };
     }
 
     pub fn restore(allocator: std.mem.Allocator, data: Snapshot) !State {
         try validateSnapshot(data);
-        var self: State = .{ .allocator = allocator, .next_id = data.next_id };
+        var self: State = .{ .allocator = allocator, .next_id = data.next_id, .receipt_epoch = data.receipt_epoch };
         errdefer self.deinit();
         try self.nodes.ensureTotalCapacity(allocator, data.nodes.len);
         for (data.nodes) |node| {

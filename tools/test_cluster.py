@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--mutable-access")
     parser.add_argument("--file-ipc", action="store_true")
     parser.add_argument("--samba-vfs", action="store_true")
+    parser.add_argument("--receipt-bridge")
     parser.add_argument("--wal-fuse", action="store_true")
     parser.add_argument("--wal-smb", action="store_true")
     parser.add_argument("--wal-faults", action="store_true")
@@ -710,6 +711,19 @@ def main():
                     write_faults=options.repair_faults,
                     drop_publish_reply=drop_publish_reply,
                 )
+            from test_receipt_epochs import test_receipt_epochs
+
+            test_receipt_epochs(
+                executable,
+                directory,
+                endpoints,
+                run,
+                leader,
+                stop,
+                start,
+                processes,
+                options.receipt_bridge,
+            )
             for i in list(processes):
                 stop(i, kill=False)
         except BaseException:
