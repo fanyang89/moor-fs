@@ -1019,6 +1019,11 @@ Two seal-restoration cases likewise kill repair after durable publication and
 verify source preservation, ownership exclusion and idempotent retry.
 Two checkpoint-reconciliation cases kill repair after publishing the missing
 copy; reopening preserves that new inode and all surviving control-file inodes.
+Four further cases kill seal/checkpoint recovery after temporary-file sync but
+before rename, in both directions. The canonical target remains absent and the
+temporary file is retained as evidence. Retry validates the surviving canonical
+record and publishes a fresh copy without adopting or deleting the orphan.
+Even two valid temporary copies cannot replace missing canonical control records.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.

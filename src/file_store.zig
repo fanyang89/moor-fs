@@ -58,6 +58,7 @@ fn publish(io: Io, dir: Dir, bytes: *const [checkpoint_size]u8) !void {
     defer dir.deleteFile(io, name) catch {};
     try temporary.writePositionalAll(io, bytes, 0);
     try temporary.sync(io);
+    @import("repair_fault.zig").checkpoint(.checkpoint_before_rename);
     try dir.rename(name, dir, "checkpoint", io);
     try objects.syncDir(io, dir);
 }

@@ -160,6 +160,8 @@ WAL 普通读取现在比对两侧大小和请求范围内的字节，任一侧�
 
 checkpoint协调沿用已有普通恢复规则：一份缺失或落后时，在数据/WAL恢复验证成功后补写该侧；两份缺失、记录损坏或同序号大小冲突仍拒绝。现已避免重写匹配的checkpoint，普通打开、scrub和repair保持其字节与inode；仍同步两侧目录，以完成上次可能停在rename后的发布。创建和轮换仍发布双checkpoint。两个方向新增mutable_checkpoint_reconciled发布同步后的SIGKILL，验证幸存checkpoint及其他控制文件inode不变、锁排他、普通重开和显式重试保留补写inode。此优化不放宽缺data/WAL/seal时原有的双checkpoint证据要求。
 
+控制文件发布前中断另覆盖seal_before_rename与checkpoint_before_rename：位于临时文件sync成功后、rename正式文件前，两个方向共四项SIGKILL。进程死亡后正式目标仍缺失，临时seal-*/checkpoint-*内容及inode保留；正常重试只重新验证正式幸存证据并发布新副本，不采用或清理孤儿临时文件。即使两侧临时副本有效且匹配，也不能替代均缺失的正式控制文件。上述故障点仅在fault-injection构建中生效；普通构建忽略暂停环境变量。验收仍使用完整test-wal-smb故障入口，不代表硬件断电验收。
+
 缺失文件故障注入通过被测CIFS挂载删除，以使客户端缓存目录项/延迟句柄失效；暂停复制期间从服务端路径检查内容以避开客户端强制锁。直接从服务端删除后，客户端仍可能短时读到缓存句柄，因此不能将远端删除的瞬时可见性作为本轮保证；本轮不增加跨节点fencing或NAS缓存失效订阅。
 
 同一套件还覆盖 seal 单侧/双侧发布后的 SIGKILL，以及 write、truncate 在单侧/双侧摘要持久失效后的 SIGKILL，共六个基线生命周期场景。中断时数据和 WAL 尚未修改；仅删除一侧时重开仍可用剩余基线验证，两侧已删除时以未封存状态恢复，修复命令必须返回 `MissingSeal`。调用者看到未完成的 FUSE 写入失败后，可在重开会话后重试，再显式建立新基线；Linux 可能将该失败报告为 `EIO`、`ENOTCONN` 或 `ECONNABORTED`，不能据错误名推断数据是否已经写入。

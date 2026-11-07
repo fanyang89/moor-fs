@@ -169,17 +169,28 @@ def test_mutable_repair_faults(
             )
 
     # Control-file reconstruction must preserve all data and survive death
-    # after durable publication, without replacing the surviving evidence.
+    # before rename and after durable publication, preserving surviving evidence.
     cases = (
         (name, point, missing)
         for name, point in (
             (f"wal-{metadata['mutable_file']['next_sequence']}", "mutable_wal_created"),
             ("seal", "mutable_seal_restored"),
             ("checkpoint", "mutable_checkpoint_reconciled"),
+            ("seal", "seal_before_rename"),
+            ("checkpoint", "checkpoint_before_rename"),
         )
         for missing in range(2)
     )
     for log_name, point, missing in cases:
+        before_rename = point.endswith("before_rename")
+        control_evidence = [
+            {
+                file.name: file.read_bytes()
+                for file in target.parent.iterdir()
+                if file.name != "data"
+            }
+            for target in data
+        ]
         control_inodes = [
             {
                 file.name: file.stat().st_ino
@@ -202,7 +213,7 @@ def test_mutable_repair_faults(
             assert "FileNotFound" in failed.stdout + failed.stderr, failed
         assert not lost_log.exists()
         source_log_inode = (data[1 - missing].parent / log_name).stat().st_ino
-        log = directory / f"mutable-{log_name}-rebuild-{missing}.log"
+        log = directory / f"mutable-{point}-{missing}.log"
         with log.open("w") as output:
             process = subprocess.Popen(
                 [executable, "repair-mutable", endpoints, str(config), str(inode)],
@@ -212,7 +223,23 @@ def test_mutable_repair_faults(
             )
         try:
             wait_stopped(process, point, log)
-            new_inode = (data[missing].parent / log_name).stat().st_ino
+            if before_rename:
+                assert not (data[missing].parent / log_name).exists()
+                added = (
+                    {file.name for file in data[missing].parent.iterdir()}
+                    - set(control_evidence[missing])
+                    - {"data"}
+                )
+                assert len(added) == 1, added
+                temporary_name = added.pop()
+                assert temporary_name.startswith(log_name + "-")
+                temporary = data[missing].parent / temporary_name
+                assert temporary.read_bytes() == control_evidence[missing][log_name]
+                control_evidence[missing][temporary_name] = temporary.read_bytes()
+                control_inodes[missing][temporary_name] = temporary.stat().st_ino
+                new_inode = None
+            else:
+                new_inode = (data[missing].parent / log_name).stat().st_ino
             assert all(file.read_bytes() == content for file in data)
             assert [file.stat().st_ino for file in data] == identities
             assert run("get", endpoints, inode) == metadata
@@ -226,26 +253,40 @@ def test_mutable_repair_faults(
                 process.kill()
             process.wait(timeout=15)
         for index, target in enumerate(data):
+            expected = dict(control_evidence[index])
+            if before_rename and index == missing:
+                del expected[log_name]
             assert {
                 file.name: file.read_bytes()
                 for file in target.parent.iterdir()
                 if file.name != "data"
-            } == evidence[index]
+            } == expected
         assert run("scrub-mutable", endpoints, config, inode)["sealed"]
         assert (
             run("repair-mutable", endpoints, config, inode)["sha256"]
             == report["sha256"]
         )
         assert run("get", endpoints, inode) == metadata
+        if before_rename:
+            new_inode = (data[missing].parent / log_name).stat().st_ino
+            assert (
+                run("repair-mutable", endpoints, config, inode)["sha256"]
+                == report["sha256"]
+            )
         assert (data[missing].parent / log_name).stat().st_ino == new_inode
         assert (data[1 - missing].parent / log_name).stat().st_ino == source_log_inode
         assert [file.stat().st_ino for file in data] == identities
         for index, target in enumerate(data):
+            assert {
+                file.name: file.read_bytes()
+                for file in target.parent.iterdir()
+                if file.name != "data"
+            } == control_evidence[index]
             for name, inode_before in control_inodes[index].items():
                 if index == missing and name == log_name:
                     continue
                 assert (target.parent / name).stat().st_ino == inode_before
         print(
-            f"PASS: missing {log_name} on NAS {missing + 1} rebuilt durably before SIGKILL, data/evidence preserved and retry succeeds",
+            f"PASS: missing {log_name} on NAS {missing + 1} SIGKILL at {point}, data/evidence preserved and retry succeeds",
             flush=True,
         )

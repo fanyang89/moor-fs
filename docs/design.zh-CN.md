@@ -1216,3 +1216,11 @@ Debug/Safe各142项：两方向空/非空文件恢复、普通打开不补写、
 协调仍在双data独占锁、seal验证及WAL恢复之后进行，不根据旧WAL猜测缺失checkpoint，不放宽双checkpoint缺失、损坏记录、同序号大小冲突或缺data/WAL/seal组合的拒绝规则。补写失败继续返回错误；已完成一侧的发布由后续恢复验证，不回滚有效证据。故障点mutable_checkpoint_reconciled位于实际补写文件与目录同步之后，匹配副本不会触发该点。
 
 Debug/Safe各144项通过：普通无seal/有pending WAL/有seal打开均保持匹配checkpoint inode；显式sealed repair同样保持；两个方向普通及sealed repair补写单份缺失checkpoint，保持幸存inode和双侧字节，重复打开保持新inode并可继续写入同步；较高checkpoint恢复只更新旧侧且不重放旧truncate。完整真实双CIFS WAL故障回归新增两方向补写checkpoint后的SIGKILL，验证锁排他、所有幸存控制文件inode与字节、双data及逻辑元数据保持，普通重开和显式重试不替换新inode。现有缺WAL/seal故障用例同步增强为检查所有幸存控制文件inode。本地/双CIFS原生SMB为data/WAL/seal重建及再次下载增加双checkpoint inode不变断言，全部通过。日志前缀/tmp/opencode/nas-checkpoint-reconcile-；Raft/IPC/C ABI未变，离线NAS及整个目录重建仍待独立协议。
+
+## 86. 控制文件rename前中断与孤儿证据
+
+本轮补齐seal/checkpoint临时文件已经sync、尚未rename正式文件的进程死亡窗口。新增测试专用seal_before_rename和checkpoint_before_rename，分别位于两类控制文件发布函数的临时文件同步之后；正常构建不读取暂停变量或停止进程。现有发布与恢复协议不变，正式文件名仍是唯一控制记录入口。
+
+完整真实双CIFS WAL故障套件新增两个方向、两类控制文件共四项SIGKILL。暂停时确认正式目标缺失，且仅新增一个内容匹配幸存正式证据的临时文件；维护竞争者被data锁拒绝。死亡后确认正式目标仍缺失、临时文件及原控制字节保留。随后普通scrub与显式repair按各自既有语义重试，重新校验幸存正式证据、发布新副本；再次修复保持正式inode。全过程验证双data、逻辑元数据、所有幸存控制文件和孤儿临时文件的字节/inode不变。后续场景保留先前孤儿，验证它们不会干扰恢复。
+
+Debug/Safe各145项通过。新增单元测试在双侧都只剩有效且匹配的临时checkpoint或seal时，显式恢复仍分别返回MissingCheckpoint或MissingSeal；提供一份正式记录后恢复成功，临时副本保持不变。完整WAL故障回归包含原有发布后、data重建、WAL重建、seal生命周期等场景。日志前缀/tmp/opencode/nas-control-publication-。临时文件回收、硬件断电、整个副本目录丢失和离线NAS重建仍不在此次验收范围。

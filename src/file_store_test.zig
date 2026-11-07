@@ -668,6 +668,44 @@ test "pending WAL cannot coexist with a valid seal and partial repairs are retry
     try t.expectError(error.SealWithPendingWal, f.open());
 }
 
+test "unpublished control temporaries never substitute for canonical evidence" {
+    for ([_][]const u8{ "checkpoint", "seal" }) |name| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        const next = store.checkpoint.next;
+        store.close();
+        var buffer: [64]u8 = undefined;
+        const temporary_name = try std.fmt.bufPrint(&buffer, "{s}-00000000000000000000000000000000", .{name});
+        const bytes = try f.dirs[0].readFileAlloc(t.io, name, t.allocator, .limited(128));
+        defer t.allocator.free(bytes);
+        for (f.dirs) |dir| {
+            try dir.rename(name, dir, temporary_name, t.io);
+        }
+        // Even valid, matching temporary records on both sides are not evidence
+        // that either canonical publication completed.
+        const checkpoint = std.mem.eql(u8, name, "checkpoint");
+        try t.expectError(if (checkpoint) error.MissingCheckpoint else error.MissingSeal, files.Store.openMode(t.allocator, t.io, identity, f.dirs, next));
+        for (f.dirs) |dir| try t.expectError(error.FileNotFound, dir.openFile(t.io, name, .{}));
+        const source = try f.dirs[0].createFile(t.io, name, .{ .exclusive = true });
+        try source.writePositionalAll(t.io, bytes, 0);
+        source.close(t.io);
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, next);
+        defer store.close();
+        for (f.dirs) |dir| {
+            const orphan = try dir.readFileAlloc(t.io, temporary_name, t.allocator, .limited(128));
+            defer t.allocator.free(orphan);
+            const canonical = try dir.readFileAlloc(t.io, name, t.allocator, .limited(128));
+            defer t.allocator.free(canonical);
+            try t.expectEqualSlices(u8, bytes, orphan);
+            try t.expectEqualSlices(u8, bytes, canonical);
+        }
+        try f.expect("baseline");
+    }
+}
+
 test "ordinary and sealed repair opens preserve matching checkpoint inodes" {
     for ([_]enum { plain, pending, sealed }{ .plain, .pending, .sealed }) |mode| {
         var f = try Fixture.init();

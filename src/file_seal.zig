@@ -51,6 +51,7 @@ pub const Seal = struct {
         defer dir.deleteFile(io, name) catch {};
         try file.writePositionalAll(io, &bytes, 0);
         try file.sync(io);
+        @import("repair_fault.zig").checkpoint(.seal_before_rename);
         try dir.rename(name, dir, "seal", io);
         try objects.syncDir(io, dir);
     }
