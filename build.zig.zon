@@ -1,7 +1,7 @@
 .{
-    .name = .nas_fs,
+    .name = .moor_fs,
     .version = "0.1.0",
-    .fingerprint = 0xc3af1b2c8dc0ca5e, // Changing this has security and trust implications.
+    .fingerprint = 0xc9b0427514012229, // Regenerated for the moor_fs package name.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zli = .{ .path = "third_party/zli" },

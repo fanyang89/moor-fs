@@ -23,7 +23,7 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
+    parser.add_argument("executable", nargs="?", default="zig-out/bin/moor-fs")
     parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
@@ -44,7 +44,7 @@ def main():
     if options.wal_faults and not (options.wal_fuse or options.wal_smb):
         parser.error("--wal-faults requires --wal-fuse or --wal-smb")
     executable = str(Path(options.executable).resolve())
-    with tempfile.TemporaryDirectory(prefix="nas-fs-cluster-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="moor-fs-cluster-") as temporary:
         directory = Path(temporary)
         sockets = [socket.socket() for _ in range(6)]
         for sock in sockets:
@@ -74,9 +74,9 @@ def main():
 
         def start(i):
             environment = dict(os.environ)
-            environment.pop("NAS_FS_PUBLISH_STOP_DIR", None)
+            environment.pop("MOOR_FS_PUBLISH_STOP_DIR", None)
             if options.repair_faults:
-                environment["NAS_FS_PUBLISH_STOP_DIR"] = str(publish_stops)
+                environment["MOOR_FS_PUBLISH_STOP_DIR"] = str(publish_stops)
             log = open(directory / f"node-{i}.log", "a")
             logs.append(log)
             processes[i] = subprocess.Popen(
@@ -188,7 +188,7 @@ def main():
                             "metadata checkpoint did not consume marker"
                         )
                         receipt = re.findall(
-                            rf"NAS_FS_PUBLISH_STOP inode={inode} request=(\d+)",
+                            rf"MOOR_FS_PUBLISH_STOP inode={inode} request=(\d+)",
                             (directory / f"node-{i}.log").read_text(),
                         )
                         assert len(receipt) == 1, receipt

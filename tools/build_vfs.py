@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the pinned Samba daemon and read-only nas_fs module without installation."""
+"""Build the pinned Samba daemon and moor_fs module without installation."""
 
 import argparse
 import json
@@ -63,19 +63,19 @@ def main():
             value in arg for value in ("STATIC_", "samba_init_module", "vfs_audit_init")
         )
     ]
-    module = ROOT / "zig-out/lib/nas_fs.so"
+    module = ROOT / "zig-out/lib/moor_fs.so"
     run(
         source["arguments"][0],
         *flags,
         f"-I{ROOT / 'src'}",
         "-shared",
-        str(ROOT / "src/vfs_nas_fs.c"),
-        str(ROOT / "zig-out/lib/libnas-ipc.a"),
+        str(ROOT / "src/vfs_moor_fs.c"),
+        str(ROOT / "zig-out/lib/libmoor-ipc.a"),
         "-o",
         str(module),
         cwd=source["directory"],
     )
-    link = SAMBA / "bin/modules/vfs/nas_fs.so"
+    link = SAMBA / "bin/modules/vfs/moor_fs.so"
     if link.is_symlink() and link.resolve() == module:
         pass
     elif link.exists() or link.is_symlink():

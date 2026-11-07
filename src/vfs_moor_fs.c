@@ -34,8 +34,8 @@ static void nas_free(void **data)
 static int nas_connect(struct vfs_handle_struct *h, const char *service, const char *user)
 {
     struct nas_ipc *client = NULL;
-    const char *path = lp_parm_const_string(SNUM(h->conn), "nas_fs", "socket", NULL);
-    int timeout_ms = lp_parm_int(SNUM(h->conn), "nas_fs", "timeout_ms", 30000);
+    const char *path = lp_parm_const_string(SNUM(h->conn), "moor_fs", "socket", NULL);
+    int timeout_ms = lp_parm_int(SNUM(h->conn), "moor_fs", "timeout_ms", 30000);
     if (!path || lp_smb2_leases() || lp_oplocks(SNUM(h->conn))) return nas_error(EINVAL);
     if (!lp_read_only(SNUM(h->conn)) && !lp_strict_sync(SNUM(h->conn))) return nas_error(EINVAL);
     if (timeout_ms < 1 || timeout_ms > 600000) return nas_error(EINVAL);
@@ -624,6 +624,6 @@ NTSTATUS samba_init_module(TALLOC_CTX *ctx)
     f->freaddir_attr_fn = nas_readdir_attr;
     f->translate_name_fn = nas_translate;
     f->get_real_filename_at_fn = nas_real_name;
-    smb_vfs_assert_all_fns(f, "nas_fs");
-    return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "nas_fs", f);
+    smb_vfs_assert_all_fns(f, "moor_fs");
+    return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "moor_fs", f);
 }

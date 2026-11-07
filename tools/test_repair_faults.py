@@ -77,7 +77,7 @@ def test_repair_faults(executable, directory, endpoints, config, roots, run):
                 ],
                 stdout=output,
                 stderr=output,
-                env={**os.environ, "NAS_FS_REPAIR_STOP": point},
+                env={**os.environ, "MOOR_FS_REPAIR_STOP": point},
             )
         try:
             deadline = time.monotonic() + 30

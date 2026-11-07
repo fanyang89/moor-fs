@@ -1,6 +1,6 @@
 # 原生 Linux 运行目录包
 
-运行目录包包含 nas-fs 二进制、固定版本 libfuse、接入启停脚本、E2E 工具、文档、依赖许可证副本、构建记录与 SHA-256 清单。它不安装系统服务，不修改 `/usr`，也不携带 NAS 凭据或运行数据。
+运行目录包包含 moor-fs 二进制、固定版本 libfuse、接入启停脚本、E2E 工具、文档、依赖许可证副本、构建记录与 SHA-256 清单。它不安装系统服务，不修改 `/usr`，也不携带 NAS 凭据或运行数据。
 
 ## 构建
 
@@ -8,7 +8,7 @@
 
 ```sh
 python3 tools/deps.py init
-python3 tools/package.py "$HOME/nas-fs-runtime"
+python3 tools/package.py "$HOME/moor-fs-runtime"
 ```
 
 脚本核对固定子模块并重建 libfuse，执行原生 Safe 构建，明确关闭故障注入。包内二进制仅使用 `$ORIGIN/../lib` 的运行时库路径，不引用 `.deps-build`；libfuse 按实际 SONAME 复制为普通文件。脚本从不同工作目录检查动态库解析、两个命令的 help 和全部文件校验值。
@@ -18,8 +18,8 @@ python3 tools/package.py "$HOME/nas-fs-runtime"
 ## 布局与启动
 
 ```text
-bin/nas-fs                  CLI、元数据和 FUSE 服务
-bin/nas-fs-access           相对路径启动接入 helper 的入口
+bin/moor-fs                 CLI、元数据和 FUSE 服务
+bin/moor-fs-access          相对路径启动接入 helper 的入口
 lib/libfuse3.so.*           与构建匹配的 libfuse
 tools/                     Python helpers 与端到端验收脚本
 docs/                      中文设计、操作和打包说明
@@ -31,27 +31,27 @@ SHA256SUMS                 文件完整性清单（不包含它自身）
 可整体移动或压缩目录，在同架构且运行库兼容的 Linux 主机使用。例如：
 
 ```sh
-tar -C "$HOME" -czf nas-fs-runtime.tar.gz nas-fs-runtime
+tar -C "$HOME" -czf moor-fs-runtime.tar.gz moor-fs-runtime
 ```
 
 解压到目标机器后，先从包根目录执行 `sha256sum -c SHA256SUMS`，再设置包绝对路径：
 
 ```sh
-BUNDLE="$HOME/nas-fs-runtime"
-"$BUNDLE/bin/nas-fs" --help
-"$BUNDLE/bin/nas-fs-access" --help
+BUNDLE="$HOME/moor-fs-runtime"
+"$BUNDLE/bin/moor-fs" --help
+"$BUNDLE/bin/moor-fs-access" --help
 ```
 
-参考 `docs/operations.zh-CN.md` 启动三 voter、挂载/登记/初始化 NAS，将其中 BIN 设置为 `$BUNDLE/bin/nas-fs`。不要在包内保存元数据或配置，便于整体替换程序目录。接入机启动示例：
+参考 `docs/operations.zh-CN.md` 启动三 voter、挂载/登记/初始化 NAS，将其中 BIN 设置为 `$BUNDLE/bin/moor-fs`。不要在包内保存元数据或配置，便于整体替换程序目录。接入机启动示例：
 
 ```sh
 EP=192.0.2.21:8001,192.0.2.22:8001,192.0.2.23:8001
 mkdir -p "$HOME/nas-mount"
-"$BUNDLE/bin/nas-fs-access" "$EP" "$HOME/nas-mount" "$HOME/nas-access-state-01" \
+"$BUNDLE/bin/moor-fs-access" "$EP" "$HOME/nas-mount" "$HOME/nas-access-state-01" \
   --backends "$HOME/backends.json" --write-backends 1,2 --port 1445
 ```
 
-地址与路径需替换；省略 `--write-backends` 即只读。从包内直接运行 serve_access.py 时必须显式传 `--executable "$BUNDLE/bin/nas-fs"`；推荐使用 bin/nas-fs-access，避免依赖当前工作目录。请直接调用包内入口路径，不依赖把该 shell 入口单独复制或软链接到其他位置。
+地址与路径需替换；省略 `--write-backends` 即只读。从包内直接运行 serve_access.py 时必须显式传 `--executable "$BUNDLE/bin/moor-fs"`；推荐使用 bin/moor-fs-access，避免依赖当前工作目录。请直接调用包内入口路径，不依赖把该 shell 入口单独复制或软链接到其他位置。
 
 ## 目标机依赖与验收
 
@@ -62,7 +62,7 @@ mkdir -p "$HOME/nas-mount"
 从包外目录验证整个真实 SMB 路径（需要操作手册列出的 sudo -n 权限）：
 
 ```sh
-python3 "$BUNDLE/tools/test_e2e.py" "$BUNDLE/bin/nas-fs" --smb
+python3 "$BUNDLE/tools/test_e2e.py" "$BUNDLE/bin/moor-fs" --smb
 ```
 
 该测试使用包内二进制、helpers 与测试脚本；覆盖 CIFS、三节点元数据、FUSE/SMB、初始化、修复、启停清理与重启。正常包没有故障注入，不给它传 `--repair-faults`。迁移运行目录后的本机 E2E 不代表已完成独立机器、不同发行版或硬件断电验收。系统服务集成与完整备份恢复仍待完成。

@@ -50,13 +50,13 @@ def package(destination):
         cwd=ROOT,
         check=True,
     )
-    binary = destination / "bin/nas-fs"
+    binary = destination / "bin/moor-fs"
     if any(
         selector in binary.read_bytes()
         for selector in (
-            b"NAS_FS_REPAIR_STOP",
-            b"NAS_FS_WRITE_STOP",
-            b"NAS_FS_PUBLISH_STOP",
+            b"MOOR_FS_REPAIR_STOP",
+            b"MOOR_FS_WRITE_STOP",
+            b"MOOR_FS_PUBLISH_STOP",
         )
     ):
         raise RuntimeError("instrumented binary cannot be packaged")
@@ -102,9 +102,9 @@ def package(destination):
                         / f"{dependency.name}-{Path(notice).name}",
                     )
 
-    launcher = destination / "bin/nas-fs-access"
+    launcher = destination / "bin/moor-fs-access"
     launcher.write_text(
-        '#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec python3 -B "$ROOT/tools/serve_access.py" --executable "$ROOT/bin/nas-fs" "$@"\n'
+        '#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec python3 -B "$ROOT/tools/serve_access.py" --executable "$ROOT/bin/moor-fs" "$@"\n'
     )
     launcher.chmod(0o755)
     with tempfile.TemporaryDirectory(

@@ -94,7 +94,7 @@ def test_mutable_repair_faults(
                     ],
                     stdout=output,
                     stderr=output,
-                    env={**os.environ, "NAS_FS_REPAIR_STOP": point},
+                    env={**os.environ, "MOOR_FS_REPAIR_STOP": point},
                 )
             try:
                 wait_stopped(process, point, log)
@@ -221,7 +221,7 @@ def test_mutable_repair_faults(
                 [executable, "repair-mutable", endpoints, str(config), str(inode)],
                 stdout=output,
                 stderr=output,
-                env={**os.environ, "NAS_FS_REPAIR_STOP": point},
+                env={**os.environ, "MOOR_FS_REPAIR_STOP": point},
             )
         try:
             wait_stopped(process, point, log)
@@ -321,7 +321,7 @@ def test_mutable_repair_faults(
             ],
             stdout=output,
             stderr=output,
-            env={**os.environ, "NAS_FS_REPAIR_STOP": point},
+            env={**os.environ, "MOOR_FS_REPAIR_STOP": point},
         )
     try:
         wait_stopped(process, point, log)

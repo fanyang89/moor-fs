@@ -8,12 +8,12 @@ extern "c" fn raise(signal: c_int) c_int;
 
 pub fn beforeReply(inode: u64, request_id: u64) void {
     if (!enabled) return;
-    const directory = getenv("NAS_FS_PUBLISH_STOP_DIR") orelse return;
+    const directory = getenv("MOOR_FS_PUBLISH_STOP_DIR") orelse return;
     var buffer: [4096]u8 = undefined;
     const path = std.mem.printSentinel(&buffer, "{s}/{d}", .{ std.mem.span(directory), inode }, 0) catch return;
     // Consuming the inode marker atomically keeps the retry on the new leader running.
     if (unlink(path) == 0) {
-        std.debug.print("NAS_FS_PUBLISH_STOP inode={d} request={d}\n", .{ inode, request_id });
+        std.debug.print("MOOR_FS_PUBLISH_STOP inode={d} request={d}\n", .{ inode, request_id });
         _ = raise(@intCast(@backingInt(std.os.linux.SIG.STOP)));
     }
 }

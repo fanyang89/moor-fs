@@ -72,14 +72,14 @@ SMB filesystem semantics.
 
 The pinned Samba now also has an experimental native read/write VFS build:
 `python3 tools/build_vfs.py`. It builds the matching daemon in Samba's standard
-ignored `bin` tree and links the Zig IPC bridge into `zig-out/lib/nas_fs.so`.
+ignored `bin` tree and links the Zig IPC bridge into `zig-out/lib/moor_fs.so`.
 No system installation or submodule source edits are performed. Use that daemon
 only; see `docs/samba-vfs.zh-CN.md` for the configuration and acceptance limits.
 
 The intended data path is:
 
 ```text
-SMB client -> Samba -> nas-fs FUSE/VFS adapter -> Linux CIFS -> NAS
+SMB client -> Samba -> moor-fs FUSE/VFS adapter -> Linux CIFS -> NAS
 ```
 
 - Samba remains a separate server, not a Zig-linked SMB library. Its `ctdb/`,

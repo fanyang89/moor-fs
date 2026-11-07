@@ -1,13 +1,15 @@
 # WAL 读取延迟基准
 
+项目现名moor-fs；历史测量说明中的nas-fs和日志路径保留，当前运行命令使用新名称。
+
 ## 运行方式
 
 构建 Safe 版本，再使用既有三节点测试环境。基准是可选项，默认回归不增加计时负担。
 
 ```sh
 zig build -Dfuse=true -Doptimize=safe
-python3 tools/test_cluster.py zig-out/bin/nas-fs --wal-fuse --wal-benchmark
-python3 tools/test_e2e.py zig-out/bin/nas-fs --wal-smb --wal-benchmark
+python3 tools/test_cluster.py zig-out/bin/moor-fs --wal-fuse --wal-benchmark
+python3 tools/test_e2e.py zig-out/bin/moor-fs --wal-smb --wal-benchmark
 ```
 
 也可以在独占、可写的 WAL FUSE 测试挂载上单独运行：
@@ -65,8 +67,8 @@ python3 tools/benchmark_wal.py /path/to/fuse \
 
 ```sh
 zig build -Dfuse=true -Doptimize=safe -Dlatency-trace=true
-python3 tools/test_cluster.py zig-out/bin/nas-fs --wal-fuse --wal-benchmark
-python3 tools/test_e2e.py zig-out/bin/nas-fs --wal-smb --wal-benchmark
+python3 tools/test_cluster.py zig-out/bin/moor-fs --wal-fuse --wal-benchmark
+python3 tools/test_e2e.py zig-out/bin/moor-fs --wal-smb --wal-benchmark
 ```
 
 测试环境自动将 FUSE 和 voter 日志中的计时附在每例 JSON 的 `stage_samples_ns`。独立脚本可用 `--trace-logs /path/to/fuse.log /path/to/node-1.log ...` 指定日志。该字段按操作保存原始纳秒数组：

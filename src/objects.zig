@@ -276,7 +276,7 @@ pub fn exportFile(io: Io, source: File, destination: []const u8, version: m.Vers
     var random: [16]u8 = undefined;
     io.random(&random);
     var buffer: [64]u8 = undefined;
-    const temporary = try std.fmt.bufPrint(&buffer, ".nas-fs-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const temporary = try std.fmt.bufPrint(&buffer, ".moor-fs-{s}", .{std.fmt.bytesToHex(random, .lower)});
     const file = try dir.createFile(io, temporary, .{ .exclusive = true });
     defer file.close(io);
     defer dir.deleteFile(io, temporary) catch {};

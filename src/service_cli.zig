@@ -1,4 +1,4 @@
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 const std = @import("std");
 const zli = @import("zli");
 

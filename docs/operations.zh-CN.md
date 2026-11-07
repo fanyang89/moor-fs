@@ -1,4 +1,4 @@
-# nas-fs 原型部署与恢复手册
+# moor-fs 原型部署与恢复手册
 
 本手册面向 Linux 上的受控试部署：三个元数据 voter、两个独立物理 NAS、一个可写 SMB 入口，其余入口只读。对应 NASFS-8；已验证的功能与尚未完成的部署验收见末尾表格。
 
@@ -18,7 +18,7 @@ command -v smbd testparm smbclient mount.cifs fusermount3
 test -r /dev/fuse && test -w /dev/fuse
 ```
 
-普通构建产物使用构建目录中 libfuse 的 RPATH，不能仅复制该二进制。可在各目标机按上面步骤构建，或使用 `python3 tools/package.py 新目录` 生成带相对库路径的运行目录包，详见 `docs/package.zh-CN.md`。使用包时将后续 BIN 设为包内 bin/nas-fs，统一接入入口使用 bin/nas-fs-access。不要部署 `-Dfault-injection=true` 构建。
+普通构建产物使用构建目录中 libfuse 的 RPATH，不能仅复制该二进制。可在各目标机按上面步骤构建，或使用 `python3 tools/package.py 新目录` 生成带相对库路径的运行目录包，详见 `docs/package.zh-CN.md`。使用包时将后续 BIN 设为包内 bin/moor-fs，统一接入入口使用 bin/moor-fs-access。不要部署 `-Dfault-injection=true` 构建。
 
 示例地址：元数据节点 `192.0.2.21`、`.22`、`.23`，Raft 端口 9001，API 端口 8001；NAS 为 `192.0.2.10` 和 `.11`，共享均为 `data`。这些是文档地址，执行前全部替换成实际地址。元数据是明文、无认证原型；部署在受控网络。SMB helper 是 guest 单用户入口，所有客户端以挂载用户身份操作，不提供账号隔离。
 
@@ -33,10 +33,10 @@ NODE_ID=1
 NODE_IP=192.0.2.21
 CLUSTER_ID=0123456789abcdef0123456789abcdef
 PEERS=1=192.0.2.21:9001,2=192.0.2.22:9001,3=192.0.2.23:9001
-mkdir -p "$HOME/nas-fs-state"
-zig-out/bin/nas-fs serve --node-id "$NODE_ID" --cluster-id "$CLUSTER_ID" \
+mkdir -p "$HOME/moor-fs-state"
+zig-out/bin/moor-fs serve --node-id "$NODE_ID" --cluster-id "$CLUSTER_ID" \
   --raft-listen "$NODE_IP:9001" --api-listen "$NODE_IP:8001" \
-  --data-dir "$HOME/nas-fs-state/node-$NODE_ID" --peers "$PEERS"
+  --data-dir "$HOME/moor-fs-state/node-$NODE_ID" --peers "$PEERS"
 ```
 
 第二、第三个节点分别改为 2/.22、3/.23。数据目录绑定节点和集群身份；不能通过改参数让旧数据目录加入另一集群。`--peers` 是引导配置，修改它不等于成员变更。
@@ -44,7 +44,7 @@ zig-out/bin/nas-fs serve --node-id "$NODE_ID" --cluster-id "$CLUSTER_ID" \
 接入机另开终端，从仓库根目录设置后续命令共用变量：
 
 ```sh
-BIN="$PWD/zig-out/bin/nas-fs"
+BIN="$PWD/zig-out/bin/moor-fs"
 EP=192.0.2.21:8001,192.0.2.22:8001,192.0.2.23:8001
 "$BIN" status 192.0.2.21:8001
 "$BIN" status 192.0.2.22:8001
@@ -56,14 +56,14 @@ EP=192.0.2.21:8001,192.0.2.22:8001,192.0.2.23:8001
 
 ## 3. 挂载 NAS、登记并初始化后端
 
-在两个 NAS 上预建共享内的专用 `nas-fs` 目录，并给接入用户读写权限。不要将已有用户目录直接当作对象库。凭据文件在接入机本地配置，权限 0600，不放入仓库或命令行参数。
+在两个 NAS 上预建共享内的专用 `moor-fs` 目录，并给接入用户读写权限。不要将已有用户目录直接当作对象库。凭据文件在接入机本地配置，权限 0600，不放入仓库或命令行参数。
 
 ```sh
 sudo -n mkdir -p /mnt/nas-a /mnt/nas-b
 sudo -n mount.cifs //192.0.2.10/data /mnt/nas-a \
-  -o "credentials=/etc/nas-fs/nas-a.credentials,vers=3.1.1,uid=$(id -u),gid=$(id -g),forceuid,forcegid,nosuid,nodev,noexec,cache=none,actimeo=0"
+  -o "credentials=/etc/moor-fs/nas-a.credentials,vers=3.1.1,uid=$(id -u),gid=$(id -g),forceuid,forcegid,nosuid,nodev,noexec,cache=none,actimeo=0"
 sudo -n mount.cifs //192.0.2.11/data /mnt/nas-b \
-  -o "credentials=/etc/nas-fs/nas-b.credentials,vers=3.1.1,uid=$(id -u),gid=$(id -g),forceuid,forcegid,nosuid,nodev,noexec,cache=none,actimeo=0"
+  -o "credentials=/etc/moor-fs/nas-b.credentials,vers=3.1.1,uid=$(id -u),gid=$(id -g),forceuid,forcegid,nosuid,nodev,noexec,cache=none,actimeo=0"
 findmnt -M /mnt/nas-a
 findmnt -M /mnt/nas-b
 ```
@@ -72,8 +72,8 @@ findmnt -M /mnt/nas-b
 
 ```json
 [
-  {"id":1,"root":"/mnt/nas-a/nas-fs","mount":{"mountpoint":"/mnt/nas-a","source":"//192.0.2.10/data","address":"192.0.2.10"}},
-  {"id":2,"root":"/mnt/nas-b/nas-fs","mount":{"mountpoint":"/mnt/nas-b","source":"//192.0.2.11/data","address":"192.0.2.11"}}
+  {"id":1,"root":"/mnt/nas-a/moor-fs","mount":{"mountpoint":"/mnt/nas-a","source":"//192.0.2.10/data","address":"192.0.2.10"}},
+  {"id":2,"root":"/mnt/nas-b/moor-fs","mount":{"mountpoint":"/mnt/nas-b","source":"//192.0.2.11/data","address":"192.0.2.11"}}
 ]
 ```
 
@@ -166,7 +166,7 @@ checkpoint协调沿用已有普通恢复规则：一份缺失或落后时，在�
 
 ### 显式回收重复控制临时文件
 
-执行 `nas-fs collect-mutable-temporaries ENDPOINTS BACKENDS_JSON INODE`。命令先走普通mutable恢复（可能回放WAL或协调checkpoint），随后在双data独占锁下要求双checkpoint匹配、双seal有效一致、双当前WAL为空、双data完整大小和SHA-256匹配基线。全部验证通过并同步两侧目录后，仅删除名称严格为checkpoint-/seal-加32位小写十六进制、且与同目录当前正式文件逐字节一致的普通文件；旧版本、损坏、未知名称、目录等保留。不修复缺失seal，不创建新基线，不回收旧WAL。
+执行 `moor-fs collect-mutable-temporaries ENDPOINTS BACKENDS_JSON INODE`。命令先走普通mutable恢复（可能回放WAL或协调checkpoint），随后在双data独占锁下要求双checkpoint匹配、双seal有效一致、双当前WAL为空、双data完整大小和SHA-256匹配基线。全部验证通过并同步两侧目录后，仅删除名称严格为checkpoint-/seal-加32位小写十六进制、且与同目录当前正式文件逐字节一致的普通文件；旧版本、损坏、未知名称、目录等保留。不修复缺失seal，不创建新基线，不回收旧WAL。
 
 返回例如 `{"inode":42,"removed":[2,2]}`，计数顺序对应mutable绑定的backends数组，只包含本次实际删除数。每侧删除完成后同步目录；若中途失败，已完成的删除不回滚，重试重新验证并继续，不能把重试计数当作跨调用累计。第一侧持久清理后的SIGKILL已覆盖：重试返回[0,2]，再次执行[0,0]，正式文件/data inode和逻辑元数据保持不变。普通open/scrub/repair不自动触发此回收。硬件断电和旧版本临时文件的回收仍未覆盖。
 
@@ -196,7 +196,7 @@ read/size 的活跃日志核对现已采用流式读取：每侧固定 64 KiB �
 
 `--wal-benchmark`现自动采集voter/FUSE的进程CPU和稳定线程上下文切换：三个5秒空闲窗口，各负载至少七次且至少1秒。独立脚本可用重复的 `--process PID` 和 `--min-seconds 1` 开启；默认独立调用保持七次采样。计数不包含Samba/内核线程，切换不等于硬件唤醒或功耗。原始计数、与旧run驱动的同环境对照及计量粒度见基准文档。
 
-当前已用raftz PR #7的事件驱动替代nas-fs自建poll循环，子模块固定 `e506a2818f610b3d3aeebb786da11378ceb391ad`，通过 `Raftor.run()` 等待请求/gRPC/停机通知，逻辑tick仍100 ms。更新源码时按仓库固定子模块提交检出，勿只更新主仓库。PR对照结果和验证范围见基准文档；普通构建默认不记录分段日志。nas-fs的 `Pending.wait()` 也已改成条件变量通知等待，不再有1 ms观察粒度：回调在互斥区内发布结果并通知，等待者检查完成状态后退出。请求超时、leader丢失和停机仍由raftz回调返回，不增加独立的提前返回路径。
+当前已用raftz PR #7的事件驱动替代moor-fs自建poll循环，子模块固定 `e506a2818f610b3d3aeebb786da11378ceb391ad`，通过 `Raftor.run()` 等待请求/gRPC/停机通知，逻辑tick仍100 ms。更新源码时按仓库固定子模块提交检出，勿只更新主仓库。PR对照结果和验证范围见基准文档；普通构建默认不记录分段日志。moor-fs的 `Pending.wait()` 也已改成条件变量通知等待，不再有1 ms观察粒度：回调在互斥区内发布结果并通知，等待者检查完成状态后退出。请求超时、leader丢失和停机仍由raftz回调返回，不增加独立的提前返回路径。
 
 诊断构建新增 `wal-verify` 七阶段计时：初始化、头部读取/认证、payload读取/拷贝、双侧payload比对、完整记录认证、窗口证据覆盖、最终EOF/数据边界核对。循环阶段累计到一次验证记录，默认构建不计时。流式read/size的payload比对现用有界8字节加载及不足8字节的尾部比较；依旧完整检查双侧内容和所有记录校验和，不缓存上次成功结果。格式、恢复和检查点全量验证流程不变。
 
@@ -230,7 +230,7 @@ python3 tools/serve_smb.py "$PWD/mountpoint" "$PWD/smb-state-01" --port 1445 --w
 在客户端验证，`smoke.txt` 应为新文件名：
 
 ```sh
-printf 'nas-fs deployment check\n' > smoke-source.txt
+printf 'moor-fs deployment check\n' > smoke-source.txt
 smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'put smoke-source.txt smoke.txt'
 smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'get smoke.txt smoke-download.txt'
 cmp smoke-source.txt smoke-download.txt

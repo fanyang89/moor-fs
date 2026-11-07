@@ -33,7 +33,7 @@ def test_samba_vfs(executable, directory, endpoints):
     config.write_text(f"""[global]
 server role = standalone server
 workgroup = WORKGROUP
-netbios name = NASFSVFS
+netbios name = MOORFSVFS
 interfaces = 127.0.0.1
 bind interfaces only = yes
 smb ports = {port}
@@ -55,8 +55,8 @@ printcap name = /dev/null
 smb2 leases = no
 [nas]
 path = /
-vfs objects = nas_fs
-nas_fs:socket = {runtime}/core.sock
+vfs objects = moor_fs
+moor_fs:socket = {runtime}/core.sock
 read only = yes
 guest ok = yes
 guest only = yes
@@ -78,7 +78,7 @@ copy = write
 sync always = yes
 [deadline]
 copy = nas
-nas_fs:timeout_ms = 500
+moor_fs:timeout_ms = 500
 """)
     processes = []
     logs = []
@@ -1046,6 +1046,6 @@ nas_fs:timeout_ms = 500
         for log in logs:
             log.close()
     process_log = (state / "process.log").read_text()
-    assert (
-        "PANIC" not in process_log and "INTERNAL ERROR" not in process_log
-    ), process_log[-12000:]
+    assert "PANIC" not in process_log and "INTERNAL ERROR" not in process_log, (
+        process_log[-12000:]
+    )

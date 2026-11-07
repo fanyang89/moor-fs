@@ -1,9 +1,13 @@
-# nas-fs
+# moor-fs
 
 A distributed SMB file-service prototype for pooling heterogeneous NAS devices.
 The design is documented in Chinese in `docs/design.zh-CN.md`.
 Deployment and recovery commands are in `docs/operations.zh-CN.md`.
 Native relocatable runtime bundles are described in `docs/package.zh-CN.md`.
+
+Formerly `nas-fs`. The CLI is now `moor-fs`, the Samba module/config namespace is
+`moor_fs`, and test-only environment variables use `MOOR_FS_`. Existing data
+directories and disk formats remain valid. See `docs/rename.zh-CN.md` for migration.
 
 ## MVP feature freeze
 
@@ -38,7 +42,7 @@ For the native FUSE build/link probe, see `third_party/README.md`.
 The experimental resident file core is available without FUSE:
 
 ```sh
-zig-out/bin/nas-fs serve-files ENDPOINTS /absolute/backends.json /absolute/new-runtime-dir 1 2
+zig-out/bin/moor-fs serve-files ENDPOINTS /absolute/backends.json /absolute/new-runtime-dir 1 2
 zig build test-file-ipc
 zig build test-file-ipc-cifs -Doptimize=safe
 ```
@@ -67,13 +71,13 @@ To build a standalone runtime directory with the matching libfuse, helpers,
 documentation, E2E scripts and SHA-256 manifest:
 
 ```sh
-python3 tools/package.py /absolute/new/nas-fs-runtime
+python3 tools/package.py /absolute/new/moor-fs-runtime
 ```
 
 The parent directory must exist. Packaging uses a native Safe build with fault
 injection disabled and a `$ORIGIN/../lib` library path. It does not install system
 services or bundle system libraries such as glibc, liburing and libnuma. Use
-`bin/nas-fs` and `bin/nas-fs-access` from the resulting directory on ABI-compatible
+`bin/moor-fs` and `bin/moor-fs-access` from the resulting directory on ABI-compatible
 Linux hosts; see the package guide for relocation checks and required OS tools.
 
 ## Implemented foundation
@@ -156,8 +160,8 @@ without resetting explicit times; older sequences and conflicting replays fail.
 
 ### Explicit receipt retirement
 
-`nas-fs receipts "$ENDPOINTS"` returns a linearizable `{epoch,count,capacity}` view.
-`nas-fs rotate-receipts "$ENDPOINTS" EXPECTED_EPOCH` atomically clears all receipts
+`moor-fs receipts "$ENDPOINTS"` returns a linearizable `{epoch,count,capacity}` view.
+`moor-fs rotate-receipts "$ENDPOINTS" EXPECTED_EPOCH` atomically clears all receipts
 and advances the epoch by one through Raft. It also works when the table is full.
 Repeating the latest rotation succeeds without deleting any newer receipts;
 older rotations and skipped epochs fail. No clock-based eviction or automatic
@@ -264,13 +268,13 @@ commits across process death, not hardware power-loss durability.
 
 ## Three-node development cluster
 
-The CLI uses pinned zli v6.0.0. Run `nas-fs --help` or `nas-fs serve --help`.
+The CLI uses pinned zli v6.0.0. Run `moor-fs --help` or `moor-fs serve --help`.
 Start each of the following in a separate terminal (replace paths as needed):
 
 ```sh
-zig-out/bin/nas-fs serve --node-id 1 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9001 --api-listen 127.0.0.1:8001 --data-dir ./node-1 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
-zig-out/bin/nas-fs serve --node-id 2 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9002 --api-listen 127.0.0.1:8002 --data-dir ./node-2 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
-zig-out/bin/nas-fs serve --node-id 3 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9003 --api-listen 127.0.0.1:8003 --data-dir ./node-3 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+zig-out/bin/moor-fs serve --node-id 1 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9001 --api-listen 127.0.0.1:8001 --data-dir ./node-1 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+zig-out/bin/moor-fs serve --node-id 2 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9002 --api-listen 127.0.0.1:8002 --data-dir ./node-2 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+zig-out/bin/moor-fs serve --node-id 3 --cluster-id 0123456789abcdef0123456789abcdef --raft-listen 127.0.0.1:9003 --api-listen 127.0.0.1:8003 --data-dir ./node-3 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
 ```
 
 Use the same nonzero 32-hex-digit cluster ID and three distinct peer IDs/IPv4
@@ -281,12 +285,12 @@ from Raft ports. Peers are the bootstrap membership; restarting reuses durable
 membership, and changing this flag does not reconfigure an existing cluster.
 
 ```sh
-zig-out/bin/nas-fs status 127.0.0.1:8001
-zig-out/bin/nas-fs status 127.0.0.1:8002
-zig-out/bin/nas-fs status 127.0.0.1:8003
+zig-out/bin/moor-fs status 127.0.0.1:8001
+zig-out/bin/moor-fs status 127.0.0.1:8002
+zig-out/bin/moor-fs status 127.0.0.1:8003
 # Use the API endpoint whose role is "leader":
-zig-out/bin/nas-fs apply 127.0.0.1:8001 '{"request_id":1,"command":{"create":{"parent":1,"name":"photos","kind":"directory"}}}'
-zig-out/bin/nas-fs get 127.0.0.1:8001 2
+zig-out/bin/moor-fs apply 127.0.0.1:8001 '{"request_id":1,"command":{"create":{"parent":1,"name":"photos","kind":"directory"}}}'
+zig-out/bin/moor-fs get 127.0.0.1:8001 2
 ```
 
 `status` is a local diagnostic, not a linearizable read. `apply` returns a JSON
@@ -305,10 +309,10 @@ The internal ten-byte Raft response is converted to JSON for clients.
 ### Directory reads and client failover
 
 ```sh
-zig-out/bin/nas-fs lookup 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 photos
-zig-out/bin/nas-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8
+zig-out/bin/moor-fs lookup 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 photos
+zig-out/bin/moor-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8
 # Continue with the returned non-null `next` value:
-zig-out/bin/nas-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8 --after photos
+zig-out/bin/moor-fs list 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 1 --limit 8 --after photos
 ```
 
 `apply`, `get`, `lookup`, and `list` accept up to three comma-separated API
@@ -343,7 +347,7 @@ Build the pinned libfuse source locally, then enable the optional adapter:
 python3 tools/deps.py build-fuse
 zig build -Dfuse=true
 mkdir -p ./mountpoint
-zig-out/bin/nas-fs mount 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 ./mountpoint
+zig-out/bin/moor-fs mount 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003 ./mountpoint
 ```
 
 `mount` runs in the foreground; use SIGINT/SIGTERM or `fusermount3 -u ./mountpoint`
@@ -357,7 +361,7 @@ Add `--backends backends.json` to enable read-only contents using the same local
 mapping as `put-file`/`get-file`:
 
 ```sh
-zig-out/bin/nas-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json
+zig-out/bin/moor-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json
 ```
 
 Each open pins the queried version and fully verifies a replica's size/SHA-256
@@ -407,9 +411,9 @@ ID. IDs and registrations are immutable; multiple shares on one NAS must use the
 same domain. Backend records do not yet contain mount paths or credentials.
 
 ```sh
-zig-out/bin/nas-fs apply "$ENDPOINTS" '{"request_id":101,"command":{"register_backend":{"id":1,"failure_domain":10}}}'
-zig-out/bin/nas-fs apply "$ENDPOINTS" '{"request_id":102,"command":{"register_backend":{"id":2,"failure_domain":20}}}'
-zig-out/bin/nas-fs backend "$ENDPOINTS" 1
+zig-out/bin/moor-fs apply "$ENDPOINTS" '{"request_id":101,"command":{"register_backend":{"id":1,"failure_domain":10}}}'
+zig-out/bin/moor-fs apply "$ENDPOINTS" '{"request_id":102,"command":{"register_backend":{"id":2,"failure_domain":20}}}'
+zig-out/bin/moor-fs backend "$ENDPOINTS" 1
 ```
 
 For an existing file inode 2, publish a version with this request shape (the hash
@@ -481,8 +485,8 @@ After registering backend IDs and configuring mappings, initialize each existing
 backend root without uploading a placeholder file:
 
 ```sh
-zig-out/bin/nas-fs init-backend "$EP" backends.json 1
-zig-out/bin/nas-fs init-backend "$EP" backends.json 2
+zig-out/bin/moor-fs init-backend "$EP" backends.json 1
+zig-out/bin/moor-fs init-backend "$EP" backends.json 2
 ```
 
 The command checks registration and mount identity, creates and syncs `import`,
@@ -497,8 +501,8 @@ are not replicated in Raft. For local development, ordinary directories work too
 
 ```json
 [
-  {"id":1,"root":"/mnt/nas-a/nas-fs","mount":{"mountpoint":"/mnt/nas-a","source":"//192.0.2.10/data","address":"192.0.2.10"}},
-  {"id":2,"root":"/mnt/nas-b/nas-fs","mount":{"mountpoint":"/mnt/nas-b","source":"//192.0.2.11/data","address":"192.0.2.11"}}
+  {"id":1,"root":"/mnt/nas-a/moor-fs","mount":{"mountpoint":"/mnt/nas-a","source":"//192.0.2.10/data","address":"192.0.2.10"}},
+  {"id":2,"root":"/mnt/nas-b/moor-fs","mount":{"mountpoint":"/mnt/nas-b","source":"//192.0.2.11/data","address":"192.0.2.11"}}
 ]
 ```
 
@@ -530,9 +534,9 @@ validation is not NAS authentication or a distributed fencing protocol.
 Create the file inode and register backends first, then upload a stable source:
 
 ```sh
-zig-out/bin/nas-fs put-file "$ENDPOINTS" backends.json \
+zig-out/bin/moor-fs put-file "$ENDPOINTS" backends.json \
   '{"request_id":104,"inode":2,"version_id":11,"expected_version":0,"backends":[1,2]}' ./photo.jpg
-zig-out/bin/nas-fs get-file "$ENDPOINTS" backends.json 2 ./download.jpg
+zig-out/bin/moor-fs get-file "$ENDPOINTS" backends.json 2 ./download.jpg
 ```
 
 Adjust `expected_version` to the inode's actual current version. Use `[1,0]` for
@@ -565,7 +569,7 @@ rerun to select a replica again. Partial exports are cleaned up on normal errors
 Check every declared replica of a file's current version:
 
 ```sh
-zig-out/bin/nas-fs check-file "$ENDPOINTS" backends.json 2
+zig-out/bin/moor-fs check-file "$ENDPOINTS" backends.json 2
 ```
 
 The JSON report contains `inode`, pinned `version`, `size`, `healthy_replicas`,
@@ -588,7 +592,7 @@ Full-file hashing is synchronous and has no NAS I/O deadline.
 Restore a missing object on an already-declared backend:
 
 ```sh
-zig-out/bin/nas-fs repair-file "$ENDPOINTS" backends.json 2 1
+zig-out/bin/moor-fs repair-file "$ENDPOINTS" backends.json 2 1
 ```
 
 The last arguments are the inode and destination backend ID. The command pins
@@ -614,8 +618,8 @@ garbage collection remain pending.
 To explicitly restore a checksum-invalid object on the selected backend:
 
 ```sh
-zig-out/bin/nas-fs repair-file "$ENDPOINTS" backends.json 2 1 --replace-corrupt
-zig-out/bin/nas-fs check-file "$ENDPOINTS" backends.json 2
+zig-out/bin/moor-fs repair-file "$ENDPOINTS" backends.json 2 1 --replace-corrupt
+zig-out/bin/moor-fs check-file "$ENDPOINTS" backends.json 2
 ```
 
 `--replace-corrupt` enables atomic replacement after the source and staged copy
@@ -646,7 +650,7 @@ kills it before replacement, after replacement, or after directory sync. It
 verifies retry, orphan staging behavior and unchanged metadata. It also pauses
 repair while publishing a newer version, deleting/reusing the inode's name, or
 installing a concurrent healthy replacement. Normal builds compile out these
-checkpoints and ignore `NAS_FS_REPAIR_STOP`. Only test builds interpret its values
+checkpoints and ignore `MOOR_FS_REPAIR_STOP`. Only test builds interpret its values
 `before_replace`, `after_replace`, and `after_sync`; do not deploy an instrumented
 binary. The fault tests simulate process death, not NAS hardware power failure.
 
@@ -667,7 +671,7 @@ An additional case kills `smbclient` after the first replica and resumes the acc
 process: the in-flight write still commits two healthy replicas without a client
 acknowledgement. Disconnect does not cancel or roll back an accepted write;
 reopen and inspect the committed state before deciding whether to retry.
-Only instrumented builds honor `NAS_FS_WRITE_STOP` values `first_stage_write`,
+Only instrumented builds honor `MOOR_FS_WRITE_STOP` values `first_stage_write`,
 `first_replica`, `both_replicas`, and `published`, for nonempty writes/publications. Normal builds
 omit these checkpoints. This coverage uses Linux clients; Windows/macOS client
 acceptance and distributed SMB locking remain outstanding.
@@ -706,7 +710,7 @@ two staging writes, or after both staging writes were acknowledged but before
 fsync. Neither changes installed objects or committed metadata; restart reads the
 previous version. Ordinary `WRITE_ACK` is distinct from durable `COMMIT_ACK`.
 
-Only instrumented metadata servers read `NAS_FS_PUBLISH_STOP_DIR`: an inode-named
+Only instrumented metadata servers read `MOOR_FS_PUBLISH_STOP_DIR`: an inode-named
 marker in this directory arms the next successful nonempty publication's reply
 checkpoint. The server consumes the marker before stopping so replay on another
 voter does not stop again. Normal builds omit this selector and checkpoint.
@@ -763,7 +767,7 @@ root check renames a directory; it does not simulate an unreachable NAS or test 
 timeouts. Server-side symlink injection checks that substituted objects cannot be read.
 
 Successful runs stop processes, unmount shares and remove their workspace; failures
-retain Samba logs and backend objects under `${TMPDIR:-/tmp/opencode}/nas-fs-e2e-*`.
+retain Samba logs and backend objects under `${TMPDIR:-/tmp/opencode}/moor-fs-e2e-*`.
 Verified with Samba 4.24.7 and Linux CIFS. This covers the backend SMB transport,
 not a client-facing unified SMB export or physical NAS power-loss durability.
 With `-Dfuse=true`, the suite also runs two real FUSE mounts over these CIFS-backed
@@ -781,8 +785,8 @@ python3 tools/serve_access.py "$EP" "$PWD/mountpoint" "$PWD/access-state-01" \
 ```
 
 The default is read-only. Add `--write-backends 1,2` to enable both writable FUSE
-and writable SMB; use only one writable entrance. `--executable` selects a nas-fs
-binary (default `zig-out/bin/nas-fs`), and `--listen` selects the local IPv4 address
+and writable SMB; use only one writable entrance. `--executable` selects a moor-fs
+binary (default `zig-out/bin/moor-fs`), and `--listen` selects the local IPv4 address
 (default loopback). The mountpoint must be an existing empty directory. The helper
 locks its underlying directory and refuses mounted/busy paths. The state directory
 must be new and outside the mountpoint; use a short path with an existing parent.
@@ -813,7 +817,7 @@ smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'get photo.jpg download.jpg'
 ```
 
 `smb-state` must be a new directory; its parent must exist. The helper checks for
-a nas-fs FUSE mount owned by the invoking user, validates the generated config with
+a moor-fs FUSE mount owned by the invoking user, validates the generated config with
 `testparm`, and runs `smbd` in the foreground. SIGINT/SIGTERM stops its process group;
 configuration, state and logs remain in `smb-state`. Stop Samba before unmounting
 FUSE. No `allow_other` or system Samba changes are needed because Samba runs as the
@@ -855,7 +859,7 @@ IDs must already be registered in distinct failure domains, mapped locally, and
 have existing `staging/` and `objects/` directories (initialize with `init-backend`).
 
 ```sh
-zig-out/bin/nas-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json --write-backends 1,2
+zig-out/bin/moor-fs mount "$ENDPOINTS" ./mountpoint --backends backends.json --write-backends 1,2
 python3 tools/serve_smb.py ./mountpoint ./smb-write-state --port 1445 --writable
 smbclient //127.0.0.1/nas -p 1445 -N -U guest -c 'mkdir photos; put photo.jpg photos/photo.jpg'
 ```
@@ -961,7 +965,7 @@ zig build test-wal-smb -Dfuse=true -Doptimize=safe # real dual CIFS + SMB; sudo
 
 WAL reads compare both replicas and fail/freeze the shared session on divergent
 bytes or lengths. For an existing mutable file with no active access handles,
-run `nas-fs scrub-mutable ENDPOINTS CONFIG INODE` to recover it and compare its
+run `moor-fs scrub-mutable ENDPOINTS CONFIG INODE` to recover it and compare its
 entire contents using bounded buffers. JSON reports `replicas_equal`, size,
 generation, sequence and the observed SHA-256. This is replica agreement, not
 verification against a trusted content digest; identical corruption remains
@@ -1039,7 +1043,7 @@ process-death tests do not simulate loss of volatile filesystem state on power l
 After recovery, explicitly reclaim exact duplicate control temporaries with:
 
 ```sh
-zig-out/bin/nas-fs collect-mutable-temporaries ENDPOINTS BACKENDS_JSON INODE
+zig-out/bin/moor-fs collect-mutable-temporaries ENDPOINTS BACKENDS_JSON INODE
 ```
 
 This uses normal mutable recovery first, then requires matching checkpoints,

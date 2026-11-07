@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     const ipc_bridge = b.addLibrary(.{
-        .name = "nas-ipc",
+        .name = "moor-ipc",
         .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ipc_bridge.zig"),
@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .files = &.{ "mdb.c", "midl.c" },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
-    const mod = b.addModule("nas_fs", .{
+    const mod = b.addModule("moor_fs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -62,13 +62,13 @@ pub fn build(b: *std.Build) void {
     const build_options = options.createModule();
     mod.addImport("build_options", build_options);
     const exe = b.addExecutable(.{
-        .name = "nas-fs",
+        .name = "moor-fs",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "nas_fs", .module = mod },
+                .{ .name = "moor_fs", .module = mod },
                 .{ .name = "zli", .module = zli.module("zli") },
             },
         }),
@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
     }
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
-    b.step("run", "Run nas-fs CLI").dependOn(&run.step);
+    b.step("run", "Run moor-fs CLI").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = mod });
     b.step("test", "Test metadata and Raft state-machine integration").dependOn(&b.addRunArtifact(tests).step);
     const file_store_test = b.addExecutable(.{
@@ -125,7 +125,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/file_store_e2e.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "nas_fs", .module = mod }},
+            .imports = &.{.{ .name = "moor_fs", .module = mod }},
         }),
     });
     const wal_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });
@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/mutable_access_e2e.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "nas_fs", .module = mod }},
+            .imports = &.{.{ .name = "moor_fs", .module = mod }},
         }),
     });
     const mutable_test = b.addSystemCommand(&.{ "python3", "tools/test_e2e.py" });

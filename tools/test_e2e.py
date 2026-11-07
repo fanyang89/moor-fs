@@ -192,9 +192,9 @@ follow symlinks = no
             str(REPO / "tools/test_cluster.py"),
             args.executable,
             "--backend-roots",
-            *(str(s["mount"] / "nas-fs") for s in servers),
+            *(str(s["mount"] / "moor-fs") for s in servers),
             "--backend-server-roots",
-            *(str(s["export"] / "nas-fs") for s in servers),
+            *(str(s["export"] / "moor-fs") for s in servers),
             "--smb-ports",
             *(str(s["port"]) for s in servers),
         ]
@@ -257,7 +257,7 @@ follow symlinks = no
             mount(server)
             if args.file_store:
                 continue
-            paths = list((server["mount"] / "nas-fs/objects").iterdir())
+            paths = list((server["mount"] / "moor-fs/objects").iterdir())
             assert len(paths) >= 3, paths
             for path in paths:
                 assert (
@@ -265,7 +265,7 @@ follow symlinks = no
                     == path.name.split("-", 1)[1]
                 )
             if args.mutable_access:
-                leaves = list((server["mount"] / "nas-fs/mutable").iterdir())
+                leaves = list((server["mount"] / "moor-fs/mutable").iterdir())
                 assert len(leaves) == 1, leaves
                 assert (leaves[0] / "data").read_bytes() == b"baseXYne"
                 assert len(list(leaves[0].glob("wal-*"))) == 1
@@ -310,7 +310,7 @@ follow symlinks = no
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("executable", nargs="?", default="zig-out/bin/nas-fs")
+    parser.add_argument("executable", nargs="?", default="zig-out/bin/moor-fs")
     parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--smb", action="store_true")
     parser.add_argument("--repair-faults", action="store_true")
@@ -354,7 +354,7 @@ def main():
     run("sudo", "-n", "unshare", "--mount", "--propagation", "private", "true")
     base = Path(os.environ.get("TMPDIR", "/tmp/opencode"))
     base.mkdir(parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix="nas-fs-e2e-", dir=base)).resolve()
+    directory = Path(tempfile.mkdtemp(prefix="moor-fs-e2e-", dir=base)).resolve()
     command = [
         "sudo",
         "-n",

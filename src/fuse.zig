@@ -1,5 +1,5 @@
 const std = @import("std");
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 const m = nas.metadata;
 const objects = nas.objects;
 const allocator = std.heap.smp_allocator;

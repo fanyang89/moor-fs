@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="nas-ipc-abi-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="moor-ipc-abi-") as temporary:
         directory = Path(temporary)
         shared = directory / "bridge.so"
         subprocess.run(

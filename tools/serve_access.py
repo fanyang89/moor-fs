@@ -65,7 +65,7 @@ def serve(args):
             )
         try:
             deadline = time.monotonic() + 30
-            while mount_record(mountpoint) != ["fuse", "nas-fs"]:
+            while mount_record(mountpoint) != ["fuse", "moor-fs"]:
                 if fuse.poll() is not None:
                     raise RuntimeError(f"FUSE exited ({fuse.returncode}); see {log}")
                 if time.monotonic() >= deadline:
@@ -104,7 +104,7 @@ def serve(args):
         finally:
             # export() has already stopped Samba, including its worker process group.
             try:
-                if mount_record(mountpoint) == ["fuse", "nas-fs"]:
+                if mount_record(mountpoint) == ["fuse", "moor-fs"]:
                     subprocess.run(
                         ["fusermount3", "-u", str(mountpoint)], check=True, timeout=15
                     )
@@ -129,7 +129,7 @@ def main():
         type=Path,
         help="new directory for this run's logs and Samba state",
     )
-    parser.add_argument("--executable", type=Path, default=Path("zig-out/bin/nas-fs"))
+    parser.add_argument("--executable", type=Path, default=Path("zig-out/bin/moor-fs"))
     parser.add_argument("--backends", type=Path, required=True)
     parser.add_argument(
         "--write-backends", help="opt in to writes using two backend IDs, e.g. 1,2"

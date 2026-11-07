@@ -10,9 +10,9 @@ import tempfile
 
 def main():
     executable = str(
-        Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/nas-fs").resolve()
+        Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/moor-fs").resolve()
     )
-    with tempfile.TemporaryDirectory(prefix="nas-fs-lmdb-") as directory:
+    with tempfile.TemporaryDirectory(prefix="moor-fs-lmdb-") as directory:
 
         def snapshot():
             return json.loads(

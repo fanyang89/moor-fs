@@ -1,5 +1,5 @@
 const std = @import("std");
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 const zli = @import("zli");
 const m = nas.metadata;
 const objects = nas.objects;

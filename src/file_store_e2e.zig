@@ -1,6 +1,6 @@
 //! Test-only driver for real CIFS persistence and process-death acceptance.
 const std = @import("std");
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 extern "c" fn raise(signal: c_int) c_int;
 
 pub fn main(init: std.process.Init) !void {

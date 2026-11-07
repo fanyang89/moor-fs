@@ -4,7 +4,7 @@
 
 ```sh
 zig build -Doptimize=safe
-zig-out/bin/nas-fs serve-files \
+zig-out/bin/moor-fs serve-files \
   127.0.0.1:7101,127.0.0.1:7102,127.0.0.1:7103 \
   /absolute/backends.json /absolute/private-parent/core-runtime 1 2
 ```
@@ -81,7 +81,7 @@ read通过双副本比较、WAL覆盖校验和挂载验证且实际返回非零�
 
 IPC新增`receipt_state:{}`，返回result.receipts={epoch,count,capacity}，经ReadIndex与单次LMDB读事务获取。change和create_open新增可选receipt_epoch，缺省0；与request_id一起固定请求身份，所有重试必须携带原代际。核心原样转交Raft，不刷新代际。代际不匹配返回result.change.receipt_epoch_conflict（21），不会执行命名空间修改或新增回执；C桥接映射ESTALE。
 
-管理员可用`nas-fs receipts ENDPOINTS`查询，再用`nas-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`回收。内部Raft命令为request_id=0、receipt_epoch=0、rotate_receipts:{expected_epoch}；匹配当前代际才在同一事务清空回执并加一，满表也可执行。最新回收精确重试无操作成功，不清除后来新回执；更老/未来代际拒绝，u64最大值不回绕。快照、重启保留代际，恢复不得倒退代际。历史请求/快照/LMDB缺省为0，epoch=0请求保持原序列化摘要。
+管理员可用`moor-fs receipts ENDPOINTS`查询，再用`moor-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`回收。内部Raft命令为request_id=0、receipt_epoch=0、rotate_receipts:{expected_epoch}；匹配当前代际才在同一事务清空回执并加一，满表也可执行。最新回收精确重试无操作成功，不清除后来新回执；更老/未来代际拒绝，u64最大值不回绕。快照、重启保留代际，恢复不得倒退代际。历史请求/快照/LMDB缺省为0，epoch=0请求保持原序列化摘要。
 
 回收是明确结束旧代际的结果保留期，不表示其中的请求未执行；旧请求可能已经成功但丢失响应。不能把未知结果的旧请求改写成新代际后盲目重试。需要协调客户停止新的命名空间修改、处理未知结果并更换连接；本轮没有自动轮换、客户端排空或续期协议。数据读写/截断、attach、checkpoint及自动时间采用inode内去重，必须使用request_id/receipt_epoch=0，回收不影响这些操作或已有数据句柄。
 
@@ -111,7 +111,7 @@ create_open.request_id只标识guarded create元数据命令，不是句柄去�
 
 创建与后端打开仍非跨存储原子事务：创建提交后发生后端、分配或通信错误可能留下条目，不回滚；丢失成功响应也不能推断失败。桥接不自动重试。服务断线清理连接句柄，重试须使用新的连接句柄并明确处理元数据回执和当前路径状态。
 
-C桥接默认连接/单请求总时限30秒，VFS通过 `nas_fs:timeout_ms` 配置1–600000 ms；原 `nas_ipc_connect` 保持ABI并采用默认值，新增 `nas_ipc_connect_timeout` 显式设置。非阻塞传输以同一个单调时钟截止点覆盖整轮请求/响应，不按碎片刷新。首次超时ETIMEDOUT并毒化，后续调用EIO，不重连或重放。该机制仅限制桥接等待，不新增服务端超时字段，不取消核心请求，也不保证后端操作和锁已停止；其他直接IPC客户端仍自行管理等待策略。
+C桥接默认连接/单请求总时限30秒，VFS通过 `moor_fs:timeout_ms` 配置1–600000 ms；原 `nas_ipc_connect` 保持ABI并采用默认值，新增 `nas_ipc_connect_timeout` 显式设置。非阻塞传输以同一个单调时钟截止点覆盖整轮请求/响应，不按碎片刷新。首次超时ETIMEDOUT并毒化，后续调用EIO，不重连或重放。该机制仅限制桥接等待，不新增服务端超时字段，不取消核心请求，也不保证后端操作和锁已停止；其他直接IPC客户端仍自行管理等待策略。
 
 checked与path_guarded均采用新增命令，不改变旧命令的JSON和回执摘要；entry_conflict（20）由C ABI映射ESTALE，VFS不自动重试。需要所有Raft节点及核心/桥接升级后使用，不支持新旧二进制混合运行。所有本机修改和open/close串行，但其他服务实例不共享活跃句柄保护；仍不能视为完整POSIX/Windows路径与跨节点锁语义。
 

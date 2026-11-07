@@ -326,7 +326,7 @@ static void rename_cb(fuse_req_t req, fuse_ino_t parent, const char *name, fuse_
 }
 
 int nas_fuse_run(const char *path, const struct api *api) {
-    char *argv[] = { "nas-fs", "-o", api->writable ? "default_permissions,fsname=nas-fs" : "ro,default_permissions,fsname=nas-fs" };
+    char *argv[] = { "moor-fs", "-o", api->writable ? "default_permissions,fsname=moor-fs" : "ro,default_permissions,fsname=moor-fs" };
     struct fuse_args args = FUSE_ARGS_INIT(3, argv);
     struct state state = { .api = api };
     const struct fuse_lowlevel_ops ops = {

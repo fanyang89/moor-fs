@@ -1,5 +1,5 @@
 const std = @import("std");
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 const zli = @import("zli");
 
 var stopping = std.atomic.Value(bool).init(false);
@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     var input_buffer: [1024]u8 = undefined;
     var input = std.Io.File.Reader.init(.stdin(), init.io, &input_buffer);
     const options: zli.InitOptions = .{ .allocator = init.gpa, .io = init.io, .writer = &output.interface, .reader = &input.interface };
-    const root = try zli.Command.init(options, .{ .name = "nas-fs", .description = "Distributed NAS metadata service", .version = .{ .major = 0, .minor = 1, .patch = 0 } }, help);
+    const root = try zli.Command.init(options, .{ .name = "moor-fs", .description = "Distributed NAS metadata service", .version = .{ .major = 0, .minor = 1, .patch = 0 } }, help);
     defer root.deinit();
     try register(root, options, "version", "Show version", &.{}, version);
     try register(root, options, "serve-files", "Run the local shared WAL file service", &.{ "endpoint", "config", "runtime-directory", "first-backend", "second-backend" }, @import("service_cli.zig").serve);

@@ -20,6 +20,7 @@ pub const Environment = struct {
 
     pub fn open(path: [:0]const u8, map_size: usize) !Environment {
         if (map_size < 64 * 1024) return error.InvalidMapSize;
+        // Keep the legacy name so old and renamed binaries share ownership locks.
         const lock_path = try std.fmt.allocPrintSentinel(std.heap.page_allocator, "{s}/nas-fs.lock", .{path}, 0);
         defer std.heap.page_allocator.free(lock_path);
         const fd = c.open(lock_path.ptr, c.O_CREAT | c.O_RDWR | c.O_CLOEXEC, @as(c_uint, 0o600));

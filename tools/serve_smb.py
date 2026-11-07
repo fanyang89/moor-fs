@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a nas-fs FUSE mount as a single-user SMB3 share (read-only by default)."""
+"""Export a moor-fs FUSE mount as a single-user SMB3 share (read-only by default)."""
 
 import argparse
 from contextlib import contextmanager
@@ -31,13 +31,13 @@ def export(mountpoint, directory, port=0, listen="127.0.0.1", writable=False):
         fields, filesystem = line.split(" - ", 1)
         if fields.split()[4] == encoded and filesystem.split()[:2] == [
             "fuse",
-            "nas-fs",
+            "moor-fs",
         ]:
             mounted = True
             if writable and "rw" not in fields.split()[5].split(","):
-                raise ValueError("writable export requires a writable nas-fs mount")
+                raise ValueError("writable export requires a writable moor-fs mount")
     if not mounted or mountpoint.stat().st_uid != os.getuid():
-        raise ValueError("run as the owner of an existing nas-fs FUSE mount")
+        raise ValueError("run as the owner of an existing moor-fs FUSE mount")
     if not 0 <= port <= 65535:
         raise ValueError("invalid TCP port")
     directory.mkdir(mode=0o700)
@@ -51,7 +51,7 @@ def export(mountpoint, directory, port=0, listen="127.0.0.1", writable=False):
     config.write_text(f"""[global]
 server role = standalone server
 workgroup = WORKGROUP
-netbios name = NASFS
+netbios name = MOORFS
 interfaces = {listen}
 bind interfaces only = yes
 smb ports = {port}
@@ -156,7 +156,7 @@ def main():
     parser.add_argument(
         "--writable",
         action="store_true",
-        help="enable file operations on a writable nas-fs mount",
+        help="enable file operations on a writable moor-fs mount",
     )
     args = parser.parse_args()
 

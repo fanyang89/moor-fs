@@ -35,9 +35,9 @@ def test_write_faults(
         path.mkdir()
         log = directory / f"fault-mount-{label}.log"
         environment = dict(os.environ)
-        environment.pop("NAS_FS_WRITE_STOP", None)
+        environment.pop("MOOR_FS_WRITE_STOP", None)
         if point:
-            environment["NAS_FS_WRITE_STOP"] = point
+            environment["MOOR_FS_WRITE_STOP"] = point
         with log.open("w") as output:
             process = subprocess.Popen(
                 [

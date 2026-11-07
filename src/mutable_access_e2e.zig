@@ -1,6 +1,6 @@
 //! Test-only end-to-end driver: guarded NAS access plus live Raft metadata.
 const std = @import("std");
-const nas = @import("nas_fs");
+const nas = @import("moor_fs");
 extern "c" fn raise(signal: c_int) c_int;
 
 pub fn main(init: std.process.Init) !void {

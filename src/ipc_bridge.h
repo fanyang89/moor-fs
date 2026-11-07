@@ -1,6 +1,6 @@
 /* Local synchronous IPC ABI for the Samba adapter. Return values are errno codes. */
-#ifndef NAS_FS_IPC_BRIDGE_H
-#define NAS_FS_IPC_BRIDGE_H
+#ifndef MOOR_FS_IPC_BRIDGE_H
+#define MOOR_FS_IPC_BRIDGE_H
 #include <stdint.h>
 #include <stddef.h>
 struct nas_ipc;

@@ -3,7 +3,7 @@
 已验证链路：
 
 ```text
-SMB3 smbclient → Samba 4.25.1 nas_fs VFS
+SMB3 smbclient → Samba 4.25.1 moor_fs VFS
                        → 本机 Unix IPC → Zig常驻核心
                        → 双副本WAL/验证 → Linux CIFS → NAS
 ```
@@ -20,7 +20,7 @@ zig build -Doptimize=safe
 
 需要现有C/C++工具链、Zig 0.17.0及Samba configure报告的开发依赖。Fedora环境本轮确认 `perl-Parse-Yapp` 可用；脚本不会自动安装软件。所有源码gitlink和工作区先经deps.check验证。
 
-脚本构建固定源码的smbd及audit模块，使用Samba生成的compile_commands.json中vfs_default编译参数生成 `zig-out/lib/nas_fs.so`，静态链接Zig `libnas-ipc.a`（包含compiler runtime）。通过源码构建树中的 `bin/modules/vfs/nas_fs.so` 链接注册，不安装到系统，不替换系统Samba服务。
+脚本构建固定源码的smbd及audit模块，使用Samba生成的compile_commands.json中vfs_default编译参数生成 `zig-out/lib/moor_fs.so`，静态链接Zig `libmoor-ipc.a`（包含compiler runtime）。通过源码构建树中的 `bin/modules/vfs/moor_fs.so` 链接注册，不安装到系统，不替换系统Samba服务。
 
 只使用配套的 `third_party/samba/bin/smbd`。不能因为发行版Samba版本号相同就假定模块ABI兼容。Samba的PIDL与public-header规则依赖标准 `third_party/samba/bin` 布局，脚本使用该被git忽略的生成目录，不修改子模块源码；自定义树外out目录在本环境遇到头文件路径错误，未采用源码补丁绕过。
 
@@ -28,7 +28,7 @@ zig build -Doptimize=safe
 
 ## 运行约束
 
-先按 `file-ipc.zh-CN.md` 启动 `nas-fs serve-files`。实验共享关键配置：
+先按 `file-ipc.zh-CN.md` 启动 `moor-fs serve-files`。实验共享关键配置：
 
 ```ini
 [global]
@@ -37,9 +37,9 @@ smb2 leases = no
 
 [nas]
 path = /
-vfs objects = nas_fs
-nas_fs:socket = /absolute/core-runtime/core.sock
-nas_fs:timeout_ms = 30000
+vfs objects = moor_fs
+moor_fs:socket = /absolute/core-runtime/core.sock
+moor_fs:timeout_ms = 30000
 read only = yes
 follow symlinks = no
 oplocks = no
@@ -61,7 +61,7 @@ nt acl support = no
 
 IPC桥接同步等待，单次数据帧64KiB，较大的SMB读写拆分调用。pread/pwrite/fsync的send回调目前在当前线程完成后投递tevent结果，并非后台异步I/O；不宣称具备高并发生产性能。transport/协议失败关闭并毒化连接，不自动重连或重放旧句柄。
 
-`nas_fs:timeout_ms` 指定每次连接或IPC请求的总时限，默认30000 ms，允许1–600000 ms；非法配置拒绝连接。桥接使用非阻塞Unix socket、CLOCK_MONOTONIC绝对截止点与poll，发送帧头/正文、接收帧头/正文共用同一个请求截止点；部分传输、EINTR或持续零碎响应不会重置计时。Unix连接队列已满时可能立即EAGAIN。首次超时返回ETIMEDOUT并关闭/毒化连接，之后调用立即EIO；已有句柄不能在新连接复用。每个分段IPC独立计时，不是整个SMB请求的统一上限，也不限制进程调度或其他Samba逻辑耗时。
+`moor_fs:timeout_ms` 指定每次连接或IPC请求的总时限，默认30000 ms，允许1–600000 ms；非法配置拒绝连接。桥接使用非阻塞Unix socket、CLOCK_MONOTONIC绝对截止点与poll，发送帧头/正文、接收帧头/正文共用同一个请求截止点；部分传输、EINTR或持续零碎响应不会重置计时。Unix连接队列已满时可能立即EAGAIN。首次超时返回ETIMEDOUT并关闭/毒化连接，之后调用EIO；已有句柄不能在新连接复用。每个分段IPC独立计时，不是整个SMB请求的统一上限，也不限制进程调度或其他Samba逻辑耗时。
 
 超时不取消核心已经收到的请求、不回滚已持久化数据。核心或后端仍可能执行，直到恢复/完成后才处理断线及释放句柄；前端返回超时不表示NAS锁已经释放。SMB错误取决于触发位置：测试暂停核心时，Samba首先在共享根检查遇到超时，并映射为ACCESS_DENIED，而不是直接向客户端透传IO_TIMEOUT。调大时限前应结合实际后端/WAL耗时判断。
 
@@ -151,7 +151,7 @@ leader使用独立namespace_time日志注记，创建时与creation_time共用�
 
 ### 单个data文件缺失的显式重建
 
-普通SMB打开/下载在data缺失时仍失败，不自动创建。关闭相关句柄后可执行`nas-fs repair-mutable ENDPOINTS CONFIG INODE`：只接受一个data缺失、两侧代次目录存在、checkpoint一致、两份seal有效一致、当前两份WAL完整且为空的状态。先锁定并完整校验幸存副本，再exclusive创建并锁定目标，同步空文件和目录项后复制、同步、读回校验。已有目标按原路径原地修复，不替换inode。
+普通SMB打开/下载在data缺失时仍失败，不自动创建。关闭相关句柄后可执行`moor-fs repair-mutable ENDPOINTS CONFIG INODE`：只接受一个data缺失、两侧代次目录存在、checkpoint一致、两份seal有效一致、当前两份WAL完整且为空的状态。先锁定并完整校验幸存副本，再exclusive创建并锁定目标，同步空文件和目录项后复制、同步、读回校验。已有目标按原路径原地修复，不替换inode。
 
 中断后保留新建的空/部分目标及原证据，重试按已有损坏目标原地完成。源内容/inode及逻辑元数据不变；后续正常读取才更新atime。没有可信源、两个data都缺失、控制文件缺失或后端离线时不创建目标。源仍被活跃会话锁定时拒绝重建，不能通过新建目标inode绕过持有者。
 
@@ -159,7 +159,7 @@ Debug/Safe各138项、本地/双CIFS原生SMB及完整WAL故障套件通过。SM
 
 ### 回执代际回收
 
-命名空间和显式时间请求增加receipt_epoch；桥接首次提交这类修改前查询核心receipt_state并固定代际，普通重试不刷新。管理员通过`nas-fs receipts ENDPOINTS`检查容量，再显式执行`nas-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`。Raft将代际加一与清空回执原子提交，旧连接后续命名空间修改返回ESTALE；新连接取得新代际。仍允许已有数据句柄读写/同步，因为这些内部操作采用inode内去重。
+命名空间和显式时间请求增加receipt_epoch；桥接首次提交这类修改前查询核心receipt_state并固定代际，普通重试不刷新。管理员通过`moor-fs receipts ENDPOINTS`检查容量，再显式执行`moor-fs rotate-receipts ENDPOINTS EXPECTED_EPOCH`。Raft将代际加一与清空回执原子提交，旧连接后续命名空间修改返回ESTALE；新连接取得新代际。仍允许已有数据句柄读写/同步，因为这些内部操作采用inode内去重。
 
 回收后旧请求被拒绝，而不是重新执行；即使旧文件已删除、发生leader切换或全群重启，也不会重建旧名称。最新回收重试不会删除新回执。每代际仍最多8192条，不自动回收，没有客户排空协议；需要协调客户与管理员操作。不能为结果未知的旧请求更换代际后重发，旧请求可能已提交。C ABI未变，核心、桥接及全部Raft节点需要统一升级；首次修改多一个独立限时查询。FUSE挂载固定代际，回收后需重新挂载才能继续命名空间修改。
 

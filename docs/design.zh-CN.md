@@ -1,4 +1,6 @@
-# nas-fs 分布式文件服务设计
+# moor-fs 分布式文件服务设计
+
+项目原名nas-fs，现更名为moor-fs。下文保留历史设计记录中的旧名称及日志路径；当前名称和迁移方式见 `rename.zh-CN.md`，操作示例以README和运维文档为准。功能冻结继续有效。
 
 状态：已实现可运行原型，仍有生产化与多机验收边界。本文记录产品约定和历次实现；当前实现为第 38 节的后端双 staging 写会话。第 39 节记录已确认、尚未实现的 WAL 原地更新方向，取代目标设计中的不可变版本与旧读句柄保证。
 
@@ -1240,3 +1242,11 @@ Debug/Safe各145项通过。新增单元测试在双侧都只剩有效且匹配�
 仅处理普通文件，名称必须是checkpoint-或seal-后接恰好32位小写十六进制。使用不跟随symlink的打开方式，长度和内容均须与同目录当前正式记录逐字节一致，才删除并计数；旧版本、损坏、未知命名、目录等原样保留。每侧清理后同步目录。命令返回inode与按绑定副本顺序排列的removed数组，计数仅覆盖本次删除；部分成功后的重试重新验证并继续，不宣称事务性回滚或跨调用累计。普通打开、修复、scrub和已有WAL回收均不隐式调用此功能。
 
 Debug/Safe各147项通过：精确重复副本清理、重复执行零删除、旧checkpoint/损坏seal/内容相同但非规范名称及大写后缀/目录保留、正式checkpoint inode和数据保持及后续写入正常；双方向缺seal/checkpoint、数据损坏或pending WAL时保留所有候选并冻结会话。真实双CIFS完整WAL故障套件复用rename前死亡留下的两侧各两份临时文件，第一侧删除并同步后在mutable_temporaries_first_collected暂停，确认第二侧候选尚在、竞争清理被锁拒绝；SIGKILL后重试仅删除第二侧[0,2]，再执行[0,0]，全部正式控制字节/inode、双data及逻辑元数据不变。日志前缀/tmp/opencode/nas-control-collect-。本轮不清理不同内容的历史临时记录，不提供版本/整目录GC或离线NAS恢复。
+
+## 89. 用户授权更名为moor-fs
+
+在功能冻结期间按用户明确要求更名：项目/CLI使用moor-fs，Zig包和Samba模块使用moor_fs，运行目录入口为moor-fs-access，桥接库为libmoor-ipc.a，VFS源文件为vfs_moor_fs.c。Samba配置前缀、FUSE来源、测试MOOR_FS_*变量、构建脚本、测试及当前部署文档同步。Zig包fingerprint按编译器对新包名的校验要求更新，固定依赖未变。
+
+磁盘magic与数据格式、Raft/IPC协议及C ABI不变；保留nas-fs.lock以维持新旧进程对同一元数据目录的互斥。已有元数据/后端root和凭据目录无需移动，历史设计与基准中的名称、日志和提交引用保留。Kaneo项目显示名更为moor-fs，原NASFS编号保留以维持引用。迁移步骤见rename.zh-CN.md。功能冻结继续有效，此次不扩展功能或恢复边界。
+
+Debug/Safe各147项、重建后的原生Samba双CIFS回归、完整WAL FUSE/SMB故障回归通过；运行目录打包及迁移目录后的CLI/helper帮助检查和包外SMB E2E通过。日志前缀/tmp/opencode/moor-rename-。仓库内容已改名，本地检出目录和远端仓库地址未变。
