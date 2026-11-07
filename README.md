@@ -115,8 +115,9 @@ Each nonempty mutable WAL write and each truncate also commits mtime/ctime throu
 Raft before returning success. Automatic times use one generation/sequence/time
 watermark per inode, not retained receipts; each 64 KiB native-VFS segment still
 adds metadata latency. Core checkpoints also deduplicate by their current target
-sequence and size without receipts. Namespace changes, initial attachment and
-explicit times still consume receipts, so their capacity limit remains. Failed calls may have durable
+sequence and size without receipts. Initial attachment retains one intent per inode
+instead of a receipt. Namespace changes and explicit times still consume receipts,
+so their capacity limit remains. Failed calls may have durable
 data without updated timestamps; data WAL and timestamp metadata are not one
 atomic transaction. Reads do not update atime, and automatic creation/namespace
 timestamps remain pending.
@@ -124,8 +125,8 @@ timestamps remain pending.
 Each request ID is a nonzero `u64` unique across callers in this prototype; a
 future client/session identity protocol must allocate suitable request IDs.
 Snapshots retain receipts even if the referenced file has since been deleted.
-The internal `touch_modified` and `checkpoint_mutable` commands require ID zero
-and deduplicate against inode-local WAL state. Latest target-state replays succeed
+The internal `touch_modified`, `checkpoint_mutable` and `attach_mutable` commands
+require ID zero and deduplicate against inode-local state. Latest target-state replays succeed
 without resetting explicit times; older sequences and conflicting replays fail.
 
 Names are valid UTF-8, at most 255 bytes, and cannot contain NUL or either path
@@ -405,6 +406,14 @@ A latest target with identical sequence/size is an idempotent success; a differe
 size conflicts, and older targets fail. This consumes no receipts or extra history.
 The legacy receipt-backed command retains its original behavior. All nodes and
 the core must be upgraded together before using the new command.
+
+Initial core binding now uses `attach_mutable` with ID zero and the same attachment
+fields. The inode retains one original attachment intent; exact retries succeed
+without resetting later checkpoints or timestamps. A different generation conflicts,
+as does altered content for the retained generation. Legacy attachments have no
+intent record and are not retroactively converted; their original receipts remain
+replayable. This permits binding/migration of existing unbound files even when the
+receipt table is full, but creating new inodes still requires receipt capacity.
 
 These are metadata declarations, not migration or data-recovery commands. The
 caller must establish exclusive ownership and durable backend checkpoints first.

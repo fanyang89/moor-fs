@@ -4,6 +4,15 @@ const Store = @import("durable.zig").Store;
 const m = @import("metadata.zig");
 const protocol = @import("machine.zig");
 
+// Arena growth must take the same allocation path on every injected run;
+// in-place growth depends on the backing allocator's current layout.
+const deterministic_allocator: std.mem.Allocator = .{ .ptr = t.allocator.ptr, .vtable = &.{
+    .alloc = t.allocator.vtable.alloc,
+    .resize = std.mem.Allocator.noResize,
+    .remap = std.mem.Allocator.noRemap,
+    .free = t.allocator.vtable.free,
+} };
+
 const Fixture = struct {
     tmp: t.TmpDir,
     path: [:0]u8,
@@ -422,7 +431,7 @@ test "LMDB map exhaustion rolls back namespace receipts and cursor" {
 }
 
 test "LMDB allocation failures roll back apply and restore" {
-    try t.checkAllAllocationFailures(t.allocator, allocationScenario, .{});
+    try t.checkAllAllocationFailures(deterministic_allocator, allocationScenario, .{});
 }
 
 test "LMDB map-full snapshot replacement preserves previous database" {
@@ -540,15 +549,7 @@ test "version publication matches memory across reopen, CAS conflicts, policy ch
 }
 
 test "publication allocation failures roll back version, inode, receipt and applied index" {
-    // Arena growth must take the same allocation path on every injected run;
-    // in-place growth depends on the backing allocator's current layout.
-    const deterministic: std.mem.Allocator = .{ .ptr = t.allocator.ptr, .vtable = &.{
-        .alloc = t.allocator.vtable.alloc,
-        .resize = std.mem.Allocator.noResize,
-        .remap = std.mem.Allocator.noRemap,
-        .free = t.allocator.vtable.free,
-    } };
-    try t.checkAllAllocationFailures(deterministic, publicationAllocationScenario, .{});
+    try t.checkAllAllocationFailures(deterministic_allocator, publicationAllocationScenario, .{});
 }
 
 fn publicationAllocationScenario(allocator: std.mem.Allocator) !void {
@@ -659,6 +660,73 @@ fn modifiedRequest(sequence: u64, seconds: i64) m.Request {
         .next_sequence = sequence,
         .time = .{ .seconds = seconds },
     } } } };
+}
+
+test "inode attachment retries preserve later checkpoints and times across restart" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var memory = try m.State.init(t.allocator);
+    defer memory.deinit();
+    const attachment = timestamp_setup[3].command.mutable_file.attach;
+    const request: m.Request = .{ .request_id = 0, .command = .{ .attach_mutable = attachment } };
+    var wrong_id = request;
+    wrong_id.request_id = 77;
+    var wrong_version = request;
+    wrong_version.command.attach_mutable.expected_version = 9;
+    var invalid = request;
+    invalid.command.attach_mutable.file.generation = 0;
+    var missing_backend = request;
+    missing_backend.command.attach_mutable.file.backends[1] = 99;
+    var other_size = request;
+    other_size.command.attach_mutable.file.size = 1;
+    var other_generation = request;
+    other_generation.command.attach_mutable.file.generation = 8;
+    var other_pair = request;
+    other_pair.command.attach_mutable.file.backends = .{ 2, 1 };
+    const commands = timestamp_setup[0..3].* ++ [_]m.Request{
+        wrong_id,                                                                                        wrong_version, invalid,                                                                         missing_backend,
+        request,                                                                                         request,       modifiedRequest(2, 10),                                                          checkpointRequest(1, 2, 5),
+        .{ .request_id = 5, .command = .{ .set_times = .{ .inode = 2, .mtime = .{ .seconds = 99 } } } }, request,       other_size,                                                                      other_generation,
+        other_pair,                                                                                      wrong_version, .{ .request_id = 6, .command = .{ .mutable_file = .{ .attach = attachment } } }, request,
+    };
+    const statuses = [_]m.Status{ .ok, .ok, .ok, .invalid_request, .version_conflict, .invalid_request, .backend_not_found, .ok, .ok, .ok, .ok, .ok, .ok, .request_conflict, .storage_conflict, .request_conflict, .request_conflict, .storage_conflict, .ok };
+    for (commands, statuses, 1..) |command, status, index| {
+        var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+        defer store.close();
+        const expected = try memory.apply(command);
+        try t.expectEqual(status, expected.status);
+        try t.expectEqualDeep(expected, try apply(&store, index, command));
+        const bytes = try store.snapshot(t.allocator, index, 1);
+        defer t.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(protocol.Image, t.allocator, bytes, .{});
+        defer parsed.deinit();
+        try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
+        if (index >= 12) try t.expectEqual(@as(i64, 99), memory.get(2).?.times.mtime.seconds);
+    }
+    try t.expectEqual(@as(usize, 5), memory.receipts.items.len);
+    try t.expectEqualDeep(attachment, memory.get(2).?.attachment.?);
+    try t.expectEqual(@as(u64, 5), memory.get(2).?.mutable_file.?.size);
+    var store = try Store.open(t.allocator, fixture.path, 16 * 1024 * 1024);
+    defer store.close();
+    const before = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(before);
+    memory.nodes.items[1].attachment.?.file.generation = 8;
+    const bad_image = try std.json.Stringify.valueAlloc(t.allocator, protocol.Image{ .index = 99, .term = 1, .state = memory.snapshot() }, .{});
+    defer t.allocator.free(bad_image);
+    try t.expectError(error.InvalidSnapshot, store.restore(99, 1, bad_image));
+    const after = try store.snapshot(t.allocator, commands.len, 1);
+    defer t.allocator.free(after);
+    try t.expectEqualStrings(before, after);
+    memory.nodes.items[1].attachment = attachment;
+    const deleted: m.Request = .{ .request_id = 7, .command = .{ .remove = .{ .id = 2 } } };
+    const replacement: m.Request = .{ .request_id = 8, .command = .{ .create = .{ .parent = 1, .name = "mutable", .kind = .file } } };
+    for ([_]m.Request{ deleted, replacement, request }, commands.len + 1..) |command, index| {
+        try t.expectEqualDeep(try memory.apply(command), try apply(&store, index, command));
+    }
+    try t.expectEqual(m.Status.not_found, (try memory.apply(request)).status);
+    const node = (try store.get(t.allocator, 3)).?;
+    defer t.allocator.free(node.name);
+    try t.expect(node.attachment == null and node.mutable_file == null);
 }
 
 test "automatic timestamp watermark survives restart and never replays over explicit times" {
@@ -781,7 +849,7 @@ test "sequence checkpoints reject stale publication and preserve times across re
     try t.expectEqual(@as(u64, 30), memory.get(2).?.mutable_file.?.size);
 }
 
-test "automatic timestamps and checkpoints exceed receipt capacity and work with a full receipt table" {
+test "internal mutable commands work with a full receipt table after sustained checkpoints" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     var memory = try m.State.init(t.allocator);
@@ -810,6 +878,9 @@ test "automatic timestamps and checkpoints exceed receipt capacity and work with
     defer parsed.deinit();
     try t.expectEqualDeep(memory.snapshot(), parsed.value.state);
     try t.expectEqual(timestamp_setup.len, memory.receipts.items.len);
+    index += 1;
+    const unbound: m.Request = .{ .request_id = 7, .command = .{ .create = .{ .parent = 1, .name = "unbound", .kind = .file } } };
+    try t.expectEqualDeep(try memory.apply(unbound), try apply(&store, index, unbound));
     // Restore a full retained receipt history, without generating thousands of
     // unrelated commands. Sequence commands must still bypass that capacity.
     while (memory.receipts.items.len < m.max_receipts) {
@@ -819,6 +890,12 @@ test "automatic timestamps and checkpoints exceed receipt capacity and work with
     const full = try std.json.Stringify.valueAlloc(t.allocator, protocol.Image{ .index = index, .term = 1, .state = memory.snapshot() }, .{});
     defer t.allocator.free(full);
     try store.restore(index, 1, full);
+    index += 1;
+    var attachment = timestamp_setup[3].command.mutable_file.attach;
+    attachment.inode = 3;
+    const attach: m.Request = .{ .request_id = 0, .command = .{ .attach_mutable = attachment } };
+    try t.expectEqual(m.Status.ok, (try memory.apply(attach)).status);
+    try t.expectEqual(m.Status.ok, (try apply(&store, index, attach)).status);
     index += 1;
     const latest = modifiedRequest(m.max_receipts + 4, 20000);
     try t.expectEqual(m.Status.ok, (try memory.apply(latest)).status);

@@ -194,7 +194,7 @@ pub const Access = struct {
     fn publish(self: *Access, update: m.MutableUpdate) !void {
         // The metadata transport must reuse this request across its own retries.
         const request: m.Request = switch (update) {
-            .attach => .{ .request_id = randomId(self.io), .command = .{ .mutable_file = update } },
+            .attach => |attachment| .{ .request_id = 0, .command = .{ .attach_mutable = attachment } },
             .checkpoint => |checkpoint| .{ .request_id = 0, .command = .{ .checkpoint_mutable = checkpoint } },
         };
         const result = try self.metadata.apply(self.metadata.context, request);

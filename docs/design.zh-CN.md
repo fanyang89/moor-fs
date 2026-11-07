@@ -1112,3 +1112,15 @@ Debug/Safe各123项通过。新增内存/LMDB逐请求重启及完整快照对�
 本地Debug/双CIFS Safe原生SMB、完整WAL FUSE/SMB故障套件通过，包含13种损坏、4次修复SIGKILL和6次基线生命周期SIGKILL；真实三节点覆盖新检查点重试、快照追赶及全群重启后的目标状态重放。日志前缀/tmp/opencode/nas-checkpoint-sequence-。
 
 这消除了已有绑定文件普通写入、检查点及恢复对全局回执容量的持续消耗，不是回执GC。创建、首次attach、显式时间、其他命名空间修改及旧检查点命令仍有8192上限，历史回执不会删除。每个写段的自动时间仍需Raft往返，时间与数据WAL仍非原子事务；跨节点fencing、自动创建/目录/读取时间仍待实现。新命令要求核心及全部Raft节点统一升级，C ABI和节点存储字段布局不变。
+
+## 77. 首次绑定的每inode固定记录
+
+新增attach_mutable，字段与旧mutable_file.attach一致，使用request_id=0，不读写全局receipt。初次绑定复用既有未绑定/源版本CAS/双副本策略/故障域校验，在同一LMDB事务和Raft状态转换内保存mutable_file及node.attachment原始请求。每inode只保留一条记录；相同完整请求重放返回ok而不重置后来checkpoint的序号、大小或时间，同代际不同参数返回request_conflict，不同代际返回storage_conflict。拒绝结果不单独保存历史回执。
+
+Access在准备、验证并同步双侧完整文件后提交此命令。丢回复后重开读取已有绑定，复用原代际而不是再创建；未提交绑定的失败仍可能遗留后端孤儿目录，本轮不做GC。旧节点缺少attachment默认null，旧已绑定文件直接打开，不追溯补造原绑定记录；旧mutable_file.attach仍保持原序列化、非零ID及回执重放语义。删除inode同时删除记录，原inode不复用，旧请求不能绑定同名新inode。
+
+快照校验原绑定inode、代际、副本对和当前mutable_file一致，初始序号不超过当前checkpoint，同序号大小一致；原绑定文件字段仍须合法，非零源版本须存在并属于该inode。无需改C ABI；须统一升级核心和全部Raft节点，不支持混合版本。
+
+Debug/Safe各124项通过：内存/LMDB逐请求重启全快照对照、重复绑定跨checkpoint/显式时间、参数/代际/源版本/后端拒绝、非法绑定快照不改数据库、删除后重放不污染同名新inode。满回执表下LMDB首次绑定可提交，真实Service/Access覆盖空文件和不可变文件迁移、绑定丢回复后重开、写/fsync/close/断线恢复且回执不增长。新增Node字段又暴露通用LMDB分配失败测试的原地扩容不确定性；复用此前publication测试的确定性后备分配器，仍逐分配点验证回滚。
+
+配套模块/Safe桥接、本地Debug/双CIFS Safe原生SMB及完整WAL FUSE/SMB故障套件通过；真实三节点绑定请求在leader切换、快照追赶及全群重启后重放不重置当前checkpoint。日志前缀/tmp/opencode/nas-attachment-state-。首次绑定、自动时间和核心checkpoint已全部不消耗全局回执；新建inode、显式时间和其他命名空间修改及旧mutable_file命令仍受8192容量限制，历史回执GC、自动创建/目录/atime时间维护及跨节点fencing仍待实现。

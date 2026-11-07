@@ -278,19 +278,17 @@ def main():
             assert run("get", endpoints, "2")["current_version"] == 10
             mutable_inode = apply(first, create(200, "wal-metadata"))["inode"]
             binding = {
-                "request_id": 201,
+                "request_id": 0,
                 "command": {
-                    "mutable_file": {
-                        "attach": {
-                            "inode": mutable_inode,
-                            "expected_version": 0,
-                            "file": {
-                                "generation": 7,
-                                "next_sequence": 1,
-                                "size": 0,
-                                "backends": [1, 2],
-                            },
-                        }
+                    "attach_mutable": {
+                        "inode": mutable_inode,
+                        "expected_version": 0,
+                        "file": {
+                            "generation": 7,
+                            "next_sequence": 1,
+                            "size": 0,
+                            "backends": [1, 2],
+                        },
                     }
                 },
             }
@@ -513,6 +511,11 @@ def main():
             assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
             assert apply(elected, automatic_time) == mutable_result
             restored_time = run("get", endpoints, mutable_inode)
+            assert apply(elected, binding) == mutable_result
+            assert (
+                run("get", endpoints, mutable_inode)["attachment"]
+                == binding["command"]["attach_mutable"]
+            )
             assert apply(elected, sequence_checkpoint) == mutable_result
             assert run("get", endpoints, mutable_inode)["mutable_file"] == mutable_state
             assert (

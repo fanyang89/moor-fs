@@ -29,8 +29,9 @@ pub const MutableFile = struct {
     backends: [2]u64,
 };
 pub const MutableCheckpoint = struct { inode: u64, generation: u64, expected_sequence: u64, next_sequence: u64, size: u64 };
+pub const MutableAttachment = struct { inode: u64, expected_version: u64, file: MutableFile };
 pub const MutableUpdate = union(enum) {
-    attach: struct { inode: u64, expected_version: u64, file: MutableFile },
+    attach: MutableAttachment,
     checkpoint: MutableCheckpoint,
 };
 pub const Replicas = enum { one, two };
@@ -124,6 +125,7 @@ pub const Node = struct {
     mutable_file: ?MutableFile = null,
     times: Times = .{},
     modification: ?Modification = null,
+    attachment: ?MutableAttachment = null,
 };
 pub const Command = union(enum) {
     create: struct { parent: u64, name: []const u8, kind: Kind, replicas: ?Replicas = null },
@@ -141,6 +143,7 @@ pub const Command = union(enum) {
     set_times: TimeUpdate,
     touch_modified: ModifiedUpdate,
     checkpoint_mutable: MutableCheckpoint,
+    attach_mutable: MutableAttachment,
 };
 pub const Request = struct {
     version: u32 = 1,
@@ -148,11 +151,11 @@ pub const Request = struct {
     command: Command,
 
     pub fn validId(self: Request) bool {
-        return if (self.usesSequence()) self.request_id == 0 else self.request_id != 0;
+        return if (self.usesInodeState()) self.request_id == 0 else self.request_id != 0;
     }
 
-    pub fn usesSequence(self: Request) bool {
-        return self.command == .touch_modified or self.command == .checkpoint_mutable;
+    pub fn usesInodeState(self: Request) bool {
+        return self.command == .touch_modified or self.command == .checkpoint_mutable or self.command == .attach_mutable;
     }
 };
 pub const Status = enum(u8) {
@@ -234,8 +237,8 @@ pub const State = struct {
     pub fn apply(self: *State, request: Request) std.mem.Allocator.Error!Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
-        // Sequence commands deduplicate against inode state, not receipts.
-        if (request.usesSequence()) return self.execute(request.command);
+        // Internal file commands deduplicate against inode state, not receipts.
+        if (request.usesInodeState()) return self.execute(request.command);
         const digest = try requestDigest(self.allocator, request);
         for (self.receipts.items) |receipt| {
             if (receipt.request_id == request.request_id) {
@@ -256,6 +259,11 @@ pub const State = struct {
 
     fn execute(self: *State, command: Command) std.mem.Allocator.Error!Result {
         switch (command) {
+            .attach_mutable => |update| {
+                const i = self.find(update.inode) orelse return .{ .status = .not_found };
+                const result = attachMutable(&self.nodes.items[i], update, self.backends.items);
+                return .{ .status = result, .inode = if (result == .ok) update.inode else 0 };
+            },
             .checkpoint_mutable => |update| {
                 const i = self.find(update.inode) orelse return .{ .status = .not_found };
                 const result = checkpointMutable(&self.nodes.items[i], update);
@@ -455,6 +463,17 @@ pub fn validateSnapshot(data: Snapshot) !void {
         if (node.mutable_file) |file| {
             if (node.kind != .file or node.current_version != 0 or node.replicas != .two or mutableStatus(file, data.backends) != .ok) return error.InvalidSnapshot;
         }
+        if (node.attachment) |attached| {
+            const file = node.mutable_file orelse return error.InvalidSnapshot;
+            if (attached.inode != node.id or mutableStatus(attached.file, data.backends) != .ok or attached.file.generation != file.generation or !std.mem.eql(u64, &attached.file.backends, &file.backends) or attached.file.next_sequence > file.next_sequence) return error.InvalidSnapshot;
+            if (attached.file.next_sequence == file.next_sequence and attached.file.size != file.size) return error.InvalidSnapshot;
+            if (attached.expected_version != 0) {
+                const version = for (data.versions) |value| {
+                    if (value.id == attached.expected_version) break value;
+                } else return error.InvalidSnapshot;
+                if (version.inode != node.id) return error.InvalidSnapshot;
+            }
+        }
         if (node.current_version != 0) {
             if (node.kind != .file) return error.InvalidSnapshot;
             const version = for (data.versions) |v| {
@@ -535,6 +554,18 @@ pub fn checkpointMutable(node: *Node, update: MutableCheckpoint) Status {
     node.mutable_file.?.next_sequence = update.next_sequence;
     node.mutable_file.?.size = update.size;
     return .ok;
+}
+
+/// Retain one immutable attachment intent, so a retry after checkpoint advances
+/// cannot reset the file's sequence, size or timestamps.
+pub fn attachMutable(node: *Node, update: MutableAttachment, backends: []const Backend) Status {
+    if (node.attachment) |attached| {
+        if (attached.file.generation != update.file.generation) return .storage_conflict;
+        return if (std.meta.eql(attached, update)) .ok else .request_conflict;
+    }
+    const result = updateMutable(node, .{ .attach = update }, backends);
+    if (result == .ok) node.attachment = update;
+    return result;
 }
 
 fn mutableStatus(file: MutableFile, backends: []const Backend) Status {

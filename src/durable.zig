@@ -258,7 +258,7 @@ pub const Store = struct {
     fn applyRequest(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, request: m.Request) !m.Result {
         if (request.version != 1) return .{ .status = .unsupported_version };
         if (!request.validId()) return .{ .status = .invalid_request };
-        if (request.usesSequence()) return self.execute(txn, allocator, meta, request.command);
+        if (request.usesInodeState()) return self.execute(txn, allocator, meta, request.command);
         const digest = try m.requestDigest(allocator, request);
         const key = idKey(request.request_id);
         if (try txn.get(self.requests_db, &key)) |data| {
@@ -279,6 +279,22 @@ pub const Store = struct {
 
     fn execute(self: *Store, txn: *lmdb.Transaction, allocator: std.mem.Allocator, meta: *Meta, command: m.Command) !m.Result {
         switch (command) {
+            .attach_mutable => |update| {
+                var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
+                var backends: [2]m.Backend = undefined;
+                var count: usize = 0;
+                for (update.file.backends) |backend_id| {
+                    const key = idKey(backend_id);
+                    if (try txn.get(self.backends_db, &key)) |data| {
+                        backends[count] = try parse(m.Backend, allocator, data);
+                        count += 1;
+                    }
+                }
+                const result = m.attachMutable(&node, update, backends[0..count]);
+                if (result != .ok) return .{ .status = result };
+                try self.putNode(txn, allocator, node);
+                return .{ .status = .ok, .inode = update.inode };
+            },
             .checkpoint_mutable => |update| {
                 var node = (try self.readNode(txn, allocator, update.inode)) orelse return .{ .status = .not_found };
                 const result = m.checkpointMutable(&node, update);

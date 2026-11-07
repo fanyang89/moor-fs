@@ -442,36 +442,50 @@ test "rejected data write does not update timestamps" {
     try t.expectEqualDeep(original, f.meta.state.get(2).?.times);
 }
 
-test "full receipt history permits mutable write sync close and recovery" {
-    var f = try Fixture.init();
-    defer f.deinit();
-    var service: @import("file_service.zig").Service = .{
-        .allocator = t.allocator,
-        .io = t.io,
-        .metadata = f.meta.api(),
-        .mappings = &f.mappings,
-        .migration_pair = .{ 1, 2 },
-    };
-    defer service.deinit();
-    const owner = try service.connect();
-    const opened = try service.open(owner, 2, true);
-    while (f.meta.state.receipts.items.len < m.max_receipts) {
-        try f.meta.state.receipts.append(t.allocator, .{ .request_id = f.meta.state.receipts.items.len + 10000, .digest = @splat(0), .result = .{ .status = .not_found } });
+test "full receipt history permits initial binding migration write sync close and recovery" {
+    for ([_]bool{ false, true }) |migrate| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        if (migrate) _ = try f.seed("initial");
+        var service: @import("file_service.zig").Service = .{
+            .allocator = t.allocator,
+            .io = t.io,
+            .metadata = f.meta.api(),
+            .mappings = &f.mappings,
+            .migration_pair = .{ 1, 2 },
+        };
+        defer service.deinit();
+        const owner = try service.connect();
+        while (f.meta.state.receipts.items.len < m.max_receipts) {
+            try f.meta.state.receipts.append(t.allocator, .{ .request_id = f.meta.state.receipts.items.len + 10000, .digest = @splat(0), .result = .{ .status = .not_found } });
+        }
+        if (migrate) {
+            f.meta.lose_reply = true;
+            try t.expectError(error.ReplyLost, service.open(owner, 2, true));
+            try t.expectEqual(@as(u32, 0), service.handles.count());
+        }
+        const opened = try service.open(owner, 2, true);
+        try t.expect(f.meta.state.get(2).?.attachment != null);
+        if (migrate) {
+            var initial: [7]u8 = undefined;
+            try t.expectEqual(@as(usize, 7), try service.read(owner, opened.handle, &initial, 0));
+            try t.expectEqualStrings("initial", &initial);
+        }
+        try service.write(owner, opened.handle, "durable", 0);
+        try service.sync(owner, opened.handle);
+        try service.truncate(owner, opened.handle, 4);
+        try service.close(owner, opened.handle);
+        const reopened = try service.open(owner, 2, true);
+        try service.write(owner, reopened.handle, "!", 4);
+        service.disconnect(owner); // Recover an uncheckpointed acknowledged write.
+        var recovered = try f.open();
+        defer recovered.close();
+        var bytes: [5]u8 = undefined;
+        try t.expectEqual(@as(usize, 5), try recovered.read(&bytes, 0));
+        try t.expectEqualStrings("dura!", &bytes);
+        try t.expectEqual(@as(u64, 5), f.meta.state.get(2).?.mutable_file.?.size);
+        try t.expectEqual(@as(usize, m.max_receipts), f.meta.state.receipts.items.len);
     }
-    try service.write(owner, opened.handle, "durable", 0);
-    try service.sync(owner, opened.handle);
-    try service.truncate(owner, opened.handle, 4);
-    try service.close(owner, opened.handle);
-    const reopened = try service.open(owner, 2, true);
-    try service.write(owner, reopened.handle, "!", 4);
-    service.disconnect(owner); // Recover an uncheckpointed acknowledged write.
-    var recovered = try f.open();
-    defer recovered.close();
-    var bytes: [5]u8 = undefined;
-    try t.expectEqual(@as(usize, 5), try recovered.read(&bytes, 0));
-    try t.expectEqualStrings("dura!", &bytes);
-    try t.expectEqual(@as(u64, 5), f.meta.state.get(2).?.mutable_file.?.size);
-    try t.expectEqual(@as(usize, m.max_receipts), f.meta.state.receipts.items.len);
 }
 
 test "mutable attachment reply loss reopens the bound generation instead of recreating it" {

@@ -125,7 +125,9 @@ zig build test-samba-vfs-cifs -Doptimize=safe
 
 核心Access的非空write和truncate在完成双副本WAL/数据更新及验证后，向Raft提交同一实时时钟取样作为mtime/ctime；时间也确认后才返回成功，atime/birthtime不变。零字节write不更新时间，同长度truncate仍更新。模块不依赖Samba fntimes触发此路径。后续显式时间可覆盖自动值，fsync、关闭、迁移、恢复、读及stat不覆盖它。
 
-时间失败/不确定会冻结会话，重开能恢复已写数据，但不补造中断操作的时间；WAL与时间不是原子事务。每个64KiB写段仍新增一次Raft提交，但自动时间已改为每inode一条WAL代际/序号/时间记录去重，不消耗回执。核心checkpoint也已按当前序号/大小去重，不消耗回执；显式时间、命名空间、首次绑定及旧checkpoint命令仍受8192个共享回执且无GC的限制。时钟回拨可使时间倒退，不提供单调墙钟保证。
+时间失败/不确定会冻结会话，重开能恢复已写数据，但不补造中断操作的时间；WAL与时间不是原子事务。每个64KiB写段仍新增一次Raft提交，但自动时间已改为每inode一条WAL代际/序号/时间记录去重，不消耗回执。核心checkpoint按当前序号/大小去重，首次绑定保存每inode一条原始绑定记录，均不消耗回执；显式时间、命名空间及旧mutable_file命令仍受8192个共享回执且无GC的限制。时钟回拨可使时间倒退，不提供单调墙钟保证。
+
+首次绑定验证：Debug/Safe各124项、本地/双CIFS原生SMB、完整WAL故障套件通过。满回执表下首次打开已有空文件、迁移不可变文件及绑定丢回复后重开均成功；后续写/同步/关闭/恢复不增加回执。相同绑定在检查点推进、显式时间修改、leader切换及全群重启后重放不重置状态；同代际改参数、其他代际、错误源版本/后端均拒绝，删除后重放不绑定同名新inode。绑定记录增加node的可选JSON字段，不改变C ABI；核心和全部Raft节点仍需统一升级。日志前缀：`/tmp/opencode/nas-attachment-state-`。
 
 检查点验证：Debug/Safe各123项、本地及双CIFS原生SMB、完整WAL FUSE/SMB故障套件通过。超过8192轮自动时间＋检查点仅保留初始化回执；满回执表下，已有绑定文件的write/fsync/truncate/close及断线恢复仍成功。最新相同目标重试无操作成功，旧序号、同目标不同大小、错误代际及落后于已确认写入的检查点均拒绝；显式时间保留。真实Raft覆盖快照追赶及全群重启后重放，旧命令原回执仍可重放。日志前缀：`/tmp/opencode/nas-checkpoint-sequence-`。
 
