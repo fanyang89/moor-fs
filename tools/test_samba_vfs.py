@@ -896,7 +896,9 @@ nas_fs:timeout_ms = 500
             entry["id"]: entry
             for entry in json.loads((directory / "backends.json").read_text())
         }
-        for bad in range(2):
+        for missing_name, bad in (
+            (name, i) for name in ("data", "wal") for i in range(2)
+        ):
             before = client.call({"stat": {"inode": upload}})["attributes"]["node"]
             binding = before["mutable_file"]
             replicas = [
@@ -907,9 +909,15 @@ nas_fs:timeout_ms = 500
                 for backend in binding["backends"]
             ]
             source_inode = replicas[1 - bad].stat().st_ino
-            replicas[bad].unlink()
+            data_inodes = [replica.stat().st_ino for replica in replicas]
+            missing_file = (
+                replicas[bad]
+                if missing_name == "data"
+                else replicas[bad].parent / f"wal-{binding['next_sequence']}"
+            )
+            missing_file.unlink()
             smb(f"get vfs-read/upload.dat {directory / 'vfs-missing'}", success=False)
-            assert not replicas[bad].exists()
+            assert not missing_file.exists()
             rebuilt = maintain_upload("repair-mutable")
             assert rebuilt == sealed
             assert (
@@ -917,6 +925,9 @@ nas_fs:timeout_ms = 500
             )
             assert replicas[1 - bad].stat().st_ino == source_inode
             assert all(replica.read_bytes() == b"repair" for replica in replicas)
+            if missing_name == "wal":
+                assert missing_file.read_bytes() == b""
+                assert [replica.stat().st_ino for replica in replicas] == data_inodes
             smb(f"get vfs-read/upload.dat {directory / 'vfs-rebuilt'}")
             assert (directory / "vfs-rebuilt").read_bytes() == b"repair"
         paused = worker(url.replace("/write/", "/deadline/"))

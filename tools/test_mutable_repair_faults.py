@@ -167,3 +167,61 @@ def test_mutable_repair_faults(
                 f"PASS: mutable {'missing-data rebuild' if missing else 'repair'} NAS {bad + 1} SIGKILL at {point}, source/evidence preserved, ownership and in-place retry",
                 flush=True,
             )
+
+    # One missing empty active log can be recreated only while both complete
+    # files still match both seals. Its publication must survive process death.
+    log_name = f"wal-{metadata['mutable_file']['next_sequence']}"
+    for missing in range(2):
+        lost_log = client_data[missing].parent / log_name
+        lost_log.unlink()
+        fd = os.open(lost_log.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        failed = run("scrub-mutable", endpoints, config, inode, success=False)
+        assert "FileNotFound" in failed.stdout + failed.stderr, failed
+        assert not lost_log.exists()
+        source_log_inode = (data[1 - missing].parent / log_name).stat().st_ino
+        log = directory / f"mutable-wal-rebuild-{missing}.log"
+        with log.open("w") as output:
+            process = subprocess.Popen(
+                [executable, "repair-mutable", endpoints, str(config), str(inode)],
+                stdout=output,
+                stderr=output,
+                env={**os.environ, "NAS_FS_REPAIR_STOP": "mutable_wal_created"},
+            )
+        try:
+            wait_stopped(process, "mutable_wal_created", log)
+            new_inode = (data[missing].parent / log_name).stat().st_ino
+            assert all(file.read_bytes() == content for file in data)
+            assert [file.stat().st_ino for file in data] == identities
+            assert run("get", endpoints, inode) == metadata
+            for command in ("scrub-mutable", "repair-mutable"):
+                busy = run(command, endpoints, config, inode, success=False)
+                assert "FileBusy" in busy.stdout + busy.stderr, busy
+            process.kill()
+            assert process.wait(timeout=15) == -signal.SIGKILL
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=15)
+        for index, target in enumerate(data):
+            assert {
+                file.name: file.read_bytes()
+                for file in target.parent.iterdir()
+                if file.name != "data"
+            } == evidence[index]
+        assert run("scrub-mutable", endpoints, config, inode)["sealed"]
+        assert (
+            run("repair-mutable", endpoints, config, inode)["sha256"]
+            == report["sha256"]
+        )
+        assert run("get", endpoints, inode) == metadata
+        assert (data[missing].parent / log_name).stat().st_ino == new_inode
+        assert (data[1 - missing].parent / log_name).stat().st_ino == source_log_inode
+        assert [file.stat().st_ino for file in data] == identities
+        print(
+            f"PASS: missing active WAL on NAS {missing + 1} rebuilt durably before SIGKILL, data/evidence preserved and retry succeeds",
+            flush=True,
+        )

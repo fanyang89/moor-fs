@@ -971,8 +971,16 @@ seals, and empty active WALs are intact. The surviving data inode is locked and
 fully authenticated before exclusive target creation; the new file and directory
 entry are synced before copying. Both data locks remain held during copying and
 verification. Interrupted copies are retried in place, preserving the source.
-Ordinary opens never create missing data. Missing control files, offline backends,
-two absent data files or no matching source remain unsupported for rebuilding.
+Ordinary opens never create missing data. Offline backends, two absent data files
+or no matching source remain unsupported for rebuilding.
+
+Explicit repair can also reconstruct one missing active WAL, but only when both
+complete data files already match both seals, both checkpoints agree, and the
+remaining active WAL exists and is empty. It exclusively creates and syncs the
+empty log and its directory entry without modifying data. It does not combine
+WAL reconstruction with data repair, recreate two absent logs, or discard pending
+redo. Ordinary open/scrub still refuses a missing WAL. Other missing control files
+and complete replica-directory loss remain outside this reconstruction path.
 
 Before the next write/truncate, both seal files are durably removed; ordinary
 fsync does not rebuild a whole-file seal. Re-establish the baseline explicitly
@@ -993,6 +1001,8 @@ fsync, with each NAS serving as the damaged target. They check exclusive
 ownership, retained source/seal/WAL/checkpoint bytes and successful in-place
 retry. They also remove one data file and kill rebuilding after durable target
 creation, first copy and destination fsync in both directions (six additional cases).
+Two further cases remove an active WAL and kill repair after durable log creation,
+checking unchanged data/control bytes and successful ordinary reopen and repair retry.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.

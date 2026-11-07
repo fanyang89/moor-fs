@@ -162,25 +162,35 @@ pub const Store = struct {
         const checkpoint = if (ca == null) cb.? else if (cb == null or ca.?.next >= cb.?.next) ca.? else cb.?;
         if (repair_sequence) |minimum| if (checkpoint.next < minimum) return error.StaleFileState;
         if (ca != null and cb != null and ca.?.next == cb.?.next and ca.?.size != cb.?.size) return error.CheckpointDiverged;
-        // The higher checkpoint proves both data files were synced and both new
-        // logs were persisted before its publication. Never recreate missing logs.
+        // Normal recovery never recreates logs. Explicit repair may reconstruct
+        // one absent empty log only after verifying both complete sealed files.
         var buffer: [32]u8 = undefined;
         const name = try logName(&buffer, checkpoint.next);
-        const la = try dirs[0].openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false });
-        errdefer la.close(io);
-        const lb = try dirs[1].openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false });
-        errdefer lb.close(io);
+        var logs: [2]?File = .{ null, null };
+        errdefer for (logs) |file| if (file) |opened| opened.close(io);
+        for (dirs, 0..) |dir, i| {
+            logs[i] = dir.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+                error.FileNotFound => if (repair_sequence != null) null else return err,
+                else => return err,
+            };
+        }
+        const missing_log = logs[0] == null or logs[1] == null;
+        if (missing_log and (logs[0] == null and logs[1] == null or data[0] == null or data[1] == null)) return error.FileNotFound;
         const seal = try Seal.load(io, dirs, identity, checkpoint.next, checkpoint.size);
         if (repair_sequence != null and seal == null) return error.MissingSeal;
         if (seal) |baseline| {
             // A valid baseline is published only after rotation; writes must
             // durably invalidate both copies before appending any redo record.
-            if ((try la.stat(io)).size != 0 or (try lb.stat(io)).size != 0) return error.SealWithPendingWal;
+            for (logs) |file| if (file) |opened| {
+                if ((try opened.stat(io)).size != 0) return error.SealWithPendingWal;
+            };
+            if (missing_log or data[0] == null or data[1] == null) {
+                if (ca == null or cb == null or !std.meta.eql(ca.?, cb.?)) return error.CheckpointDiverged;
+                for (dirs) |dir| if (try Seal.read(io, dir, identity) == null) return error.MissingSeal;
+            }
             if (data[0] == null or data[1] == null) {
                 // Rebuild only one absent data file, not missing control files
                 // or an offline backend. Both persisted baselines must agree.
-                if (ca == null or cb == null or !std.meta.eql(ca.?, cb.?)) return error.CheckpointDiverged;
-                for (dirs) |dir| if (try Seal.read(io, dir, identity) == null) return error.MissingSeal;
                 const missing: usize = if (data[0] == null) 0 else 1;
                 if (!try baseline.matches(io, data[1 - missing].?)) return error.NoVerifiedReplica;
                 data[missing] = try openData(io, dirs[missing], true);
@@ -188,9 +198,20 @@ pub const Store = struct {
                 try objects.syncDir(io, dirs[missing]);
                 @import("repair_fault.zig").checkpoint(.mutable_created);
             }
-            try baseline.verify(io, .{ data[0].?, data[1].? }, repair_sequence != null);
+            if (missing_log) {
+                // Both files must already match. Never discard potential redo
+                // evidence by combining log reconstruction with data repair.
+                try baseline.verify(io, .{ data[0].?, data[1].? }, false);
+                const missing: usize = if (logs[0] == null) 0 else 1;
+                logs[missing] = try dirs[missing].createFile(io, name, .{ .read = true, .exclusive = true });
+                try logs[missing].?.sync(io);
+                try objects.syncDir(io, dirs[missing]);
+                @import("repair_fault.zig").checkpoint(.mutable_wal_created);
+            } else {
+                try baseline.verify(io, .{ data[0].?, data[1].? }, repair_sequence != null);
+            }
         }
-        const replicas: [2]wal.Replica = .{ .{ .data = data[0].?, .log = la }, .{ .data = data[1].?, .log = lb } };
+        const replicas: [2]wal.Replica = .{ .{ .data = data[0].?, .log = logs[0].? }, .{ .data = data[1].?, .log = logs[1].? } };
         const session = try wal.Session.recoverFrom(gpa, io, identity, replicas, checkpoint.next);
         if (session.end == 0) {
             for (replicas) |replica| if ((try replica.data.stat(io)).size != checkpoint.size) return error.ReplicaSizeMismatch;

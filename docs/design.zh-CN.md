@@ -1188,3 +1188,15 @@ Debug/Safe各138项通过：两种缺失方向、空/非空内容、普通打开
 本地/双CIFS原生SMB覆盖普通下载拒绝、两个方向显式重建、元数据/源inode保留及重新下载。完整WAL FUSE/SMB故障套件新增两方向各mutable_created、mutable_first_chunk、mutable_synced共六项SIGKILL：目标空文件/部分副本保留，源与seal/checkpoint/WAL字节不变，持锁时其他维护和FUSE打开失败，重试保持新目标inode并恢复内容。原有四项损坏修复、六项seal生命周期中断及WAL损坏场景继续通过。
 
 初跑缺失注入直接删除CIFS服务端路径，客户端仍从缓存目录项/延迟句柄读取旧文件，未进入预期的缺失分支；测试改为通过被测CIFS挂载删除并同步目录，暂停阶段继续从服务端观察内容，完整重跑通过。此差异没有通过等待或弱化断言规避，不提供远端删除立即失效、离线后端接管或跨节点fencing。后端目录/控制文件缺失及完整副本丢失重建仍待实现。日志前缀/tmp/opencode/nas-missing-data-；Raft/IPC/C ABI未变。
+
+## 83. 单份当前空WAL的密封重建
+
+显式repair模式允许暂缺一份当前wal-N；普通打开仍直接返回FileNotFound。重建要求两侧data都可打开并独占锁定，两份checkpoint完整一致、序号不落后于Raft，两份seal有效且与该checkpoint匹配，幸存当前WAL存在且为空。随后验证双data完整大小和SHA-256均匹配基线。只要任一data缺失/损坏、两个当前日志都缺失、控制证据不完整或存在pending WAL，就保留缺失状态并拒绝，不把潜在丢失的redo当成空日志。
+
+全部验证通过后以exclusive创建缺失当前日志，sync文件和所在目录，再进入已有恢复流程；不截断、覆盖或替换已存在日志，不写data，不将日志重建与数据修复合并。重建操作在双侧data锁保护下，控制文件字节与逻辑元数据保持不变；历史WAL不参与选择，不隐式收集。新测试故障点mutable_wal_created位于空日志与目录项持久化之后。此处进程死亡后普通打开即可验证并恢复；显式重试同样保留新日志inode。未提供data与WAL联合丢失、整个目录丢失或离线NAS重建。
+
+Debug/Safe各140项通过：两方向空/非空data的单日志重建、普通打开拒绝、data inode/内容和checkpoint/seal字节保留、幸存日志inode保留、重复修复不替换新日志；缺checkpoint/seal、双seal缺失、pending WAL、data损坏/缺失、双日志缺失、seal损坏及元数据领先均不创建目标；活跃持有者阻止创建日志。Access层同时验证逻辑元数据不变及后续读写/同步正常。
+
+本地/双CIFS原生SMB覆盖两个方向下载拒绝、显式重建和再下载。完整WAL FUSE/SMB故障套件新增两方向各一次空日志持久创建后的SIGKILL，验证双data和原控制字节保留、持锁时维护拒绝、普通重开和显式重试成功且日志inode保留。既有四项损坏修复、六项data重建、六项seal生命周期中断及WAL损坏场景继续通过。日志前缀/tmp/opencode/nas-missing-wal-；Raft/IPC/C ABI未变。
+
+本轮还定位并单独提交测试重启时序修复bc0f482：节点进程退出后，测试实际观察到端口需约10–60ms才可重新bind。最初改用临时端口范围外的端口未消除BindFailed，该改动已撤回；最终stop在进程退出后有界验证两个端口可bind/listen（仅EADDRINUSE重试、上限5秒），再允许重启。没有重试启动失败的节点或放宽集群断言。最终双CIFS完整套件和WAL故障回归通过，依赖库未修改。
