@@ -910,6 +910,9 @@ nas_fs:timeout_ms = 500
             ]
             source_inode = replicas[1 - bad].stat().st_ino
             data_inodes = [replica.stat().st_ino for replica in replicas]
+            checkpoint_inodes = [
+                (replica.parent / "checkpoint").stat().st_ino for replica in replicas
+            ]
             missing_file = (
                 replicas[bad]
                 if missing_name == "data"
@@ -947,6 +950,9 @@ nas_fs:timeout_ms = 500
                 )
             smb(f"get vfs-read/upload.dat {directory / 'vfs-rebuilt'}")
             assert (directory / "vfs-rebuilt").read_bytes() == b"repair"
+            assert [
+                (replica.parent / "checkpoint").stat().st_ino for replica in replicas
+            ] == checkpoint_inodes
         paused = worker(url.replace("/write/", "/deadline/"))
         call(paused, "open", flags=os.O_RDONLY)
         os.kill(core.pid, signal.SIGSTOP)

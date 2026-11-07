@@ -227,7 +227,17 @@ pub const Store = struct {
         if (session.end == 0) {
             for (replicas) |replica| if ((try replica.data.stat(io)).size != checkpoint.size) return error.ReplicaSizeMismatch;
         }
-        try publishBoth(io, dirs, checkpoint, identity);
+        const checkpoints = [2]?Checkpoint{ ca, cb };
+        for (dirs, checkpoints) |dir, current| {
+            if (current != null and std.meta.eql(current.?, checkpoint)) {
+                // A previous publisher may have died after rename but before
+                // directory sync. Preserve its inode while completing durability.
+                try objects.syncDir(io, dir);
+                continue;
+            }
+            try publish(io, dir, &checkpoint.encode(identity));
+            @import("repair_fault.zig").checkpoint(.mutable_checkpoint_reconciled);
+        }
         return .{ .session = session, .dirs = dirs, .checkpoint = checkpoint, .seal = seal };
     }
 

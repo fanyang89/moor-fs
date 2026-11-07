@@ -175,10 +175,19 @@ def test_mutable_repair_faults(
         for name, point in (
             (f"wal-{metadata['mutable_file']['next_sequence']}", "mutable_wal_created"),
             ("seal", "mutable_seal_restored"),
+            ("checkpoint", "mutable_checkpoint_reconciled"),
         )
         for missing in range(2)
     )
     for log_name, point, missing in cases:
+        control_inodes = [
+            {
+                file.name: file.stat().st_ino
+                for file in target.parent.iterdir()
+                if file.name != "data"
+            }
+            for target in data
+        ]
         lost_log = client_data[missing].parent / log_name
         lost_log.unlink()
         fd = os.open(lost_log.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -188,7 +197,7 @@ def test_mutable_repair_faults(
             os.close(fd)
         if log_name == "seal":
             assert run("scrub-mutable", endpoints, config, inode)["sealed"]
-        else:
+        elif log_name != "checkpoint":
             failed = run("scrub-mutable", endpoints, config, inode, success=False)
             assert "FileNotFound" in failed.stdout + failed.stderr, failed
         assert not lost_log.exists()
@@ -231,6 +240,11 @@ def test_mutable_repair_faults(
         assert (data[missing].parent / log_name).stat().st_ino == new_inode
         assert (data[1 - missing].parent / log_name).stat().st_ino == source_log_inode
         assert [file.stat().st_ino for file in data] == identities
+        for index, target in enumerate(data):
+            for name, inode_before in control_inodes[index].items():
+                if index == missing and name == log_name:
+                    continue
+                assert (target.parent / name).stat().st_ino == inode_before
         print(
             f"PASS: missing {log_name} on NAS {missing + 1} rebuilt durably before SIGKILL, data/evidence preserved and retry succeeds",
             flush=True,

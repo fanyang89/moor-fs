@@ -40,6 +40,16 @@ const Fixture = struct {
             try t.expectEqualSlices(u8, expected, bytes);
         }
     }
+
+    fn checkpointInodes(self: *Fixture) ![2]u64 {
+        var result: [2]u64 = undefined;
+        for (self.dirs, 0..) |dir, i| {
+            const file = try dir.openFile(t.io, "checkpoint", .{});
+            defer file.close(t.io);
+            result[i] = (try file.stat(t.io)).inode;
+        }
+        return result;
+    }
 };
 
 test "checkpoint rotation preserves data inode and reopens after old WAL collection" {
@@ -658,6 +668,64 @@ test "pending WAL cannot coexist with a valid seal and partial repairs are retry
     try t.expectError(error.SealWithPendingWal, f.open());
 }
 
+test "ordinary and sealed repair opens preserve matching checkpoint inodes" {
+    for ([_]enum { plain, pending, sealed }{ .plain, .pending, .sealed }) |mode| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        switch (mode) {
+            .plain => try store.sync(),
+            .pending => {},
+            .sealed => try store.establishSeal(),
+        }
+        const next = store.checkpoint.next;
+        store.close();
+        const before = try f.checkpointInodes();
+        store = try f.open();
+        store.close();
+        try t.expectEqualDeep(before, try f.checkpointInodes());
+        if (mode == .sealed) {
+            store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, next);
+            store.close();
+            try t.expectEqualDeep(before, try f.checkpointInodes());
+        }
+        try f.expect("baseline");
+    }
+}
+
+test "missing checkpoint recovery preserves its survivor and repeated opens preserve the replacement" {
+    for (0..2) |missing| for ([_]bool{ false, true }) |sealed| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        if (sealed) try store.establishSeal() else try store.sync();
+        const next = store.checkpoint.next;
+        store.close();
+        const before = try f.checkpointInodes();
+        const bytes = try f.dirs[1 - missing].readFileAlloc(t.io, "checkpoint", t.allocator, .limited(128));
+        defer t.allocator.free(bytes);
+        try f.dirs[missing].deleteFile(t.io, "checkpoint");
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, if (sealed) next else null);
+        store.close();
+        const after = try f.checkpointInodes();
+        try t.expectEqual(before[1 - missing], after[1 - missing]);
+        for (f.dirs) |dir| {
+            const restored = try dir.readFileAlloc(t.io, "checkpoint", t.allocator, .limited(128));
+            defer t.allocator.free(restored);
+            try t.expectEqualSlices(u8, bytes, restored);
+        }
+        store = try f.open();
+        defer store.close();
+        try t.expectEqualDeep(after, try f.checkpointInodes());
+        try f.expect("baseline");
+        try store.write("!", 8);
+        try store.sync();
+        try f.expect("baseline!");
+    };
+}
+
 test "checkpoint recovery adopts one published higher checkpoint without replaying old truncates" {
     var f = try Fixture.init();
     defer f.deinit();
@@ -673,8 +741,12 @@ test "checkpoint recovery adopts one published higher checkpoint without replayi
     try checkpoint.writePositionalAll(t.io, old, 0);
     checkpoint.close(t.io);
     store.close();
+    const before = try f.checkpointInodes();
     store = try f.open();
     defer store.close();
+    const after = try f.checkpointInodes();
+    try t.expectEqual(before[0], after[0]);
+    try t.expect(before[1] != after[1]);
     try f.expect("updated");
     try t.expectEqual(@as(u64, 0), store.session.end);
     try store.collect();

@@ -1208,3 +1208,11 @@ repair-mutable补齐缺失的单份seal，但要求两个data均已独占锁定�
 缺失seal时不同时修复损坏data；缺失data或当前WAL的原重建路径仍要求两份seal。普通open/scrub继续允许单seal验证，但不自动补写。补回复用seal的临时文件同步、原子rename、目录同步协议，在双data锁保护下发布，不改动幸存seal、data和逻辑元数据。已有seal无需重写，显式重试保留其inode。故障点mutable_seal_restored位于发布及目录同步后；发布前死亡留下的临时文件不作为有效seal，重试重新验证幸存证据。
 
 Debug/Safe各142项：两方向空/非空文件恢复、普通打开不补写、双data inode/内容及幸存seal保留、重复修复保持新inode、后续写入同步；任一data损坏、缺checkpoint、pending WAL、双seal缺失或Raft序号领先时拒绝并保持缺失状态。既有缺data/WAL与缺seal组合拒绝继续覆盖。真实双CIFS完整WAL故障套件新增两方向持久发布后SIGKILL，验证双data/控制字节、幸存seal inode与逻辑元数据保持，持锁时拒绝其他维护，普通重开与显式重试成功。本地及双CIFS原生SMB覆盖单seal下载、显式恢复和再下载；下载更新atime，维护操作不更新它。日志前缀/tmp/opencode/nas-seal-restore-。整个副本目录、data/WAL联合丢失与离线NAS恢复仍需独立所有权协议，Raft/IPC/C ABI未变。
+
+## 85. checkpoint恢复只补写缺失或落后副本
+
+原Store.openMode在完成WAL恢复后无条件publishBoth，即使双checkpoint完全匹配，也会创建临时文件并替换两侧inode。本轮改为逐侧对比已验证的Checkpoint：缺失或落后副本仍按原临时文件同步、rename、目录同步协议发布；已经匹配的副本只同步目录，保留字节和inode。目录同步不能省略：上次进程可能在rename完成、目录同步完成前死亡，当前看到匹配内容不等于目录项已经持久化。创建与WAL轮换的双侧发布保持不变。
+
+协调仍在双data独占锁、seal验证及WAL恢复之后进行，不根据旧WAL猜测缺失checkpoint，不放宽双checkpoint缺失、损坏记录、同序号大小冲突或缺data/WAL/seal组合的拒绝规则。补写失败继续返回错误；已完成一侧的发布由后续恢复验证，不回滚有效证据。故障点mutable_checkpoint_reconciled位于实际补写文件与目录同步之后，匹配副本不会触发该点。
+
+Debug/Safe各144项通过：普通无seal/有pending WAL/有seal打开均保持匹配checkpoint inode；显式sealed repair同样保持；两个方向普通及sealed repair补写单份缺失checkpoint，保持幸存inode和双侧字节，重复打开保持新inode并可继续写入同步；较高checkpoint恢复只更新旧侧且不重放旧truncate。完整真实双CIFS WAL故障回归新增两方向补写checkpoint后的SIGKILL，验证锁排他、所有幸存控制文件inode与字节、双data及逻辑元数据保持，普通重开和显式重试不替换新inode。现有缺WAL/seal故障用例同步增强为检查所有幸存控制文件inode。本地/双CIFS原生SMB为data/WAL/seal重建及再次下载增加双checkpoint inode不变断言，全部通过。日志前缀/tmp/opencode/nas-checkpoint-reconcile-；Raft/IPC/C ABI未变，离线NAS及整个目录重建仍待独立协议。

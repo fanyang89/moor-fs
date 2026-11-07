@@ -959,6 +959,11 @@ entire contents using bounded buffers. JSON reports `replicas_equal`, size,
 generation, sequence and the observed SHA-256. This is replica agreement, not
 verification against a trusted content digest; identical corruption remains
 undetectable. Opening for maintenance may replay WAL and reconcile checkpoints.
+Recovery now republishes only a missing or older checkpoint, preserving each
+already matching checkpoint's inode and bytes. Matching directories are still
+synced to complete a previous publication interrupted after rename. Missing both
+checkpoints, corrupt records and same-sequence size conflicts remain errors;
+creation and rotation still durably publish both checkpoints.
 The command never migrates immutable files or selects a repair source.
 
 For idle files, `seal-mutable ENDPOINTS CONFIG INODE` explicitly persists a
@@ -1012,6 +1017,8 @@ Two further cases remove an active WAL and kill repair after durable log creatio
 checking unchanged data/control bytes and successful ordinary reopen and repair retry.
 Two seal-restoration cases likewise kill repair after durable publication and
 verify source preservation, ownership exclusion and idempotent retry.
+Two checkpoint-reconciliation cases kill repair after publishing the missing
+copy; reopening preserves that new inode and all surviving control-file inodes.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.
