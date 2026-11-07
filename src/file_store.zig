@@ -179,6 +179,7 @@ pub const Store = struct {
         const seal = try Seal.load(io, dirs, identity, checkpoint.next, checkpoint.size);
         if (repair_sequence != null and seal == null) return error.MissingSeal;
         if (seal) |baseline| {
+            const missing_seal: ?usize = if (repair_sequence == null) null else if (try Seal.read(io, dirs[0], identity) == null) 0 else if (try Seal.read(io, dirs[1], identity) == null) 1 else null;
             // A valid baseline is published only after rotation; writes must
             // durably invalidate both copies before appending any redo record.
             for (logs) |file| if (file) |opened| {
@@ -187,6 +188,12 @@ pub const Store = struct {
             if (missing_log or data[0] == null or data[1] == null) {
                 if (ca == null or cb == null or !std.meta.eql(ca.?, cb.?)) return error.CheckpointDiverged;
                 for (dirs) |dir| if (try Seal.read(io, dir, identity) == null) return error.MissingSeal;
+            }
+            if (missing_seal != null) {
+                if (ca == null or cb == null or !std.meta.eql(ca.?, cb.?)) return error.CheckpointDiverged;
+                // Restore evidence only from two already healthy files, never
+                // combine its reconstruction with a data repair.
+                try baseline.verify(io, .{ data[0].?, data[1].? }, false);
             }
             if (data[0] == null or data[1] == null) {
                 // Rebuild only one absent data file, not missing control files
@@ -207,8 +214,12 @@ pub const Store = struct {
                 try logs[missing].?.sync(io);
                 try objects.syncDir(io, dirs[missing]);
                 @import("repair_fault.zig").checkpoint(.mutable_wal_created);
-            } else {
+            } else if (missing_seal == null) {
                 try baseline.verify(io, .{ data[0].?, data[1].? }, repair_sequence != null);
+            }
+            if (missing_seal) |missing| {
+                try baseline.publish(io, dirs[missing], identity);
+                @import("repair_fault.zig").checkpoint(.mutable_seal_restored);
             }
         }
         const replicas: [2]wal.Replica = .{ .{ .data = data[0].?, .log = logs[0].? }, .{ .data = data[1].?, .log = logs[1].? } };

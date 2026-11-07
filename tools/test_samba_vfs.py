@@ -897,7 +897,7 @@ nas_fs:timeout_ms = 500
             for entry in json.loads((directory / "backends.json").read_text())
         }
         for missing_name, bad in (
-            (name, i) for name in ("data", "wal") for i in range(2)
+            (name, i) for name in ("data", "wal", "seal") for i in range(2)
         ):
             before = client.call({"stat": {"inode": upload}})["attributes"]["node"]
             binding = before["mutable_file"]
@@ -913,10 +913,21 @@ nas_fs:timeout_ms = 500
             missing_file = (
                 replicas[bad]
                 if missing_name == "data"
-                else replicas[bad].parent / f"wal-{binding['next_sequence']}"
+                else replicas[bad].parent
+                / (
+                    "seal"
+                    if missing_name == "seal"
+                    else f"wal-{binding['next_sequence']}"
+                )
             )
             missing_file.unlink()
-            smb(f"get vfs-read/upload.dat {directory / 'vfs-missing'}", success=False)
+            smb(
+                f"get vfs-read/upload.dat {directory / 'vfs-missing'}",
+                success=missing_name == "seal",
+            )
+            if missing_name == "seal":
+                assert (directory / "vfs-missing").read_bytes() == b"repair"
+                before = client.call({"stat": {"inode": upload}})["attributes"]["node"]
             assert not missing_file.exists()
             rebuilt = maintain_upload("repair-mutable")
             assert rebuilt == sealed
@@ -927,7 +938,13 @@ nas_fs:timeout_ms = 500
             assert all(replica.read_bytes() == b"repair" for replica in replicas)
             if missing_name == "wal":
                 assert missing_file.read_bytes() == b""
+            if missing_name != "data":
                 assert [replica.stat().st_ino for replica in replicas] == data_inodes
+            if missing_name == "seal":
+                assert (
+                    missing_file.read_bytes()
+                    == (replicas[1 - bad].parent / "seal").read_bytes()
+                )
             smb(f"get vfs-read/upload.dat {directory / 'vfs-rebuilt'}")
             assert (directory / "vfs-rebuilt").read_bytes() == b"repair"
         paused = worker(url.replace("/write/", "/deadline/"))
@@ -1023,6 +1040,6 @@ nas_fs:timeout_ms = 500
         for log in logs:
             log.close()
     process_log = (state / "process.log").read_text()
-    assert "PANIC" not in process_log and "INTERNAL ERROR" not in process_log, (
-        process_log[-12000:]
-    )
+    assert (
+        "PANIC" not in process_log and "INTERNAL ERROR" not in process_log
+    ), process_log[-12000:]

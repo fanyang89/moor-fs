@@ -135,6 +135,10 @@ Debug/Safe各125项、本地/双CIFS原生SMB及完整WAL故障套件通过。�
 
 leader使用独立namespace_time日志注记，创建时与creation_time共用一次取样；两者均不进入去重摘要，RPC拒绝客户端指定非null值。旧日志仅有creation_time时仍只初始化新节点，不补更新父目录。Debug/Safe各127项、本地/双CIFS原生SMB及完整WAL故障回归通过，覆盖跨目录/大小写改名、冲突失败、删除、重放保留显式时间、事务分配失败回滚及重启持久化。日志前缀：/tmp/opencode/nas-namespace-times-。
 
+### 单份seal缺失的显式恢复
+
+普通SMB读取仍使用幸存seal验证数据，不补写缺失seal；成功读取正常更新atime。关闭句柄后repair-mutable只在双checkpoint一致、双当前WAL为空、双data已完整匹配幸存seal时补回副本，不同时修复损坏数据。发布采用同步临时文件、原子rename和目录同步，保持幸存seal与双data不变。两方向原生SMB下载、显式恢复、元数据保持和再次下载已覆盖；持久发布后的两项SIGKILL验证锁排他、普通重开及重复修复保留inode。日志前缀/tmp/opencode/nas-seal-restore-。
+
 ### 单份当前WAL缺失的显式重建
 
 普通SMB打开/下载仍拒绝缺失当前wal-N。关闭句柄后，repair-mutable只在双data完整匹配两份有效seal、双checkpoint一致、幸存当前WAL为空时创建缺失的空日志。先持有双侧data独占锁并完成全部验证，再exclusive创建、同步文件和目录项；不修改data或同时修复损坏数据。双WAL缺失、pending WAL、data缺失/损坏、seal/checkpoint不完整均拒绝日志创建。

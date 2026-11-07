@@ -1200,3 +1200,11 @@ Debug/Safe各140项通过：两方向空/非空data的单日志重建、普通�
 本地/双CIFS原生SMB覆盖两个方向下载拒绝、显式重建和再下载。完整WAL FUSE/SMB故障套件新增两方向各一次空日志持久创建后的SIGKILL，验证双data和原控制字节保留、持锁时维护拒绝、普通重开和显式重试成功且日志inode保留。既有四项损坏修复、六项data重建、六项seal生命周期中断及WAL损坏场景继续通过。日志前缀/tmp/opencode/nas-missing-wal-；Raft/IPC/C ABI未变。
 
 本轮还定位并单独提交测试重启时序修复bc0f482：节点进程退出后，测试实际观察到端口需约10–60ms才可重新bind。最初改用临时端口范围外的端口未消除BindFailed，该改动已撤回；最终stop在进程退出后有界验证两个端口可bind/listen（仅EADDRINUSE重试、上限5秒），再允许重启。没有重试启动失败的节点或放宽集群断言。最终双CIFS完整套件和WAL故障回归通过，依赖库未修改。
+
+## 84. 单份seal的显式恢复
+
+repair-mutable补齐缺失的单份seal，但要求两个data均已独占锁定且完整大小/SHA-256匹配幸存有效seal、双checkpoint完整一致且不落后于Raft、双当前WAL存在且为空。幸存seal仍须通过身份、摘要、序号及大小验证。单seal可源自发布/失效中断；只有双data仍完整匹配它时才重新发布副本，不能由部分匹配推断没有丢失写入。双seal缺失则无法恢复原基线，继续拒绝。
+
+缺失seal时不同时修复损坏data；缺失data或当前WAL的原重建路径仍要求两份seal。普通open/scrub继续允许单seal验证，但不自动补写。补回复用seal的临时文件同步、原子rename、目录同步协议，在双data锁保护下发布，不改动幸存seal、data和逻辑元数据。已有seal无需重写，显式重试保留其inode。故障点mutable_seal_restored位于发布及目录同步后；发布前死亡留下的临时文件不作为有效seal，重试重新验证幸存证据。
+
+Debug/Safe各142项：两方向空/非空文件恢复、普通打开不补写、双data inode/内容及幸存seal保留、重复修复保持新inode、后续写入同步；任一data损坏、缺checkpoint、pending WAL、双seal缺失或Raft序号领先时拒绝并保持缺失状态。既有缺data/WAL与缺seal组合拒绝继续覆盖。真实双CIFS完整WAL故障套件新增两方向持久发布后SIGKILL，验证双data/控制字节、幸存seal inode与逻辑元数据保持，持锁时拒绝其他维护，普通重开与显式重试成功。本地及双CIFS原生SMB覆盖单seal下载、显式恢复和再下载；下载更新atime，维护操作不更新它。日志前缀/tmp/opencode/nas-seal-restore-。整个副本目录、data/WAL联合丢失与离线NAS恢复仍需独立所有权协议，Raft/IPC/C ABI未变。

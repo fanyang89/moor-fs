@@ -470,6 +470,85 @@ test "missing WAL reconstruction refuses incomplete evidence or damaged data wit
     };
 }
 
+test "explicit repair restores one seal only after verifying both complete replicas" {
+    for (0..2) |missing| for ([_][]const u8{ "", "baseline" }) |content| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write(content, 0);
+        try store.establishSeal();
+        const baseline = store.seal.?;
+        const inodes = [2]u64{ (try store.session.replicas[0].data.stat(t.io)).inode, (try store.session.replicas[1].data.stat(t.io)).inode };
+        store.close();
+        try f.dirs[missing].deleteFile(t.io, "seal");
+        store = try f.open();
+        store.close();
+        try t.expectEqual(null, try Seal.read(t.io, f.dirs[missing], identity));
+        const source = try f.dirs[1 - missing].openFile(t.io, "seal", .{});
+        defer source.close(t.io);
+        const source_inode = (try source.stat(t.io)).inode;
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, baseline.next);
+        store.close();
+        const restored = try f.dirs[missing].openFile(t.io, "seal", .{});
+        defer restored.close(t.io);
+        const restored_inode = (try restored.stat(t.io)).inode;
+        store = try files.Store.openMode(t.allocator, t.io, identity, f.dirs, baseline.next);
+        defer store.close();
+        for (f.dirs, store.session.replicas, inodes, 0..) |dir, replica, inode, i| {
+            try t.expectEqualDeep(baseline, (try Seal.read(t.io, dir, identity)).?);
+            try t.expectEqual(inode, (try replica.data.stat(t.io)).inode);
+            const file = try dir.openFile(t.io, "seal", .{});
+            defer file.close(t.io);
+            try t.expectEqual(if (i == missing) restored_inode else source_inode, (try file.stat(t.io)).inode);
+        }
+        try f.expect(content);
+        try store.write("resumed", 0);
+        try store.sync();
+    };
+}
+
+test "missing seal reconstruction refuses damaged data and incomplete checkpoints" {
+    for (0..2) |missing| for (0..6) |damage| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        var store = try f.create();
+        try store.write("baseline", 0);
+        try store.establishSeal();
+        const next = store.checkpoint.next;
+        store.close();
+        try f.dirs[missing].deleteFile(t.io, "seal");
+        if (damage < 2) {
+            const file = try f.dirs[damage].openFile(t.io, "data", .{ .mode = .read_write });
+            defer file.close(t.io);
+            try file.writePositionalAll(t.io, "X", 0);
+        } else if (damage == 2) {
+            try f.dirs[missing].deleteFile(t.io, "checkpoint");
+        } else if (damage == 3) {
+            var buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&buffer, "wal-{d}", .{next});
+            const file = try f.dirs[missing].openFile(t.io, name, .{ .mode = .read_write });
+            defer file.close(t.io);
+            try file.writePositionalAll(t.io, "X", 0);
+        } else if (damage == 4) {
+            try f.dirs[1 - missing].deleteFile(t.io, "seal");
+        }
+        const expected = switch (damage) {
+            0, 1 => error.SealedContentMismatch,
+            2 => error.CheckpointDiverged,
+            3 => error.SealWithPendingWal,
+            4 => error.MissingSeal,
+            else => error.StaleFileState,
+        };
+        try t.expectError(expected, files.Store.openMode(t.allocator, t.io, identity, f.dirs, next + @intFromBool(damage == 5)));
+        try t.expectEqual(null, try Seal.read(t.io, f.dirs[missing], identity));
+        for (f.dirs, 0..) |dir, i| {
+            const bytes = try dir.readFileAlloc(t.io, "data", t.allocator, .limited(64));
+            defer t.allocator.free(bytes);
+            try t.expectEqualStrings(if (i == damage) "Xaseline" else "baseline", bytes);
+        }
+    };
+}
+
 test "sealed identical corruption is rejected and cannot be resealed or repaired" {
     var f = try Fixture.init();
     defer f.deinit();

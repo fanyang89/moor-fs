@@ -979,8 +979,15 @@ complete data files already match both seals, both checkpoints agree, and the
 remaining active WAL exists and is empty. It exclusively creates and syncs the
 empty log and its directory entry without modifying data. It does not combine
 WAL reconstruction with data repair, recreate two absent logs, or discard pending
-redo. Ordinary open/scrub still refuses a missing WAL. Other missing control files
-and complete replica-directory loss remain outside this reconstruction path.
+redo. Ordinary open/scrub still refuses a missing WAL.
+
+Explicit repair also restores one missing seal when both complete data files
+already match the surviving seal, both checkpoints agree, and both current WALs
+exist and are empty. Publication uses a synced temporary file, atomic rename and
+directory sync. It preserves the surviving seal and never combines seal
+reconstruction with data repair. Ordinary open/scrub can use a single seal but
+does not restore its missing copy. Two missing seals cannot recover the old
+baseline. Complete replica-directory loss remains unsupported.
 
 Before the next write/truncate, both seal files are durably removed; ordinary
 fsync does not rebuild a whole-file seal. Re-establish the baseline explicitly
@@ -1003,6 +1010,8 @@ retry. They also remove one data file and kill rebuilding after durable target
 creation, first copy and destination fsync in both directions (six additional cases).
 Two further cases remove an active WAL and kill repair after durable log creation,
 checking unchanged data/control bytes and successful ordinary reopen and repair retry.
+Two seal-restoration cases likewise kill repair after durable publication and
+verify source preservation, ownership exclusion and idempotent retry.
 Normal builds ignore these stop points even if their environment
 variable is set. Process-death coverage does not establish hardware-power-loss
 durability.

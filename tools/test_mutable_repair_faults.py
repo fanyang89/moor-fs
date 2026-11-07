@@ -168,10 +168,17 @@ def test_mutable_repair_faults(
                 flush=True,
             )
 
-    # One missing empty active log can be recreated only while both complete
-    # files still match both seals. Its publication must survive process death.
-    log_name = f"wal-{metadata['mutable_file']['next_sequence']}"
-    for missing in range(2):
+    # Control-file reconstruction must preserve all data and survive death
+    # after durable publication, without replacing the surviving evidence.
+    cases = (
+        (name, point, missing)
+        for name, point in (
+            (f"wal-{metadata['mutable_file']['next_sequence']}", "mutable_wal_created"),
+            ("seal", "mutable_seal_restored"),
+        )
+        for missing in range(2)
+    )
+    for log_name, point, missing in cases:
         lost_log = client_data[missing].parent / log_name
         lost_log.unlink()
         fd = os.open(lost_log.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -179,20 +186,23 @@ def test_mutable_repair_faults(
             os.fsync(fd)
         finally:
             os.close(fd)
-        failed = run("scrub-mutable", endpoints, config, inode, success=False)
-        assert "FileNotFound" in failed.stdout + failed.stderr, failed
+        if log_name == "seal":
+            assert run("scrub-mutable", endpoints, config, inode)["sealed"]
+        else:
+            failed = run("scrub-mutable", endpoints, config, inode, success=False)
+            assert "FileNotFound" in failed.stdout + failed.stderr, failed
         assert not lost_log.exists()
         source_log_inode = (data[1 - missing].parent / log_name).stat().st_ino
-        log = directory / f"mutable-wal-rebuild-{missing}.log"
+        log = directory / f"mutable-{log_name}-rebuild-{missing}.log"
         with log.open("w") as output:
             process = subprocess.Popen(
                 [executable, "repair-mutable", endpoints, str(config), str(inode)],
                 stdout=output,
                 stderr=output,
-                env={**os.environ, "NAS_FS_REPAIR_STOP": "mutable_wal_created"},
+                env={**os.environ, "NAS_FS_REPAIR_STOP": point},
             )
         try:
-            wait_stopped(process, "mutable_wal_created", log)
+            wait_stopped(process, point, log)
             new_inode = (data[missing].parent / log_name).stat().st_ino
             assert all(file.read_bytes() == content for file in data)
             assert [file.stat().st_ino for file in data] == identities
@@ -222,6 +232,6 @@ def test_mutable_repair_faults(
         assert (data[1 - missing].parent / log_name).stat().st_ino == source_log_inode
         assert [file.stat().st_ino for file in data] == identities
         print(
-            f"PASS: missing active WAL on NAS {missing + 1} rebuilt durably before SIGKILL, data/evidence preserved and retry succeeds",
+            f"PASS: missing {log_name} on NAS {missing + 1} rebuilt durably before SIGKILL, data/evidence preserved and retry succeeds",
             flush=True,
         )
